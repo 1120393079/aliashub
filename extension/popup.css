@@ -1,0 +1,18 @@
+* { box-sizing: border-box; }
+body { width: 320px; margin: 0; background: #f4f6f5; color: #202522; font: 13px "Segoe UI", sans-serif; }
+header { height: 64px; display: flex; align-items: center; gap: 9px; padding: 0 14px; border-bottom: 1px solid #dde3df; background: white; }
+header img { width: 34px; height: 34px; }
+header span { display: grid; flex: 1; }
+header b { font-size: 14px; }
+header small { color: #77817c; font-size: 10px; }
+header i { width: 8px; height: 8px; border-radius: 50%; background: #aab2ae; }
+header i.connected { background: #15976a; box-shadow: 0 0 0 4px #15976a20; }
+main { display: grid; gap: 11px; padding: 14px; }
+label { display: grid; gap: 5px; }
+label span { font-size: 11px; font-weight: 600; }
+input { width: 100%; height: 36px; border: 1px solid #cad3ce; border-radius: 6px; padding: 0 9px; outline: none; }
+input:focus { border-color: #15976a; box-shadow: 0 0 0 3px #15976a18; }
+button { height: 36px; border: 1px solid #15976a; border-radius: 6px; background: #15976a; color: white; font-weight: 600; cursor: pointer; }
+button.secondary { border-color: #cad3ce; background: white; color: #202522; }
+#message { min-height: 16px; margin: 0; color: #68736d; font-size: 10px; }
+#message.error { color: #c94f49; }

@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>AliasHub Connector</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <header><img src="icons/icon-48.png" alt=""><span><b>AliasHub</b><small>Outlook Connector</small></span><i id="state"></i></header>
+    <main>
+      <label><span>AliasHub 地址</span><input id="baseUrl" type="url"></label>
+      <label><span>配对密钥</span><input id="apiKey" type="password"></label>
+      <p id="message"></p>
+      <button id="save">保存并测试</button>
+      <button id="open" class="secondary">打开 Microsoft 别名页</button>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

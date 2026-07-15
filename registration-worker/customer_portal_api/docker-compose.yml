@@ -1,0 +1,17 @@
+services:
+  customer-portal-api:
+    build:
+      context: ..
+      dockerfile: customer_portal_api/Dockerfile
+    ports:
+      - "127.0.0.1:${PORTAL_PORT:-8100}:8100"
+    environment:
+      PORTAL_JWT_SECRET: ${PORTAL_JWT_SECRET:?set PORTAL_JWT_SECRET in customer_portal_api/.env}
+      PORTAL_ADMIN_USERNAME: ${PORTAL_ADMIN_USERNAME:-admin}
+      PORTAL_ADMIN_PASSWORD: ${PORTAL_ADMIN_PASSWORD:?set PORTAL_ADMIN_PASSWORD in customer_portal_api/.env}
+      PORTAL_ADMIN_EMAIL: ${PORTAL_ADMIN_EMAIL:-admin@example.com}
+      PORTAL_ACCESS_TOKEN_TTL_SECONDS: ${PORTAL_ACCESS_TOKEN_TTL_SECONDS:-7200}
+      PORTAL_REFRESH_TOKEN_TTL_SECONDS: ${PORTAL_REFRESH_TOKEN_TTL_SECONDS:-2592000}
+      PORTAL_CORS_ORIGINS: ${PORTAL_CORS_ORIGINS:-http://127.0.0.1:8100}
+      PORTAL_START_SOLVER: ${PORTAL_START_SOLVER:-false}
+      ACCOUNT_MANAGER_DATABASE_URL: ${ACCOUNT_MANAGER_DATABASE_URL:-sqlite:////app/account_manager.db}

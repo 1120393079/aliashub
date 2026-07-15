@@ -1,0 +1,271 @@
+{
+  "fixture": {
+    "kind": "TEST_DETERMINISTIC_SYNTHETIC",
+    "version": 1,
+    "containsObservedData": false
+  },
+  "p1": {
+    "url": "TEST_P1_ENDPOINT",
+    "body": {
+      "appId": "IWC_LOGIN_APP",
+      "correlationId": "TEST_EC_TOKEN",
+      "payload": {
+        "trt": false,
+        "navigator": {
+          "appName": "TEST_BROWSER",
+          "appVersion": "TEST_BROWSER_VERSION",
+          "buildID": "TEST_BUILD_ID",
+          "cookieEnabled": true,
+          "language": "en-US",
+          "onLine": true,
+          "oscpu": "TEST_OS",
+          "platform": "TEST_PLATFORM",
+          "product": "TEST_PRODUCT",
+          "productSub": "TEST_PRODUCT_SUB",
+          "userAgent": "TEST_SYNTHETIC_USER_AGENT",
+          "vendor": "TEST_VENDOR",
+          "vendorSub": "TEST_VENDOR_SUB",
+          "igt": false
+        },
+        "screen": {
+          "colorDepth": 24,
+          "pixelDepth": 24,
+          "height": 768,
+          "width": 1024,
+          "availHeight": 720,
+          "availWidth": 1024
+        },
+        "window": {
+          "outerHeight": 700,
+          "outerWidth": 1000,
+          "innerHeight": 640,
+          "innerWidth": 960,
+          "devicePixelRatio": 1
+        },
+        "referer": "https://fixture.example.test/collector",
+        "URL": "https://fixture.example.test/checkout?token=TEST_EC_TOKEN",
+        "rvr": "TEST_RVR",
+        "activeXDefined": false,
+        "flashVersion": {
+          "major": 0,
+          "minor": 0,
+          "release": 0
+        },
+        "lst": {
+          "ddiLst": false,
+          "ddi": null,
+          "v": null,
+          "vf": null
+        },
+        "tz": 0,
+        "tzName": "TEST_TIMEZONE",
+        "dst": false,
+        "wit": 0,
+        "time": 0,
+        "pt1": {
+          "i": "TEST_PT1_I",
+          "pp1": "TEST_PT1_PP1",
+          "cd1": "TEST_PT1_CD1",
+          "tb": 0,
+          "sf": "TEST_PT1_SF",
+          "ph1": "TEST_PT1_PH1"
+        },
+        "asynchk": {
+          "ph2": "TEST_ASYNC_PH2",
+          "o": [
+            "TEST_ASYNC_0"
+          ]
+        },
+        "hlb": {
+          "wd": false,
+          "chromeWSRT": false,
+          "plgSize": 0,
+          "lgSize": 1
+        }
+      }
+    }
+  },
+  "p2": {
+    "url": "TEST_P2_ENDPOINT",
+    "body": {
+      "appId": "IWC_LOGIN_APP",
+      "correlationId": "TEST_EC_TOKEN",
+      "payload": {
+        "URL": "https://fixture.example.test/checkout?token=TEST_EC_TOKEN",
+        "data": {
+          "plugins": [
+            {
+              "mT": [],
+              "n": "TEST_PLUGIN",
+              "v": "TEST_PLUGIN_VERSION",
+              "fn": "TEST_PLUGIN_FILE",
+              "d": "TEST_PLUGIN_DESCRIPTION"
+            }
+          ],
+          "cv": {
+            "h": "TEST_CANVAS_HASH",
+            "f": 0,
+            "t": "TEST_CANVAS_TEXT"
+          },
+          "vm": {
+            "cores": 1,
+            "gpu": {
+              "vendor": "TEST_GPU_VENDOR",
+              "renderer": "TEST_GPU_RENDERER"
+            },
+            "perfNav": {
+              "navigationStart": 0,
+              "fetchStart": 0,
+              "requestStart": 0,
+              "responseEnd": 0,
+              "domComplete": 0,
+              "loadEventEnd": 0
+            },
+            "timing": {
+              "cores": "TEST_TIMING_CORES",
+              "gpu": "TEST_TIMING_GPU",
+              "jsMem": "TEST_TIMING_MEMORY",
+              "perfNav": "TEST_TIMING_NAVIGATION",
+              "total": "TEST_TIMING_TOTAL"
+            }
+          },
+          "fts": {
+            "screenAngle": 0,
+            "screenType": "TEST_SCREEN_TYPE",
+            "mime": [],
+            "buildID": "TEST_BUILD_ID",
+            "wl": 0,
+            "wd": false,
+            "moz": false,
+            "err": "TEST_NO_ERROR",
+            "screenOrder": "TEST_SCREEN_ORDER",
+            "screenOver": "TEST_SCREEN_OVER",
+            "navOver": "TEST_NAV_OVER"
+          }
+        },
+        "sc": {
+          "httpCookie": false,
+          "sc-lst": null
+        },
+        "pvc": 0,
+        "pt2": {
+          "pp2": "TEST_PT2_PP2",
+          "cd2": "TEST_PT2_CD2",
+          "cp": "TEST_PT2_CP"
+        }
+      }
+    }
+  },
+  "pa": {
+    "url": "TEST_PA_ENDPOINT",
+    "body": {
+      "appId": "IWC_LOGIN_APP",
+      "correlationId": "TEST_EC_TOKEN",
+      "payload": [
+        {
+          "dfp": [
+            {
+              "d": {
+                "fixtureMarker": "TEST_SYNTHETIC_DFP",
+                "ttDfp": 0,
+                "pdVer": "TEST_DFP_VERSION",
+                "strg": {
+                  "attr": {
+                    "lStrg": false,
+                    "iDb": false,
+                    "sStrg": false,
+                    "oDb": false
+                  },
+                  "ttStrg": 0
+                },
+                "wGlCnv": {
+                  "attr": {
+                    "wbCnv": {
+                      "data": {
+                        "cvSig": "TEST_CANVAS_SIGNATURE",
+                        "ttCvSig": 0,
+                        "wndg": false
+                      }
+                    },
+                    "wbBsc": {
+                      "data": {
+                        "version": "TEST_WEBGL_VERSION",
+                        "vendor": "TEST_WEBGL_VENDOR",
+                        "vendorUnmasked": "TEST_WEBGL_VENDOR_UNMASKED",
+                        "renderer": "TEST_WEBGL_RENDERER",
+                        "rendererUnmasked": "TEST_WEBGL_RENDERER_UNMASKED",
+                        "shadingLanguageVersion": "TEST_SHADING_VERSION"
+                      },
+                      "ttWbBsc": 0
+                    },
+                    "wbExt": {
+                      "data": {
+                        "hash": "TEST_WEBGL_EXTENSION_HASH",
+                        "ttWbExt": 0
+                      }
+                    },
+                    "ttWebCnv": 0
+                  }
+                },
+                "auCtx": {
+                  "attr": {
+                    "auVal": "TEST_AUDIO_VALUE",
+                    "ttAuCtx": 0
+                  }
+                },
+                "devMd": {
+                  "attr": {
+                    "auInp": [
+                      {
+                        "deviceId": "TEST_DEVICE_ID",
+                        "kind": "TEST_DEVICE_KIND",
+                        "label": "TEST_DEVICE_LABEL",
+                        "groupId": "TEST_DEVICE_GROUP"
+                      }
+                    ]
+                  },
+                  "ttDevMd": 0
+                },
+                "mth": {
+                  "attr": {
+                    "acos": "TEST_MATH_ACOS",
+                    "asin": "TEST_MATH_ASIN",
+                    "atan": "TEST_MATH_ATAN",
+                    "cos": "TEST_MATH_COS",
+                    "sin": "TEST_MATH_SIN",
+                    "tan": "TEST_MATH_TAN"
+                  },
+                  "ttMth": 0
+                },
+                "pClkMsr": {
+                  "attr": {
+                    "value": 0
+                  },
+                  "ttPClkMsr": 0
+                },
+                "fpTrck": {
+                  "data": {
+                    "data": {
+                      "fcp": "TEST_FCP",
+                      "fcp_attr": "TEST_FCP_ATTR",
+                      "fid": "TEST_FID",
+                      "fid_attr": "TEST_FID_ATTR",
+                      "lcp": "TEST_LCP",
+                      "lcp_attr": "TEST_LCP_ATTR",
+                      "e": "TEST_EVENT"
+                    }
+                  },
+                  "ttFpti": 0
+                }
+              },
+              "corrId": "TEST_EC_TOKEN",
+              "sourceId": "IWC_LOGIN_APP",
+              "slt": 0,
+              "clt": 0
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

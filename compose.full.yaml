@@ -1,0 +1,36 @@
+services:
+  aliashub:
+    environment:
+      REGISTRATION_SERVICE_URL: http://registration-worker:8000
+      REGISTRATION_SERVICE_TOKEN: "${REGISTRATION_SERVICE_TOKEN:?run ./scripts/setup-local.sh --full first}"
+      REGISTRATION_MAILBOX_URL: http://aliashub:4180
+      REGISTRATION_BROWSER_URL: "${REGISTRATION_BROWSER_URL:-http://127.0.0.1:${REGISTRATION_BROWSER_PORT:-6080}/vnc.html?autoconnect=true&resize=scale&path=websockify}"
+    depends_on:
+      registration-worker:
+        condition: service_healthy
+
+  registration-worker:
+    build:
+      context: ./registration-worker
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    shm_size: "1gb"
+    env_file:
+      - path: ./registration-worker/.env
+        required: false
+    environment:
+      DISPLAY: ":99"
+      ACCOUNT_MANAGER_DATABASE_URL: sqlite:////app/data/account_manager.db
+      APP_PASSWORD: "${REGISTRATION_SERVICE_TOKEN:?run ./scripts/setup-local.sh --full first}"
+      VNC_PASSWORD: "${REGISTRATION_VNC_PASSWORD:?run ./scripts/setup-local.sh --full first}"
+    ports:
+      - "127.0.0.1:${REGISTRATION_WORKER_PORT:-8000}:8000"
+      - "127.0.0.1:${REGISTRATION_BROWSER_PORT:-6080}:6080"
+    volumes:
+      - ./data/registration-worker:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/health"]
+      interval: 20s
+      timeout: 5s
+      start_period: 60s
+      retries: 10

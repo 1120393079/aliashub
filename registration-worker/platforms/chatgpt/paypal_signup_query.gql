@@ -1,0 +1,174 @@
+mutation SignUpNewMemberMutation($bank: BankAccountInput, $billingAddress: AddressInput, $card: CardInput, $contentIdentifier: String, $country: CountryCodes, $countrySpecificFirstName: String, $countrySpecificLastName: String, $crsData: CommonReportingStandardsInput, $currencyConversionType: CheckoutCurrencyConversionType, $dateOfBirth: DateOfBirth, $email: String!, $firstName: String!, $gender: Gender, $identityDocument: IdentityDocumentInput, $lastName: String!, $middleName: String, $marketingOptOut: Boolean, $nationality: CountryCodes, $occupation: Occupation, $password: String, $phone: PhoneInput!, $placeOfBirth: CountryCodes, $secondaryIdentityDocument: IdentityDocumentInput, $selectedInstallmentOption: InstallmentsInput, $shareAddressWithDonatee: Boolean, $shippingAddress: AddressInput, $supportedThreeDsExperiences: [ThreeDSPaymentExperience], $token: String!, $residentialAddress: AddressInput, $isSignupIncentiveOptIn: Boolean, $isSignupIncentiveOptInStretch: Boolean, $legalAgreements: LegalAgreementsInput, $collectedConsents: [CollectedConsent]) {
+  onboardAccount: signUpNewMember(
+    bank: $bank
+    billingAddress: $billingAddress
+    card: $card
+    contentIdentifier: $contentIdentifier
+    countrySpecificFirstName: $countrySpecificFirstName
+    countrySpecificLastName: $countrySpecificLastName
+    country: $country
+    crsData: $crsData
+    currencyConversionType: $currencyConversionType
+    dateOfBirth: $dateOfBirth
+    email: $email
+    firstName: $firstName
+    gender: $gender
+    identityDocument: $identityDocument
+    lastName: $lastName
+    middleName: $middleName
+    marketingOptOut: $marketingOptOut
+    nationality: $nationality
+    occupation: $occupation
+    password: $password
+    phone: $phone
+    placeOfBirth: $placeOfBirth
+    secondaryIdentityDocument: $secondaryIdentityDocument
+    selectedInstallmentOption: $selectedInstallmentOption
+    shareAddressWithDonatee: $shareAddressWithDonatee
+    shippingAddress: $shippingAddress
+    token: $token
+    residentialAddress: $residentialAddress
+    isSignupIncentiveOptIn: $isSignupIncentiveOptIn
+    isSignupIncentiveOptInStretch: $isSignupIncentiveOptInStretch
+    legalAgreements: $legalAgreements
+    collectedConsents: $collectedConsents
+  ) {
+    ...buyer
+    flags {
+      is3DSecureRequired
+      __typename
+    }
+    ...fundingOptions
+    paymentContingencies {
+      ...threeDomainSecure
+      ...threeDSContingencyData
+      __typename
+    }
+    __typename
+  }
+}
+
+fragment buyer on CheckoutSession {
+  buyer {
+    auth {
+      accessToken
+      __typename
+    }
+    userId
+    __typename
+  }
+  __typename
+}
+
+fragment fundingOptions on CheckoutSession {
+  fundingOptions {
+    allPlans {
+      fundingSources {
+        fundingInstrument {
+          id
+          __typename
+        }
+        amount {
+          currencyCode
+          currencyValue
+          __typename
+        }
+        __typename
+      }
+      fundingContingencies {
+        ... on OpenBankingContingency {
+          encryptedId
+          contingencyReasons
+          contingencyType
+          __typename
+        }
+        __typename
+      }
+      __typename
+    }
+    fundingInstrument {
+      id
+      lastDigits
+      name
+      nameDescription
+      type
+      __typename
+    }
+    __typename
+  }
+  __typename
+}
+
+fragment threeDomainSecure on PaymentContingencies {
+  threeDomainSecure(experiences: $supportedThreeDsExperiences) {
+    status
+    redirectUrl {
+      href
+      __typename
+    }
+    method
+    parameter
+    experience
+    requestParams {
+      key
+      value
+      __typename
+    }
+    __typename
+  }
+  __typename
+}
+
+fragment threeDSContingencyData on PaymentContingencies {
+  threeDSContingencyData {
+    name
+    causeName
+    resolution {
+      type
+      resolutionName
+      paymentCard {
+        billingAddress {
+          line1
+          line2
+          city
+          state
+          country
+          postalCode
+          __typename
+        }
+        expireYear
+        expireMonth
+        currencyCode
+        cardProductClass
+        id
+        encryptedNumber
+        type
+        number
+        bankIdentificationNumber
+        __typename
+      }
+      contingencyContext {
+        deviceDataCollectionUrl {
+          href
+          __typename
+        }
+        jwtSpecification {
+          jwtDuration
+          jwtIssuer
+          jwtOrgUnitId
+          type
+          __typename
+        }
+        authenticationProvider
+        cardBrandProcessed
+        reason
+        referenceId
+        source
+        __typename
+      }
+      __typename
+    }
+    __typename
+  }
+  __typename
+}

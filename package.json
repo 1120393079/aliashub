@@ -1,0 +1,49 @@
+{
+  "name": "aliashub",
+  "version": "1.0.0",
+  "description": "Self-hosted email alias and verification-code hub with optional account registration and SUB2-compatible integration.",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1120393079/aliashub.git"
+  },
+  "bugs": {
+    "url": "https://github.com/1120393079/aliashub/issues"
+  },
+  "homepage": "https://github.com/1120393079/aliashub#readme",
+  "keywords": [
+    "email-alias",
+    "self-hosted",
+    "oauth",
+    "verification-code"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c green,cyan \"node --watch server/index.js\" \"vite --host 0.0.0.0\"",
+    "build": "vite build",
+    "build:local": "VITE_BASE_PATH=/ vite build",
+    "package:extension": "bash scripts/package-extension.sh",
+    "package:local": "bash scripts/package-local-release.sh",
+    "setup:local": "bash scripts/setup-local.sh --native",
+    "setup:full": "bash scripts/setup-local.sh --full",
+    "start": "node server/index.js",
+    "test": "ADMIN_PASSWORD='' node --test server/tests/*.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "vite": "^6.4.3"
+  }
+}

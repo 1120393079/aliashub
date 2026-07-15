@@ -1,0 +1,22 @@
+name: aliashub-local
+
+services:
+  aliashub:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 4180
+      DATA_DIR: /app/data
+      DATABASE_PATH: /app/data/outlook-alias-hub.db
+      PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-http://127.0.0.1:4180}"
+    ports:
+      - "127.0.0.1:${PORT:-4180}:4180"
+    volumes:
+      - ./data:/app/data

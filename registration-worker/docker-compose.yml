@@ -1,0 +1,16 @@
+services:
+  app:
+    build: .
+    ports:
+      - "127.0.0.1:${PORT:-8000}:8000"   # FastAPI / Web UI
+      - "127.0.0.1:6080:6080"   # noVNC (headed 浏览器预览)
+    environment:
+      - DISPLAY=:99
+      - ACCOUNT_MANAGER_DATABASE_URL=sqlite:////app/data/account_manager.db
+      # Values are loaded from the untracked .env file. Public deployments
+      # must set both passwords before exposing the service through a proxy.
+      - APP_PASSWORD=${APP_PASSWORD:-}
+      - VNC_PASSWORD=${VNC_PASSWORD:-}
+    volumes:
+      - ./data:/app/data   # 持久化 SQLite 数据库
+    restart: unless-stopped
