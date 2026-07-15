@@ -65,4 +65,5 @@ jobs:
           tests/test_chatgpt_password_settings.py
           tests/test_task_proxy_logging.py
           tests/test_api_proxies.py
+          tests/test_validity_recovery.py
           tests/test_platform_action_task.py

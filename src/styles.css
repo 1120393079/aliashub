@@ -186,6 +186,11 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .registration-account-meta b, .registration-account-meta small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .registration-account-meta b { font-size: 10px; }
 .registration-account-meta small { margin-top: 4px; color: var(--text-faint); font-size: 8px; }
+.registration-account-group { display: flex; align-items: center; gap: 5px; }
+.registration-account-group > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.registration-account-group > em, .registration-auto-group-preview > em { flex: 0 0 auto; border: 1px solid color-mix(in srgb, var(--purple) 28%, var(--line)); border-radius: 999px; background: color-mix(in srgb, var(--purple) 8%, transparent); padding: 1px 5px; color: var(--purple); font-size: 7px; font-style: normal; font-weight: 700; line-height: 1.2; }
+.registration-auto-group-preview { display: flex; align-items: center; gap: 7px; margin-top: -3px; border: 1px dashed var(--line); border-radius: 6px; background: var(--surface-2); padding: 8px 10px; color: var(--text-faint); font-size: 9px; }
+.registration-auto-group-preview b { min-width: 0; flex: 1; overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
 .registration-email-button { display: flex; align-items: center; gap: 6px; max-width: 290px; overflow: hidden; border: 0; background: transparent; padding: 0; color: var(--green-dark); font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .registration-email-button svg { flex: 0 0 auto; }
 .registration-source { display: block; max-width: 290px; margin-top: 4px; overflow: hidden; color: var(--text-faint); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
@@ -195,11 +200,16 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .registration-identity small { margin-top: 4px; color: var(--text-faint); font-size: 8px; }
 .registration-status { display: grid; justify-items: start; gap: 4px; }
 .registration-status small { color: var(--coral); font-size: 8px; white-space: nowrap; }
-.registration-account-signal { min-width: 116px; display: grid; justify-items: start; gap: 4px; }
+.registration-account-signal { min-width: 138px; display: grid; justify-items: start; gap: 4px; }
 .registration-account-signal > div { min-width: 0; display: flex; align-items: center; gap: 7px; }
-.registration-account-type { max-width: 96px; overflow: hidden; color: var(--text); font-size: 9px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
-.registration-account-signal > small { max-width: 150px; overflow: hidden; color: var(--text-faint); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.registration-account-type { max-width: 130px; overflow: hidden; color: var(--text); font-size: 9px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.registration-account-signal > small { display: -webkit-box; max-width: 220px; overflow: hidden; color: var(--text-faint); font-size: 8px; line-height: 1.35; -webkit-box-orient: vertical; -webkit-line-clamp: 2; white-space: normal; }
+.registration-account-signal > small.check-failed { color: var(--amber); }
+.registration-account-signal > small.check-invalid { color: var(--coral); }
+.registration-account-signal > small.check-detail { color: var(--text-soft); }
+.registration-account-signal > small.check-meta { max-width: 240px; color: var(--text-faint); -webkit-line-clamp: 1; }
 .registration-account-signal.compact { min-width: 0; flex: 1; }
+.registration-account-signal.compact > small { max-width: 100%; }
 .registration-nfapi-status { display: grid; justify-items: start; gap: 3px; max-width: 150px; }
 .registration-nfapi-status code { color: var(--text-faint); font-size: 8px; }
 .registration-nfapi-status small { max-width: 145px; overflow: hidden; color: var(--amber); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }

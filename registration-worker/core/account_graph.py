@@ -123,18 +123,18 @@ def _normalize_plan_state(value: Any) -> str:
         return "free"
     if raw in {"eligible", "trial_eligible"}:
         return "eligible"
-    subscribed_hints = (
-        "pro",
-        "plus",
-        "premium",
-        "paid",
-        "student",
-        "team",
-        "business",
-        "enterprise",
-        "member",
-    )
-    if any(token in raw for token in subscribed_hints):
+    compact = "".join(character for character in raw if character.isalnum())
+    subscribed_values = {
+        "subscribed", "active", "member", "paid",
+        "go", "goplan", "chatgptgo", "chatgptgoplan",
+        "plus", "premium", "chatgptplus", "chatgptplusplan",
+        "pro", "proplan", "chatgptpro", "chatgptproplan",
+        "team", "teamplan", "chatgptteam", "chatgptteamplan",
+        "business", "businessplan", "chatgptbusiness", "chatgptbusinessplan",
+        "enterprise", "enterpriseplan", "chatgptenterprise", "chatgptenterpriseplan",
+        "edu", "eduplan", "chatgptedu", "chatgpteduplan",
+    }
+    if compact in subscribed_values:
         return "subscribed"
     return raw
 
@@ -200,17 +200,19 @@ def _derive_display_status(
 
 def recover_lifecycle_status_for_valid_account(graph: dict[str, Any]) -> str:
     """Recover the active lifecycle state for an account that re-validated."""
-    lifecycle_status = _text(
-        graph.get("lifecycle_status") or _safe_dict(graph.get("overview")).get("lifecycle_status")
-    )
-    if lifecycle_status and lifecycle_status != "invalid":
-        return lifecycle_status
-
     plan_state = _normalize_plan_state(
-        graph.get("plan_state") or _safe_dict(graph.get("overview")).get("plan_state")
+        _safe_dict(graph.get("overview")).get("plan_state") or graph.get("plan_state")
     )
     if plan_state in {"trial", "subscribed", "expired"}:
         return plan_state
+    if plan_state in {"free", "eligible"}:
+        return "registered"
+
+    lifecycle_status = _text(
+        graph.get("lifecycle_status") or _safe_dict(graph.get("overview")).get("lifecycle_status")
+    )
+    if lifecycle_status and lifecycle_status not in {"invalid", "expired"}:
+        return lifecycle_status
     return "registered"
 
 

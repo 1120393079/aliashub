@@ -118,12 +118,18 @@ test("registration client refreshes only normalized ChatGPT account ids in one b
     },
   });
 
-  const result = await client.refreshAccountPlans([7, "8", 7, 0, -1, "invalid"]);
+  const result = await client.refreshAccountPlans(
+    [7, "8", 7, 0, -1, "invalid"],
+    { 7: "http://proxy-user:proxy-password@proxy.example:8080", 99: "http://unused.example:8080" },
+  );
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url, "https://registration.test/api/accounts/refresh-plan?platform=chatgpt");
   assert.equal(calls[0].options.method, "POST");
-  assert.deepEqual(JSON.parse(calls[0].options.body), { ids: [7, 8] });
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    ids: [7, 8],
+    proxies_by_id: { 7: "http://proxy-user:proxy-password@proxy.example:8080" },
+  });
   assert.equal(result.updated, 2);
 
   const empty = await client.refreshAccountPlans([0, "invalid"]);

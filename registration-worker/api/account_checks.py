@@ -17,6 +17,7 @@ class _RefreshPlanBody(BaseModel):
     """
 
     ids: list[int] = Field(default_factory=list)
+    proxies_by_id: dict[int, str] = Field(default_factory=dict)
 
 
 @router.post("/check-all")
@@ -39,7 +40,12 @@ def refresh_plan(
     时回退到"该 platform 全部账号"——保持向后兼容。
     """
     ids = body.ids if body else []
-    return service.refresh_plan_sync(platform, account_ids=ids or None)
+    proxies_by_id = body.proxies_by_id if body else {}
+    return service.refresh_plan_sync(
+        platform,
+        account_ids=ids or None,
+        account_proxies=proxies_by_id,
+    )
 
 
 @router.post("/{account_id}/check")

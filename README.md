@@ -14,6 +14,10 @@ service credentials on the installation that you control.
 - Run Outlook alias fill jobs through the optional Chrome/Edge connector.
 - Coordinate account registration through the bundled optional registration
   worker, including browser/noVNC links and proxy selection.
+- Refresh registered-account availability and plan type on demand, including
+  Free, Go, Plus, Pro, Team, Business, Enterprise, Edu, Trial, and unknown
+  future plans. Dynamic proxies are rechecked across independent sessions, and
+  transient upstream failures preserve the last confirmed result.
 - Optionally import registered accounts into one SUB2-compatible service through
   its OpenAI OAuth flow.
 

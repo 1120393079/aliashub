@@ -422,6 +422,9 @@ export function createApp(options = {}) {
   app.get("/api/registration/accounts", async (_req, res, next) => {
     try { res.json(await registration.listRegisteredAccounts()); } catch (error) { next(error); }
   });
+  app.post("/api/registration/accounts/refresh-status", async (req, res, next) => {
+    try { res.json(await registration.refreshRegisteredAccountSignals(req.body || {})); } catch (error) { next(error); }
+  });
   app.patch("/api/registration/accounts/:id", async (req, res, next) => {
     try { res.json(await registration.updateRegisteredAccountMetadata(req.params.id, req.body || {})); } catch (error) { next(error); }
   });

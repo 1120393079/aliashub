@@ -36,21 +36,56 @@ const nfapiStatusBadge = {
 };
 const accountAvailabilityMeta = {
   available: { label: "可用", badge: "active" },
-  unavailable: { label: "失效", badge: "failed" },
+  unavailable: { label: "确认失效", badge: "failed" },
   unchecked: { label: "待检测", badge: "queued" },
 };
 const accountTypeText = {
   free: "Free",
+  go: "Go",
   plus: "Plus",
+  pro: "Pro",
   team: "Team",
   business: "Business",
   enterprise: "Enterprise",
   edu: "Edu",
   trial: "Trial",
-  subscribed: "订阅",
-  eligible: "可开通",
-  unknown: "类型待检测",
+  other: "Other",
+  unknown: "Unknown",
 };
+const accountTypeGroupOrder = [
+  "free", "go", "plus", "pro", "team", "business", "enterprise", "edu", "trial", "other", "unknown",
+];
+const accountTypeGroupRank = new Map(accountTypeGroupOrder.map((type, index) => [type, index]));
+const accountTypeAliases = new Map([
+  ["free", new Set(["free", "basic", "starter", "hobby", "chatgptfreeplan"])],
+  ["go", new Set(["go", "chatgptgo", "chatgptgoplan"])],
+  ["plus", new Set(["plus", "premium", "chatgptplus", "chatgptplusplan"])],
+  ["pro", new Set(["pro", "chatgptpro", "chatgptproplan"])],
+  ["team", new Set(["team", "chatgptteam", "chatgptteamplan"])],
+  ["business", new Set(["business", "chatgptbusiness", "chatgptbusinessplan"])],
+  ["enterprise", new Set(["enterprise", "chatgptenterprise", "chatgptenterpriseplan"])],
+  ["edu", new Set(["edu", "education", "chatgptedu", "chatgpteduplan", "chatgpteducationplan"])],
+  ["trial", new Set(["trial", "trialing", "freetrial", "chatgpttrial", "chatgpttrialplan"])],
+]);
+const nonAccountTypeSignals = new Set([
+  "", "unknown", "none", "null", "invalid", "expired", "banned", "disabled", "inactive",
+  "unavailable", "registered", "active", "valid", "subscribed", "eligible", "canceling", "cancelled",
+]);
+const transientStatusCodes = new Set([
+  "CHECK_TIMEOUT", "PROXY_UNAVAILABLE", "NETWORK_ERROR", "RATE_LIMITED", "UPSTREAM_5XX",
+  "UPSTREAM_UNAVAILABLE", "UPSTREAM_REJECTED", "UPSTREAM_CHALLENGE", "CHALLENGE_PAGE", "CHALLENGE_REQUIRED",
+  "RESPONSE_UNRECOGNIZED", "CREDENTIALS_MISSING", "AUTH_UNAUTHORIZED_UNCONFIRMED",
+  "AUTHENTICATION_UNCONFIRMED", "ACCESS_FORBIDDEN", "ACCOUNT_IDENTITY_MISMATCH", "CHECK_INCONCLUSIVE",
+  "CHECK_FAILED", "PLAN_CONFLICT", "DNS_FAILURE", "TLS_FAILURE",
+]);
+const definitiveUnavailableCodes = new Set([
+  "AUTH_TOKEN_EXPIRED", "AUTH_TOKEN_REVOKED", "AUTH_CREDENTIALS_EXPIRED", "AUTH_CREDENTIALS_REVOKED",
+  "TOKEN_EXPIRED", "TOKEN_REVOKED", "CREDENTIAL_EXPIRED", "CREDENTIAL_REVOKED", "CREDENTIALS_EXPIRED",
+  "CREDENTIALS_REVOKED", "ACCESS_TOKEN_EXPIRED", "AUTHENTICATION_EXPIRED", "AUTHENTICATION_REVOKED",
+  "AUTH_REVOKED", "INVALID_TOKEN", "SESSION_EXPIRED", "SESSION_REVOKED", "ACCOUNT_INVALID",
+  "ACCOUNT_DISABLED", "ACCOUNT_BANNED", "ACCOUNT_DEACTIVATED", "ACCOUNT_DELETED", "ACCOUNT_SUSPENDED",
+  "USER_DISABLED", "USER_BANNED", "USER_DEACTIVATED", "USER_DELETED", "USER_SUSPENDED",
+]);
 const nfapiImportDefaults = {
   name_prefix: "",
   account_name: "",
@@ -301,26 +336,163 @@ function AccessTokenCell({ available, loading, onCopy }) {
   return <div className="registration-secret"><code>{available ? "••••••••••••" : "未获取"}</code><button disabled={!available || loading} title={available ? "复制 AccessToken (AT)" : "尚未获取 AT"} onClick={onCopy}>{loading ? <LoaderCircle className="spin" size={14} /> : <KeyRound size={14} />}</button></div>;
 }
 
+function accountSignalValue(item, keys) {
+  const containers = [item, item?.overview, item?.status_details, item?.statusDetails]
+    .filter((value) => value && typeof value === "object" && !Array.isArray(value));
+  for (const container of containers) {
+    for (const key of keys) {
+      const value = container[key];
+      if (value === undefined || value === null) continue;
+      if (typeof value === "string" && !value.trim()) continue;
+      if (["string", "number", "boolean"].includes(typeof value)) return value;
+    }
+  }
+  return "";
+}
+
+function accountSignalText(item, keys, maximum = 240) {
+  return String(accountSignalValue(item, keys) ?? "")
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, "")
+    .trim()
+    .slice(0, maximum);
+}
+
+function normalizeAccountType(value) {
+  const raw = String(value ?? "").trim().toLowerCase();
+  const normalized = raw.replace(/[\s-]+/g, "_");
+  const compact = raw.replace(/[^a-z0-9]/g, "");
+  if (raw === "other") return "other";
+  if (nonAccountTypeSignals.has(normalized) || nonAccountTypeSignals.has(compact)) return "unknown";
+  for (const [type, aliases] of accountTypeAliases) {
+    if (aliases.has(compact)) return type;
+  }
+  return raw ? "other" : "unknown";
+}
+
+function accountTypeMeta(item) {
+  const declaredType = accountSignalText(item, ["account_type", "accountType", "subscription_type", "subscriptionType"], 80);
+  const rawType = accountSignalText(item, ["account_type_raw", "accountTypeRaw", "subscription_type_raw", "subscriptionTypeRaw", "plan_type_raw", "planTypeRaw"], 80);
+  const declaredKind = normalizeAccountType(declaredType);
+  if (declaredKind !== "unknown" && declaredKind !== "other") {
+    return { type: declaredKind, raw: declaredType, label: accountTypeText[declaredKind] };
+  }
+  if (declaredKind === "other") {
+    const raw = rawType && normalizeAccountType(rawType) !== "unknown" ? rawType : "";
+    return { type: "other", raw, label: raw ? `Other · ${raw}` : accountTypeText.other };
+  }
+  const candidates = [
+    rawType,
+    accountSignalText(item, ["plan_name", "planName"], 80),
+    accountSignalText(item, ["membership_type", "membershipType", "individual_membership_type", "individualMembershipType"], 80),
+    accountSignalText(item, ["plan_type", "planType"], 80),
+    accountSignalText(item, ["plan_state", "planState"], 80),
+  ].filter(Boolean);
+  for (const raw of [...new Set(candidates)]) {
+    const type = normalizeAccountType(raw);
+    if (type === "unknown") continue;
+    if (type === "other") return { type, raw, label: `Other · ${raw}` };
+    return { type, raw, label: accountTypeText[type] };
+  }
+  return { type: "unknown", raw: "", label: accountTypeText.unknown };
+}
+
+function accountGroupMeta(item) {
+  const effectiveName = accountSignalText(item, ["group_name", "groupName"], 80);
+  const customName = accountSignalText(item, ["custom_group_name", "customGroupName"], 80);
+  const defaultName = accountSignalText(item, ["default_group_name", "defaultGroupName"], 80);
+  const source = accountSignalText(item, ["group_source", "groupSource"], 20).toLowerCase();
+  const name = effectiveName || customName || defaultName;
+  const automatic = Boolean(name) && (source === "plan"
+    || (!source && !customName && Boolean(defaultName) && name === defaultName));
+  return { name, customName, defaultName, source, automatic };
+}
+
+function automaticGroupType(item, groupName) {
+  const detected = accountTypeMeta(item).type;
+  if (detected !== "unknown") return detected;
+  const compactName = String(groupName || "").trim().toLowerCase().replace(/[\s_-]+|套餐/g, "");
+  return accountTypeGroupOrder.find((type) => compactName === type
+    || compactName === accountTypeText[type].toLowerCase()) || "unknown";
+}
+
+function AccountNameGroup({ item, mobile = false }) {
+  const group = accountGroupMeta(item);
+  const groupLabel = group.name || "未分组";
+  const groupTitle = group.automatic ? `${groupLabel}（按套餐自动分组）` : groupLabel;
+  return <div className={`registration-account-meta ${mobile ? "registration-account-meta-mobile" : ""}`}><b title={item.custom_name || "未命名"}>{item.custom_name || "未命名"}</b><small className="registration-account-group" title={groupTitle}><span>{groupLabel}</span>{group.automatic && <em>自动</em>}</small></div>;
+}
+
+function accountSignalTime(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  return Number.isFinite(Date.parse(text)) ? `${formatDate(text)}（${relativeTime(text)}）` : text;
+}
+
 function AccountSignalCell({ item, compact = false }) {
-  const remoteStatus = String(item.display_status || item.lifecycle_status || item.status || "unknown").toLowerCase();
-  const fallbackAvailability = new Set(["invalid", "expired", "banned", "disabled", "deactivated", "inactive"]).has(remoteStatus)
-    ? "unavailable"
-    : new Set(["active", "registered", "valid", "trial", "subscribed"]).has(remoteStatus) ? "available" : "unchecked";
-  const availability = accountAvailabilityMeta[item.availability] ? item.availability : fallbackAvailability;
-  const meta = accountAvailabilityMeta[availability];
-  const rawType = String(item.account_type || item.plan_name || item.plan_state || "unknown").trim().toLowerCase();
-  const typeLabel = accountTypeText[rawType]
-    || rawType.replace(/[_-]+/g, " ").replace(/^\w/, (value) => value.toUpperCase());
-  const checkedAt = item.status_checked_at || "";
+  const statusCode = accountSignalText(item, [
+    "status_code", "statusCode", "validity_code", "validityCode", "validity_status_code", "validityStatusCode",
+    "validity_error_code", "validityErrorCode", "check_code", "checkCode", "code",
+  ], 80).toUpperCase().replace(/[\s-]+/g, "_");
+  const statusReason = accountSignalText(item, [
+    "status_reason", "statusReason", "validity_reason", "validityReason", "validity_status_reason", "validityStatusReason",
+    "validity_error", "validityError", "validity_message", "validityMessage", "check_reason", "checkReason", "reason",
+  ]);
+  const checkError = accountSignalText(item, ["status_check_error", "statusCheckError", "check_error", "checkError"]);
+  const checkState = accountSignalText(item, ["status_check_state", "statusCheckState", "check_state", "checkState", "detection_status", "detectionStatus"], 40).toLowerCase();
+  const retryableValue = accountSignalValue(item, ["status_retryable", "statusRetryable", "validity_retryable", "validityRetryable", "retryable"]);
+  const retryable = retryableValue === true || ["1", "true", "yes"].includes(String(retryableValue).toLowerCase());
+  const remoteStatus = accountSignalText(item, ["display_status", "displayStatus", "lifecycle_status", "lifecycleStatus", "status"], 80).toLowerCase();
+  const fallbackAvailability = new Set(["active", "registered", "valid", "trial", "subscribed"]).has(remoteStatus)
+    ? "available" : definitiveUnavailableCodes.has(statusCode) ? "unavailable" : "unchecked";
+  const rawAvailability = accountSignalText(item, ["availability", "availability_status", "availabilityStatus"], 40).toLowerCase();
+  const availability = accountAvailabilityMeta[rawAvailability] ? rawAvailability : fallbackAvailability;
+  const checkFailed = new Set(["failed", "inconclusive", "retry", "retryable", "error", "timeout"]).has(checkState);
+  const transientCode = transientStatusCodes.has(statusCode)
+    || /(?:TIMEOUT|NETWORK|PROXY|RATE_LIMIT|UPSTREAM|HTTP_5\d\d|CLOUDFLARE|CHALLENGE|TEMPORAR|UNRECOGNIZED)/.test(statusCode);
+  const transient = availability !== "unavailable" && (checkFailed || retryable || transientCode);
+  const meta = transient && availability === "unchecked"
+    ? { label: "待复检", badge: "warning" }
+    : accountAvailabilityMeta[availability];
+  const type = accountTypeMeta(item);
+  const attemptedAt = accountSignalText(item, ["status_check_attempted_at", "statusCheckAttemptedAt", "check_attempted_at", "checkAttemptedAt", "attempted_at", "attemptedAt"], 80);
+  const confirmedAt = accountSignalText(item, ["status_confirmed_at", "statusConfirmedAt", "validity_confirmed_at", "validityConfirmedAt"], 80);
+  const checkedAt = attemptedAt || accountSignalText(item, [
+    "status_checked_at", "statusCheckedAt", "validity_checked_at", "validityCheckedAt", "checked_at", "checkedAt",
+  ], 80) || confirmedAt;
+  const detail = [statusCode && `[${statusCode}]`, statusReason || (transient ? checkError : "")].filter(Boolean).join(" ");
+  const statusConflictValue = accountSignalValue(item, ["status_conflict", "statusConflict", "validity_conflict", "validityConflict"]);
+  const statusConflict = statusConflictValue === true || ["1", "true", "yes"].includes(String(statusConflictValue).toLowerCase());
+  const checkCaption = transient
+    ? `${detail || "检测暂时失败"} · ${availability === "unchecked" ? "请稍后复检" : "保留上次结果"}`
+    : detail || (availability === "unavailable" ? "后端已确认失效（未返回原因码）"
+      : checkState === "checked" ? "刚刚完成状态检测"
+        : statusConflict ? "最新 API 已确认可用"
+          : checkedAt ? `检测 ${relativeTime(checkedAt)}` : "等待状态检测");
+  const accountStatus = accountSignalText(item, ["account_status", "accountStatus", "lifecycle_status", "lifecycleStatus", "display_status", "displayStatus"], 80);
+  const credentialStatus = accountSignalText(item, ["credential_status", "credentialStatus", "validity_status", "validityStatus"], 80);
+  const subscriptionStatus = accountSignalText(item, ["subscription_status", "subscriptionStatus", "plan_status", "planStatus", "plan_state", "planState"], 80);
+  const source = accountSignalText(item, ["status_source", "statusSource", "validity_source", "validitySource", "check_source", "checkSource", "source"], 120);
+  const sourceAndTime = [
+    source && `来源 ${source}`,
+    checkedAt && `本次 ${relativeTime(checkedAt)}`,
+    confirmedAt && confirmedAt !== checkedAt && `确认 ${relativeTime(confirmedAt)}`,
+  ].filter(Boolean).join(" · ");
   const title = [
     `状态：${meta.label}`,
-    `类型：${typeLabel}`,
-    item.display_status && `display=${item.display_status}`,
-    item.lifecycle_status && `lifecycle=${item.lifecycle_status}`,
-    item.validity_status && `validity=${item.validity_status}`,
-    item.status_source && `来源=${item.status_source}`,
+    `类型：${type.label}`,
+    accountStatus && `账号状态=${accountStatus}`,
+    credentialStatus && `凭据状态=${credentialStatus}`,
+    subscriptionStatus && `订阅状态=${subscriptionStatus}`,
+    statusCode && `状态码=${statusCode}`,
+    statusReason && `原因=${statusReason}`,
+    transient && !statusReason && checkError && `检测错误=${checkError}`,
+    statusConflict && "历史页面状态与最新 API 结果冲突，采用最新 API 结果",
+    source && `来源=${source}`,
+    checkedAt && `检测时间=${accountSignalTime(checkedAt)}`,
+    confirmedAt && confirmedAt !== checkedAt && `确认时间=${accountSignalTime(confirmedAt)}`,
   ].filter(Boolean).join(" · ");
-  return <div className={`registration-account-signal ${compact ? "compact" : ""}`} title={title}><div><StatusBadge status={meta.badge}>{meta.label}</StatusBadge><span className="registration-account-type">{typeLabel}</span></div><small>{checkedAt ? `检测 ${relativeTime(checkedAt)}` : "等待自动检测"}</small></div>;
+  const captionClass = transient ? "check-failed" : availability === "unavailable" ? "check-invalid" : detail ? "check-detail" : "";
+  return <div className={`registration-account-signal ${compact ? "compact" : ""}`} title={title}><div><StatusBadge status={meta.badge}>{meta.label}</StatusBadge><span className={`registration-account-type type-${type.type}`}>{type.label}</span></div><small className={captionClass}>{checkCaption}</small>{sourceAndTime && <small className="check-meta">{sourceAndTime}</small>}</div>;
 }
 
 function JobCommands({ job, onLogs, onCancel, onRelease, onDelete }) {
@@ -384,9 +556,12 @@ export default function RegistrationPage({ refreshKey }) {
   const [selectedAccountIds, setSelectedAccountIds] = useState([]);
   const [copyingTokenId, setCopyingTokenId] = useState(null);
   const [copyingSelectedTokens, setCopyingSelectedTokens] = useState(false);
+  const [checkingAccountSignals, setCheckingAccountSignals] = useState(false);
+  const accountSignalRefreshBusy = useRef(false);
+  const lastFocusedAccountRefreshAt = useRef(0);
   const [accountGroupFilter, setAccountGroupFilter] = useState("all");
   const [editingAccount, setEditingAccount] = useState(null);
-  const [accountEditForm, setAccountEditForm] = useState({ custom_name: "", group_name: "" });
+  const [accountEditForm, setAccountEditForm] = useState({ custom_name: "", custom_group_name: "" });
   const [savingAccountMetadata, setSavingAccountMetadata] = useState(false);
   const [nfapiImportIds, setNfapiImportIds] = useState([]);
   const [nfapiOptions, setNfapiOptions] = useState(null);
@@ -543,14 +718,41 @@ export default function RegistrationPage({ refreshKey }) {
   const activeJobs = jobs?.filter((item) => releasableStatuses.has(item.status)).length || 0;
   const deletableJobIds = jobs?.filter((item) => deletableStatuses.has(item.status)).map((item) => item.id) || [];
   const allJobsSelected = deletableJobIds.length > 0 && deletableJobIds.every((id) => selectedJobIds.includes(id));
-  const accountGroups = useMemo(() => [...new Set((accounts?.items || []).map((item) => item.group_name).filter(Boolean))]
-    .sort((left, right) => left.localeCompare(right, "zh-CN")), [accounts]);
+  const accountGroups = useMemo(() => {
+    const groups = new Map();
+    for (const item of accounts?.items || []) {
+      const group = accountGroupMeta(item);
+      if (!group.name) continue;
+      const current = groups.get(group.name) || {
+        name: group.name,
+        count: 0,
+        automaticCount: 0,
+        rank: Number.POSITIVE_INFINITY,
+      };
+      current.count += 1;
+      if (group.automatic) {
+        current.automaticCount += 1;
+        current.rank = Math.min(
+          current.rank,
+          accountTypeGroupRank.get(automaticGroupType(item, group.name)) ?? accountTypeGroupRank.get("unknown"),
+        );
+      }
+      groups.set(group.name, current);
+    }
+    return [...groups.values()].sort((left, right) => left.rank - right.rank
+      || left.name.localeCompare(right.name, "zh-CN"));
+  }, [accounts]);
+  const customAccountGroups = useMemo(() => [...new Set((accounts?.items || [])
+    .map((item) => accountGroupMeta(item).customName)
+    .filter(Boolean))].sort((left, right) => left.localeCompare(right, "zh-CN")), [accounts]);
+  const ungroupedAccountCount = useMemo(() => (accounts?.items || [])
+    .filter((item) => !accountGroupMeta(item).name).length, [accounts]);
   const visibleAccountItems = useMemo(() => {
     const items = accounts?.items || [];
     if (accountGroupFilter === "all") return items;
-    if (accountGroupFilter === "ungrouped") return items.filter((item) => !item.group_name);
+    if (accountGroupFilter === "ungrouped") return items.filter((item) => !accountGroupMeta(item).name);
     const groupName = accountGroupFilter.startsWith("group:") ? accountGroupFilter.slice(6) : "";
-    return items.filter((item) => item.group_name === groupName);
+    return items.filter((item) => accountGroupMeta(item).name === groupName);
   }, [accounts, accountGroupFilter]);
   const accountIds = visibleAccountItems.map((item) => item.id);
   const allAccountsSelected = accountIds.length > 0 && accountIds.every((id) => selectedAccountIds.includes(id));
@@ -674,9 +876,82 @@ export default function RegistrationPage({ refreshKey }) {
     setSelectedAccountIds([]);
   };
 
+  const refreshAccountSignals = useCallback(async (ids, { notify = true } = {}) => {
+    const normalizedIds = [...new Set((ids || []).map(Number).filter(Number.isSafeInteger))];
+    if (!normalizedIds.length || accountSignalRefreshBusy.current) return null;
+    accountSignalRefreshBusy.current = true;
+    setCheckingAccountSignals(true);
+    try {
+      const result = await api("/api/registration/accounts/refresh-status", {
+        method: "POST",
+        body: { ids: normalizedIds },
+      });
+      if (!result.accounts || !Array.isArray(result.accounts.items)) {
+        throw new Error("状态检测服务未返回账号列表");
+      }
+      setAccounts(result.accounts);
+      setAccountsError("");
+      const typeSummary = Object.entries(result.types || {})
+        .filter(([, count]) => Number(count) > 0)
+        .map(([type, count]) => `${accountTypeMeta({ account_type: type }).label} ${count}`)
+        .join(" / ");
+      const statusSummary = `可用 ${result.available || 0}，确认失效 ${result.unavailable || 0}，待检测 ${result.unchecked || 0}`;
+      const failureSummary = result.failed ? `；${result.failed} 个检测失败，已保留原状态和类型` : "";
+      if (notify) {
+        toast(`检测完成：${statusSummary}${typeSummary ? `；类型 ${typeSummary}` : ""}${failureSummary}`, result.failed ? "error" : "success");
+      }
+      return result;
+    } catch (error) {
+      if (notify) toast(error.message || "账号状态检测失败", "error");
+      return null;
+    } finally {
+      accountSignalRefreshBusy.current = false;
+      setCheckingAccountSignals(false);
+    }
+  }, [toast]);
+
+  const refreshSelectedAccountSignals = useCallback(() => {
+    const ids = selectedAccountIds.length
+      ? selectedAccountIds
+      : visibleAccountItems.map((item) => item.id);
+    return refreshAccountSignals(ids);
+  }, [selectedAccountIds, visibleAccountItems, refreshAccountSignals]);
+
+  useEffect(() => {
+    if (view !== "accounts" || !accounts?.items?.length) return undefined;
+    const refreshOnReturn = () => {
+      if (document.visibilityState !== "visible") return;
+      const now = Date.now();
+      if (now - lastFocusedAccountRefreshAt.current < 30_000) return;
+      const ids = accounts.items
+        .filter((item) => {
+          const type = accountTypeMeta(item).type;
+          const availability = accountSignalText(item, ["availability", "availability_status", "availabilityStatus"], 40).toLowerCase();
+          return availability !== "unavailable" && (type === "free" || type === "unknown");
+        })
+        .map((item) => Number(item.id))
+        .filter(Number.isSafeInteger);
+      if (!ids.length) return;
+      lastFocusedAccountRefreshAt.current = now;
+      refreshAccountSignals(ids, { notify: false });
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") refreshOnReturn();
+    };
+    window.addEventListener("focus", refreshOnReturn);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("focus", refreshOnReturn);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [view, accounts, refreshAccountSignals]);
+
   const openAccountEditor = (item) => {
     setEditingAccount(item);
-    setAccountEditForm({ custom_name: item.custom_name || "", group_name: item.group_name || "" });
+    setAccountEditForm({
+      custom_name: item.custom_name || "",
+      custom_group_name: accountGroupMeta(item).customName,
+    });
   };
 
   const saveAccountMetadata = async () => {
@@ -685,9 +960,12 @@ export default function RegistrationPage({ refreshKey }) {
     try {
       await api(`/api/registration/accounts/${editingAccount.id}`, {
         method: "PATCH",
-        body: accountEditForm,
+        body: {
+          custom_name: accountEditForm.custom_name,
+          group_name: accountEditForm.custom_group_name,
+        },
       });
-      toast("账号名称和分组已保存");
+      toast("账号名称和自定义分组已保存");
       setEditingAccount(null);
       await loadAccounts();
     } catch (error) {
@@ -937,7 +1215,7 @@ export default function RegistrationPage({ refreshKey }) {
         },
       });
       if (!result.authorization_required || !result.auth_url || !result.oauth_session_id) {
-        throw new Error("SUB2 兼容服务没有返回新的 OAuth 授权链接");
+        throw new Error("SUB2 没有返回新的 OAuth 授权链接");
       }
       setNfapiOAuthSession(result);
       setNfapiCallbackUrl("");
@@ -1156,17 +1434,18 @@ export default function RegistrationPage({ refreshKey }) {
       </>}
 
       {view === "accounts" && <section className="table-panel registration-account-panel">
-        <header className="panel-header"><div><h2>已注册账号</h2><p>使用原邮箱补设密码，也可通过可选的 SUB2 兼容服务添加账号 OAuth 授权</p></div><Button size="sm" onClick={loadAccounts}>刷新</Button></header>
+        <header className="panel-header"><div><h2>已注册账号</h2><p>使用原邮箱补设密码，也可通过可选的 SUB2 兼容服务添加账号 OAuth 授权</p></div><Button size="sm" icon={RefreshCw} loading={checkingAccountSignals} disabled={!accounts.items.length} title="重新读取当前账号的实时状态和套餐" onClick={refreshSelectedAccountSignals}>刷新并检测</Button></header>
         {accounts.items.length ? <>
           {accountsError && <div className="inline-alert error"><AlertTriangle size={15} /><span>{accountsError}；当前保留上一次成功加载的账号列表。</span></div>}
           <div className="registration-bulk-bar">
             <label><input type="checkbox" checked={allAccountsSelected} disabled={!accountIds.length} onChange={toggleAllAccounts} />全选当前账号</label>
             <select className="compact-select registration-group-filter" aria-label="按账号分组筛选" value={accountGroupFilter} onChange={(event) => changeAccountGroupFilter(event.target.value)}>
-              <option value="all">全部分组（{accounts.total}）</option>
-              <option value="ungrouped">未分组</option>
-              {accountGroups.map((group) => <option key={group} value={`group:${group}`}>{group}</option>)}
+              <option value="all">全部分组（{accounts.items.length}）</option>
+              <option value="ungrouped">未分组（{ungroupedAccountCount}）</option>
+              {accountGroups.map((group) => <option key={group.name} value={`group:${group.name}`}>{group.name}（{group.count}）{group.automaticCount === group.count ? " · 自动" : group.automaticCount ? ` · 自动 ${group.automaticCount}` : ""}</option>)}
             </select>
             <span>已选择 <b>{selectedAccountIds.length}</b> 个</span>
+            <Button size="sm" icon={ListChecks} loading={checkingAccountSignals} disabled={!accounts.items.length} title={selectedAccountIds.length ? "重新检测所选账号的当前状态和订阅类型" : "一键重新检测全部账号的当前状态和订阅类型"} onClick={refreshSelectedAccountSignals}>{selectedAccountIds.length ? "检测所选状态/类型" : "检测全部状态/类型"}</Button>
             <Button size="sm" icon={Database} disabled={selectedAccountIds.length !== 1} title={selectedAccountIds.length > 1 ? "OAuth 每次只能授权一个账号" : "通过 OAuth 添加到 SUB2"} onClick={() => openNfapiImporter(selectedAccountIds)}>OAuth 添加到 SUB2</Button>
             <Button size="sm" icon={KeyRound} loading={copyingSelectedTokens} disabled={!selectedAccountIds.length} onClick={copySelectedAccessTokens}>复制所选 AT</Button>
             <Button size="sm" variant="danger" icon={Trash2} disabled={!selectedAccountIds.length} onClick={() => setDeleteTarget({ kind: "accounts", ids: selectedAccountIds })}>删除所选</Button>
@@ -1175,12 +1454,12 @@ export default function RegistrationPage({ refreshKey }) {
             <div className="data-table-wrap"><table className="data-table registration-accounts-table"><thead><tr><th className="select-column"><input type="checkbox" aria-label="选择当前分组全部注册账号" checked={allAccountsSelected} disabled={!accountIds.length} onChange={toggleAllAccounts} /></th><th>名称 / 分组</th><th>邮箱</th><th>密码</th><th>AccessToken (AT)</th><th>出口 IP</th><th>姓名 / 年龄</th><th>状态 / 类型</th><th>SUB2</th><th>创建时间</th><th aria-label="操作" /></tr></thead><tbody>{visibleAccountItems.map((item) => {
               const checked = selectedAccountIds.includes(item.id);
               const nfapiState = nfapiAccountState(item);
-              return <tr className={checked ? "selected-row" : ""} key={item.id}><td className="select-column"><input type="checkbox" aria-label={`选择 ${item.email}`} checked={checked} onChange={() => toggleAccount(item.id)} /></td><td><div className="registration-account-meta"><b title={item.custom_name || "未命名"}>{item.custom_name || "未命名"}</b><small title={item.group_name || "未分组"}>{item.group_name || "未分组"}</small></div></td><td><b>{item.email}</b></td><td><PasswordCell value={item.password} status={item.password_status} error={item.password_error} available={item.password_available} onCopy={() => copyText(item.password).then(() => toast("密码已复制"))} /></td><td><AccessTokenCell available={item.access_token_available} loading={copyingTokenId === item.id} onCopy={() => copyAccessToken(item)} /></td><td><code className="registration-exit-ip">{item.exit_ip || "未记录"}</code></td><td><div className="registration-identity"><b>{item.display_name || "-"}</b><small>{item.birth_date ? `${item.birth_date} · ${ageFromBirth(item.birth_date)} 岁` : "-"}</small></div></td><td><AccountSignalCell item={item} /></td><td><div className="registration-nfapi-status" title={nfapiState.error || nfapiState.accountId || nfapiState.label}><StatusBadge status={nfapiState.badge}>{nfapiState.label}</StatusBadge>{nfapiState.shortLived && <small>短期凭据</small>}{nfapiState.accountId && <code>#{nfapiState.accountId}</code>}{nfapiState.error && <small className="error">{nfapiState.error}</small>}</div></td><td><span className="muted-cell">{formatDate(item.created_at)}</span></td><td><div className="row-actions"><button className="registration-row-command" disabled={item.password_available || !item.password_setup_available} title={item.password_available ? "密码已配置" : item.password_setup_reason || "使用原邮箱设置密码"} onClick={() => openPasswordSetup(item)}><ShieldCheck size={15} /></button><button className="registration-row-command" title="通过 OAuth 添加或更新 SUB2" onClick={() => openNfapiImporter([item.id])}><Database size={15} /></button><button className="registration-row-command" title="编辑名称和分组" onClick={() => openAccountEditor(item)}><Pencil size={15} /></button><button className="registration-row-command" title={item.password_available ? "复制账号和密码" : "复制邮箱"} onClick={() => copyRegisteredAccount(item)}><ClipboardCopy size={15} /></button><button className="registration-row-command danger" title="删除本地账号" onClick={() => setDeleteTarget({ kind: "account", ids: [item.id], item })}><Trash2 size={15} /></button></div></td></tr>;
+              return <tr className={checked ? "selected-row" : ""} key={item.id}><td className="select-column"><input type="checkbox" aria-label={`选择 ${item.email}`} checked={checked} onChange={() => toggleAccount(item.id)} /></td><td><AccountNameGroup item={item} /></td><td><b>{item.email}</b></td><td><PasswordCell value={item.password} status={item.password_status} error={item.password_error} available={item.password_available} onCopy={() => copyText(item.password).then(() => toast("密码已复制"))} /></td><td><AccessTokenCell available={item.access_token_available} loading={copyingTokenId === item.id} onCopy={() => copyAccessToken(item)} /></td><td><code className="registration-exit-ip">{item.exit_ip || "未记录"}</code></td><td><div className="registration-identity"><b>{item.display_name || "-"}</b><small>{item.birth_date ? `${item.birth_date} · ${ageFromBirth(item.birth_date)} 岁` : "-"}</small></div></td><td><AccountSignalCell item={item} /></td><td><div className="registration-nfapi-status" title={nfapiState.error || nfapiState.accountId || nfapiState.label}><StatusBadge status={nfapiState.badge}>{nfapiState.label}</StatusBadge>{nfapiState.shortLived && <small>短期凭据</small>}{nfapiState.accountId && <code>#{nfapiState.accountId}</code>}{nfapiState.error && <small className="error">{nfapiState.error}</small>}</div></td><td><span className="muted-cell">{formatDate(item.created_at)}</span></td><td><div className="row-actions"><button className="registration-row-command" disabled={checkingAccountSignals} title="实时检测此账号状态和套餐" onClick={() => refreshAccountSignals([item.id])}><RefreshCw size={15} /></button><button className="registration-row-command" disabled={item.password_available || !item.password_setup_available} title={item.password_available ? "密码已配置" : item.password_setup_reason || "使用原邮箱设置密码"} onClick={() => openPasswordSetup(item)}><ShieldCheck size={15} /></button><button className="registration-row-command" title="通过 OAuth 添加或更新 SUB2" onClick={() => openNfapiImporter([item.id])}><Database size={15} /></button><button className="registration-row-command" title="编辑名称和分组" onClick={() => openAccountEditor(item)}><Pencil size={15} /></button><button className="registration-row-command" title={item.password_available ? "复制账号和密码" : "复制邮箱"} onClick={() => copyRegisteredAccount(item)}><ClipboardCopy size={15} /></button><button className="registration-row-command danger" title="删除本地账号" onClick={() => setDeleteTarget({ kind: "account", ids: [item.id], item })}><Trash2 size={15} /></button></div></td></tr>;
             })}</tbody></table></div>
             <div className="registration-mobile-list">{visibleAccountItems.map((item) => {
               const checked = selectedAccountIds.includes(item.id);
               const nfapiState = nfapiAccountState(item);
-              return <article className={checked ? "selected" : ""} key={item.id}><header><input type="checkbox" aria-label={`选择 ${item.email}`} checked={checked} onChange={() => toggleAccount(item.id)} /><AccountSignalCell item={item} compact /><time>{formatDate(item.created_at)}</time></header><div className="registration-account-meta registration-account-meta-mobile"><b>{item.custom_name || "未命名"}</b><small>{item.group_name || "未分组"}</small></div><button onClick={() => copyText(item.email).then(() => toast("邮箱已复制"))}>{item.email}<Copy size={14} /></button><PasswordCell value={item.password} status={item.password_status} error={item.password_error} available={item.password_available} onCopy={() => copyText(item.password).then(() => toast("密码已复制"))} /><AccessTokenCell available={item.access_token_available} loading={copyingTokenId === item.id} onCopy={() => copyAccessToken(item)} /><div className="registration-mobile-facts"><div className="registration-account-exit"><Globe2 size={14} /><span><small>出口 IP</small><b>{item.exit_ip || "未记录"}</b></span></div><div className="registration-account-exit"><Database size={14} /><span><small>SUB2</small><b>{nfapiState.label}{nfapiState.shortLived ? " · 短期凭据" : ""}</b></span></div></div>{nfapiState.error && <div className="inline-alert error"><AlertTriangle size={14} /><span>{nfapiState.error}</span></div>}<footer><span>{item.display_name || "未记录姓名"}</span><div className="row-actions"><button className="registration-row-command" disabled={item.password_available || !item.password_setup_available} title={item.password_available ? "密码已配置" : item.password_setup_reason || "使用原邮箱设置密码"} onClick={() => openPasswordSetup(item)}><ShieldCheck size={15} /></button><button className="registration-row-command" title="通过 OAuth 添加或更新 SUB2" onClick={() => openNfapiImporter([item.id])}><Database size={15} /></button><button className="registration-row-command" title="编辑名称和分组" onClick={() => openAccountEditor(item)}><Pencil size={15} /></button><Button size="sm" icon={ClipboardCopy} onClick={() => copyRegisteredAccount(item)}>{item.password_available ? "复制账号" : "复制邮箱"}</Button><button className="registration-row-command danger" title="删除本地账号" onClick={() => setDeleteTarget({ kind: "account", ids: [item.id], item })}><Trash2 size={15} /></button></div></footer></article>;
+              return <article className={checked ? "selected" : ""} key={item.id}><header><input type="checkbox" aria-label={`选择 ${item.email}`} checked={checked} onChange={() => toggleAccount(item.id)} /><AccountSignalCell item={item} compact /><time>{formatDate(item.created_at)}</time></header><AccountNameGroup item={item} mobile /><button onClick={() => copyText(item.email).then(() => toast("邮箱已复制"))}>{item.email}<Copy size={14} /></button><PasswordCell value={item.password} status={item.password_status} error={item.password_error} available={item.password_available} onCopy={() => copyText(item.password).then(() => toast("密码已复制"))} /><AccessTokenCell available={item.access_token_available} loading={copyingTokenId === item.id} onCopy={() => copyAccessToken(item)} /><div className="registration-mobile-facts"><div className="registration-account-exit"><Globe2 size={14} /><span><small>出口 IP</small><b>{item.exit_ip || "未记录"}</b></span></div><div className="registration-account-exit"><Database size={14} /><span><small>SUB2</small><b>{nfapiState.label}{nfapiState.shortLived ? " · 短期凭据" : ""}</b></span></div></div>{nfapiState.error && <div className="inline-alert error"><AlertTriangle size={14} /><span>{nfapiState.error}</span></div>}<footer><span>{item.display_name || "未记录姓名"}</span><div className="row-actions"><button className="registration-row-command" disabled={checkingAccountSignals} title="实时检测此账号状态和套餐" onClick={() => refreshAccountSignals([item.id])}><RefreshCw size={15} /></button><button className="registration-row-command" disabled={item.password_available || !item.password_setup_available} title={item.password_available ? "密码已配置" : item.password_setup_reason || "使用原邮箱设置密码"} onClick={() => openPasswordSetup(item)}><ShieldCheck size={15} /></button><button className="registration-row-command" title="通过 OAuth 添加或更新 SUB2" onClick={() => openNfapiImporter([item.id])}><Database size={15} /></button><button className="registration-row-command" title="编辑名称和分组" onClick={() => openAccountEditor(item)}><Pencil size={15} /></button><Button size="sm" icon={ClipboardCopy} onClick={() => copyRegisteredAccount(item)}>{item.password_available ? "复制账号" : "复制邮箱"}</Button><button className="registration-row-command danger" title="删除本地账号" onClick={() => setDeleteTarget({ kind: "account", ids: [item.id], item })}><Trash2 size={15} /></button></div></footer></article>;
             })}</div>
           </> : <EmptyState icon={KeyRound} title="这个分组还没有账号" action={<Button onClick={() => changeAccountGroupFilter("all")}>查看全部账号</Button>} />}
           <div className="table-footer"><span>当前 {visibleAccountItems.length} 个，共 {accounts.total} 个注册账号</span></div>
@@ -1237,7 +1516,7 @@ export default function RegistrationPage({ refreshKey }) {
       <Modal
         open={Boolean(nfapiImportIds.length)}
         onClose={closeNfapiImporter}
-        title="OAuth 添加到 SUB2"
+        title="OAuth 添加至 SUB2"
         description={nfapiSelectedAccount?.email || "选择一个注册账号"}
         size="xl"
         footer={<><Button disabled={importingNfapi || restartingNfapiOAuth} onClick={closeNfapiImporter}>关闭</Button><Button variant="primary" icon={nfapiOAuthSession ? ShieldCheck : Database} loading={importingNfapi} disabled={restartingNfapiOAuth || loadingNfapiOptions || !nfapiConnected || !nfapiSelectedAccount?.id || !nfapiSelectedAccount?.email || Boolean(nfapiImportResult) || nfapiOAuthExpired} onClick={submitNfapiImport}>{nfapiOAuthSession ? "提交回调到 SUB2" : "生成 OAuth 授权链接"}</Button></>}
@@ -1283,14 +1562,15 @@ export default function RegistrationPage({ refreshKey }) {
       >
         <div className="form-stack registration-account-edit-form">
           <FormField label="账号名称" hint="仅作为账号池中的自定义名称，不会修改邮箱或注册身份"><input maxLength={60} value={accountEditForm.custom_name} onChange={(event) => setAccountEditForm({ ...accountEditForm, custom_name: event.target.value })} placeholder="例如：日本主账号" /></FormField>
-          <FormField label="所属分组" hint="可选择已有分组，也可以直接输入新分组"><input list="registration-account-groups" maxLength={40} value={accountEditForm.group_name} onChange={(event) => setAccountEditForm({ ...accountEditForm, group_name: event.target.value })} placeholder="例如：长期使用" /></FormField>
-          <datalist id="registration-account-groups">{accountGroups.map((group) => <option key={group} value={group} />)}</datalist>
+          <FormField label="自定义分组" hint="留空则按套餐自动分组；填写后优先使用自定义分组"><input list="registration-account-groups" maxLength={40} value={accountEditForm.custom_group_name} onChange={(event) => setAccountEditForm({ ...accountEditForm, custom_group_name: event.target.value })} placeholder={accountGroupMeta(editingAccount || {}).defaultName ? `留空使用：${accountGroupMeta(editingAccount).defaultName}` : "例如：长期使用"} /></FormField>
+          {!accountEditForm.custom_group_name.trim() && accountGroupMeta(editingAccount || {}).defaultName && <div className="registration-auto-group-preview"><span>保存后分组</span><b>{accountGroupMeta(editingAccount).defaultName}</b><em>自动</em></div>}
+          <datalist id="registration-account-groups">{customAccountGroups.map((group) => <option key={group} value={group} />)}</datalist>
         </div>
       </Modal>
       <Modal open={Boolean(logJob)} onClose={() => { setLogJob(null); setLogs(null); }} title="注册日志" description={logJob?.email} size="lg">
         {!logs ? <LoadingBlock rows={6} /> : logs.length ? <div className="registration-log-list">{logs.map((item, index) => <div className={item.level === "error" ? "error" : ""} key={item.id || index}><time>{item.created_at ? formatDate(item.created_at) : String(index + 1).padStart(2, "0")}</time><span>{item.message || item.detail?.message || JSON.stringify(item.detail || item)}</span></div>)}</div> : <EmptyState icon={ScrollText} title="暂无任务日志" />}
       </Modal>
-      <ConfirmDialog open={Boolean(releaseTarget)} onClose={() => { if (!releasing) setReleaseTarget(null); }} onConfirm={releaseJob} loading={releasing} danger title="强制释放这个注册任务？" description={releaseTarget ? `将先请求兼容注册服务停止任务 ${releaseTarget.email}，随后只把本地注册记录标记为已中断或已取消。不会删除分裂邮箱、账号凭据或任何已经注册成功的 ChatGPT 账号。` : ""} confirmText="释放任务" />
+      <ConfirmDialog open={Boolean(releaseTarget)} onClose={() => { if (!releasing) setReleaseTarget(null); }} onConfirm={releaseJob} loading={releasing} danger title="强制释放这个注册任务？" description={releaseTarget ? `将先请求 Frcibly 停止任务 ${releaseTarget.email}，随后只把本地注册记录标记为已中断或已取消。不会删除分裂邮箱、账号凭据或任何已经注册成功的 ChatGPT 账号。` : ""} confirmText="释放任务" />
       <ConfirmDialog open={Boolean(deleteTarget)} onClose={() => { if (!deleting) setDeleteTarget(null); }} onConfirm={removeSelected} loading={deleting} danger title={deleteTitle} description={deleteTarget ? deleteDescription : ""} confirmText={deletingAccounts ? "删除本地账号" : "删除记录"} />
     </div>
   );

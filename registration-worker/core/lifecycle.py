@@ -9,7 +9,11 @@ from typing import Any
 
 from sqlmodel import Session, select
 
-from core.account_graph import load_account_graphs, patch_account_graph
+from core.account_graph import (
+    load_account_graphs,
+    patch_account_graph,
+    recover_lifecycle_status_for_valid_account,
+)
 from core.base_platform import AccountStatus, RegisterConfig
 from core.db import AccountModel, AccountOverviewModel, engine
 from core.platform_accounts import build_platform_account
@@ -28,6 +32,154 @@ def _utcnow_iso() -> str:
 
 def _utcnow_ts() -> int:
     return int(_utcnow().timestamp())
+
+
+_CONCLUSIVE_INVALID_CODES = {
+    "account_banned",
+    "account_deactivated",
+    "account_deleted",
+    "account_disabled",
+    "account_suspended",
+    "auth_revoked",
+    "authentication_revoked",
+    "credentials_revoked",
+    "session_revoked",
+    "token_revoked",
+    "user_banned",
+    "user_deactivated",
+    "user_deleted",
+    "user_disabled",
+    "user_suspended",
+}
+_CONCLUSIVE_INVALID_STATES = {
+    "banned",
+    "deactivated",
+    "deleted",
+    "disabled",
+    "revoked",
+    "suspended",
+}
+_CONCLUSIVE_INVALID_PHRASES = (
+    "account has been banned",
+    "account has been deactivated",
+    "account has been deleted",
+    "account has been disabled",
+    "account has been suspended",
+    "account is banned",
+    "account is deactivated",
+    "account is deleted",
+    "account is disabled",
+    "account is suspended",
+    "account was banned",
+    "account was deactivated",
+    "account was deleted",
+    "account was disabled",
+    "account was suspended",
+    "authentication has been revoked",
+    "credentials have been revoked",
+    "session has been revoked",
+    "token has been revoked",
+)
+
+
+def _normalize_evidence_code(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    normalized = "".join(char if char.isalnum() else "_" for char in raw)
+    return "_".join(part for part in normalized.split("_") if part)
+
+
+def _structured_invalid_evidence(payload: dict[str, Any]) -> str:
+    nodes: list[tuple[str, dict[str, Any]]] = [("response", payload)]
+    for parent_name in ("error", "detail", "account", "user", "auth", "authentication"):
+        parent = payload.get(parent_name)
+        if isinstance(parent, dict):
+            nodes.append((parent_name, parent))
+            for child_name in ("account", "user", "auth", "authentication"):
+                child = parent.get(child_name)
+                if isinstance(child, dict):
+                    nodes.append((f"{parent_name}.{child_name}", child))
+
+    explicit_flag_names = (
+        "account_banned",
+        "account_deactivated",
+        "account_deleted",
+        "account_disabled",
+        "account_suspended",
+        "user_banned",
+        "user_deactivated",
+        "user_deleted",
+        "user_disabled",
+        "user_suspended",
+        "auth_revoked",
+        "authentication_revoked",
+        "credentials_revoked",
+        "session_revoked",
+        "token_revoked",
+    )
+    contextual_flag_names = tuple(_CONCLUSIVE_INVALID_STATES)
+    text_values: list[tuple[str, str]] = []
+    for node_name, node in nodes:
+        node_context = node_name.rsplit(".", 1)[-1]
+        has_account_context = node_context in {"account", "user", "auth", "authentication"}
+        for flag_name in explicit_flag_names:
+            if node.get(flag_name) is True:
+                return f"{node_name}.{flag_name}:true"
+        if has_account_context:
+            for flag_name in contextual_flag_names:
+                if node.get(flag_name) is True:
+                    return f"{node_name}.{flag_name}:true"
+        for field_name in ("code", "error_code", "reason", "status", "type"):
+            value = node.get(field_name)
+            code = _normalize_evidence_code(value)
+            if code in _CONCLUSIVE_INVALID_CODES:
+                return f"{node_name}.{field_name}:{code}"
+            if has_account_context and field_name in {"reason", "status"} and code in _CONCLUSIVE_INVALID_STATES:
+                return f"{node_name}.{field_name}:{code}"
+        for field_name in ("detail", "error", "message", "reason"):
+            value = node.get(field_name)
+            if isinstance(value, str) and value.strip():
+                text_values.append((f"{node_name}.{field_name}", value.strip().lower()))
+
+    for field_name, value in text_values:
+        if any(phrase in value for phrase in _CONCLUSIVE_INVALID_PHRASES):
+            return f"{field_name}:explicit_account_revocation"
+    return ""
+
+
+def _structured_valid_evidence(payload: dict[str, Any]) -> bool:
+    for key in ("id", "user_id", "email"):
+        if isinstance(payload.get(key), str) and payload[key].strip():
+            return True
+    accounts = payload.get("accounts")
+    if isinstance(accounts, dict) and accounts:
+        return True
+    user = payload.get("user")
+    if isinstance(user, dict):
+        return any(isinstance(user.get(key), str) and user[key].strip() for key in ("id", "user_id", "email"))
+    return False
+
+
+def classify_chatgpt_liveness_response(response: Any) -> tuple[str, str]:
+    """Classify /backend-api/me without treating transport failures as account death."""
+    status_code = int(getattr(response, "status_code", 0) or 0)
+    if status_code in {408, 425, 429} or status_code >= 500:
+        return "inconclusive", f"HTTP {status_code or 'unknown'} transient response"
+
+    try:
+        payload = response.json()
+    except Exception:
+        return "inconclusive", f"HTTP {status_code or 'unknown'} non-JSON response"
+    if not isinstance(payload, dict) or not payload:
+        return "inconclusive", f"HTTP {status_code or 'unknown'} invalid JSON object"
+
+    invalid_evidence = _structured_invalid_evidence(payload)
+    if invalid_evidence and (status_code == 200 or 400 <= status_code < 500):
+        return "invalid", invalid_evidence
+    if status_code == 200 and _structured_valid_evidence(payload):
+        return "valid", "backend-api/me JSON response"
+    if status_code == 200:
+        return "inconclusive", "HTTP 200 JSON response without authenticated account identity"
+    return "inconclusive", f"HTTP {status_code or 'unknown'} without explicit revocation evidence"
 
 
 # ---------------------------------------------------------------------------
@@ -275,10 +427,17 @@ def refresh_and_sync_cpa(
     - 用 session_token 刷新 access_token
     - 用 /backend-api/me 检查存活
     - 存活账号重新生成 CPA JSON 并上传
-    - 封禁账号标记为 disabled
+    - 仅有结构化撤销/禁用证据才标记失效
     """
     log = log_fn or logger.info
-    results = {"refreshed": 0, "uploaded": 0, "dead": 0, "skipped": 0, "error": 0}
+    results = {
+        "refreshed": 0,
+        "uploaded": 0,
+        "dead": 0,
+        "inconclusive": 0,
+        "skipped": 0,
+        "error": 0,
+    }
 
     from curl_cffi import requests as cffi_requests
     import json
@@ -373,32 +532,84 @@ def refresh_and_sync_cpa(
                     sess.add(model)
                     sess.commit()
 
-            # 2. 检查存活
-            check_resp = cffi_requests.get(
-                "https://chatgpt.com/backend-api/me",
-                headers={"authorization": f"Bearer {access_token}", "accept": "application/json"},
-                proxy=proxy, timeout=15, impersonate="chrome120",
-            )
+            # 2. 检查存活。HTML challenge、限流和上游故障都不是账号失效证据。
+            liveness_checked_at = _utcnow_iso()
+            try:
+                check_resp = cffi_requests.get(
+                    "https://chatgpt.com/backend-api/me",
+                    headers={"authorization": f"Bearer {access_token}", "accept": "application/json"},
+                    proxy=proxy, timeout=15, impersonate="chrome120",
+                )
+                liveness_status, liveness_detail = classify_chatgpt_liveness_response(check_resp)
+            except Exception as exc:
+                liveness_status = "inconclusive"
+                liveness_detail = f"network error: {type(exc).__name__}"
 
-            if check_resp.status_code != 200:
-                err_detail = ""
-                try:
-                    err_detail = str(check_resp.json().get("detail", ""))[:80]
-                except Exception:
-                    err_detail = check_resp.text[:80]
-                log(f"  ✗ {acc.email}: 已封禁 ({check_resp.status_code}: {err_detail})")
+            if liveness_status == "inconclusive":
+                results["inconclusive"] += 1
+                log(f"  ! {acc.email}: 存活检测无结论 ({liveness_detail})")
+                with Session(engine) as sess:
+                    model = sess.get(AccountModel, acc.id)
+                    if model:
+                        patch_account_graph(
+                            sess,
+                            model,
+                            summary_updates={
+                                "liveness_status": "inconclusive",
+                                "liveness_checked_at": liveness_checked_at,
+                                "liveness_error": liveness_detail[:160],
+                            },
+                        )
+                        sess.add(model)
+                        sess.commit()
+                continue
+
+            if liveness_status == "invalid":
+                log(f"  ✗ {acc.email}: 已确认失效 ({liveness_detail})")
                 results["dead"] += 1
                 with Session(engine) as sess:
                     model = sess.get(AccountModel, acc.id)
                     if model:
                         patch_account_graph(
-                            sess, model,
+                            sess,
+                            model,
                             lifecycle_status=AccountStatus.INVALID.value,
-                            summary_updates={"deactivated_at": _utcnow_iso(), "deactivated_reason": err_detail},
+                            summary_updates={
+                                "checked_at": liveness_checked_at,
+                                "valid": False,
+                                "check_source": "backend-api/me",
+                                "liveness_status": "invalid",
+                                "liveness_checked_at": liveness_checked_at,
+                                "liveness_error": "",
+                                "deactivated_at": liveness_checked_at,
+                                "deactivated_reason": liveness_detail[:160],
+                            },
                         )
                         sess.add(model)
                         sess.commit()
                 continue
+
+            with Session(engine) as sess:
+                model = sess.get(AccountModel, acc.id)
+                if model:
+                    current_graph = load_account_graphs(sess, [int(acc.id or 0)]).get(int(acc.id or 0), {})
+                    patch_account_graph(
+                        sess,
+                        model,
+                        lifecycle_status=recover_lifecycle_status_for_valid_account(current_graph),
+                        summary_updates={
+                            "checked_at": liveness_checked_at,
+                            "valid": True,
+                            "check_source": "backend-api/me",
+                            "liveness_status": "valid",
+                            "liveness_checked_at": liveness_checked_at,
+                            "liveness_error": "",
+                            "deactivated_at": "",
+                            "deactivated_reason": "",
+                        },
+                    )
+                    sess.add(model)
+                    sess.commit()
 
             # 3. 上传到 CPA
             if cpa_api_url and cpa_api_key:
@@ -447,7 +658,8 @@ def refresh_and_sync_cpa(
             log(f"  ✗ {acc.email}: 异常 {exc}")
 
     log(f"[CPA Sync] 刷新 {results['refreshed']}, 上传 {results['uploaded']}, "
-        f"封禁 {results['dead']}, 跳过 {results['skipped']}, 错误 {results['error']}")
+        f"确认失效 {results['dead']}, 无结论 {results['inconclusive']}, "
+        f"跳过 {results['skipped']}, 错误 {results['error']}")
     return results
 
 

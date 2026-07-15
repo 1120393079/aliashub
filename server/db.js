@@ -250,6 +250,30 @@ const schema = `
   CREATE INDEX IF NOT EXISTS idx_registered_account_metadata_group
     ON registered_account_metadata(group_name COLLATE NOCASE, updated_at DESC);
 
+  CREATE TABLE IF NOT EXISTS registered_account_status_checks (
+    external_account_id TEXT PRIMARY KEY,
+    email TEXT NOT NULL COLLATE NOCASE,
+    detection_status TEXT NOT NULL DEFAULT 'unchecked',
+    account_status TEXT NOT NULL DEFAULT 'unknown',
+    credential_status TEXT NOT NULL DEFAULT 'unknown',
+    subscription_status TEXT NOT NULL DEFAULT 'unknown',
+    account_type TEXT NOT NULL DEFAULT 'unknown',
+    account_type_raw TEXT NOT NULL DEFAULT '',
+    code TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    retryable INTEGER NOT NULL DEFAULT 0,
+    source TEXT NOT NULL DEFAULT '',
+    http_status INTEGER NOT NULL DEFAULT 0,
+    evidence_path TEXT NOT NULL DEFAULT '',
+    checked_at TEXT NOT NULL DEFAULT '',
+    attempted_at TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_registered_account_status_checks_email
+    ON registered_account_status_checks(email COLLATE NOCASE, updated_at DESC);
+
   CREATE TABLE IF NOT EXISTS registered_account_nfapi_links (
     external_account_id TEXT NOT NULL,
     email TEXT NOT NULL COLLATE NOCASE,
@@ -302,6 +326,70 @@ export function getSetting(db, key, fallback = "") {
 
 export function getSettings(db) {
   return Object.fromEntries(db.prepare("SELECT key, value FROM settings").all().map((row) => [row.key, row.value]));
+}
+
+export function listRegisteredAccountStatusChecks(db) {
+  return db.prepare(`
+    SELECT * FROM registered_account_status_checks
+    ORDER BY updated_at DESC
+  `).all().map((row) => ({
+    ...row,
+    retryable: Boolean(row.retryable),
+  }));
+}
+
+export function upsertRegisteredAccountStatusCheck(db, outcome = {}) {
+  const externalAccountId = String(outcome.external_account_id || outcome.id || "").trim();
+  const email = String(outcome.email || "").trim().toLowerCase();
+  if (!externalAccountId || !email) throw new Error("账号状态检测结果缺少账号身份");
+  const timestamp = nowIso();
+  db.prepare(`
+    INSERT INTO registered_account_status_checks (
+      external_account_id, email, detection_status, account_status,
+      credential_status, subscription_status, account_type, account_type_raw,
+      code, reason, retryable, source, http_status, evidence_path,
+      checked_at, attempted_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(external_account_id) DO UPDATE SET
+      email = excluded.email,
+      detection_status = excluded.detection_status,
+      account_status = excluded.account_status,
+      credential_status = excluded.credential_status,
+      subscription_status = excluded.subscription_status,
+      account_type = excluded.account_type,
+      account_type_raw = excluded.account_type_raw,
+      code = excluded.code,
+      reason = excluded.reason,
+      retryable = excluded.retryable,
+      source = excluded.source,
+      http_status = excluded.http_status,
+      evidence_path = excluded.evidence_path,
+      checked_at = excluded.checked_at,
+      attempted_at = excluded.attempted_at,
+      updated_at = excluded.updated_at
+  `).run(
+    externalAccountId,
+    email,
+    String(outcome.detection_status || "unchecked"),
+    String(outcome.account_status || "unknown"),
+    String(outcome.credential_status || "unknown"),
+    String(outcome.subscription_status || "unknown"),
+    String(outcome.account_type || "unknown"),
+    String(outcome.account_type_raw || ""),
+    String(outcome.code || ""),
+    String(outcome.reason || ""),
+    outcome.retryable ? 1 : 0,
+    String(outcome.source || ""),
+    Math.max(0, Number(outcome.http_status || outcome.status_http) || 0),
+    String(outcome.evidence_path || outcome.status_evidence_path || ""),
+    String(outcome.checked_at || ""),
+    String(outcome.attempted_at || ""),
+    timestamp,
+    timestamp,
+  );
+  return db.prepare(`
+    SELECT * FROM registered_account_status_checks WHERE external_account_id = ?
+  `).get(externalAccountId);
 }
 
 export function audit(db, accountId, type, title, detail = "", metadata = {}) {
@@ -382,6 +470,14 @@ export function createDatabase({ filename, seedDemo = false } = {}) {
   if (!registrationColumns.includes("fingerprint_id")) db.exec("ALTER TABLE registration_jobs ADD COLUMN fingerprint_id TEXT NOT NULL DEFAULT ''");
   if (!registrationColumns.includes("deleted_at")) db.exec("ALTER TABLE registration_jobs ADD COLUMN deleted_at TEXT");
   db.exec("CREATE INDEX IF NOT EXISTS idx_registration_jobs_visible ON registration_jobs(deleted_at, created_at DESC)");
+  const accountStatusCheckColumns = db.pragma("table_info(registered_account_status_checks)")
+    .map((column) => column.name);
+  if (!accountStatusCheckColumns.includes("http_status")) {
+    db.exec("ALTER TABLE registered_account_status_checks ADD COLUMN http_status INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!accountStatusCheckColumns.includes("evidence_path")) {
+    db.exec("ALTER TABLE registered_account_status_checks ADD COLUMN evidence_path TEXT NOT NULL DEFAULT ''");
+  }
   const nfapiOAuthColumns = db.pragma("table_info(nfapi_oauth_import_sessions)").map((column) => column.name);
   if (!nfapiOAuthColumns.includes("external_account_id")) {
     db.exec("ALTER TABLE nfapi_oauth_import_sessions ADD COLUMN external_account_id INTEGER NOT NULL DEFAULT 0");

@@ -836,11 +836,79 @@ test("registration integration generates isolated addresses and exposes mailbox 
       assert.equal(token.body.access_token.startsWith("primary-token-"), false);
     });
 
+    await t.test("refreshes status and type for selected registered accounts only", async () => {
+      const before = await jsonRequest(runtime.app, "/api/registration/accounts");
+      const ids = before.body.items.slice(0, 2).map((item) => Number(item.id));
+      const calls = [];
+      client.refreshAccountPlans = async (selectedIds) => {
+        calls.push(selectedIds);
+        return {
+          updated: 1,
+          timed_out: 1,
+          items: [
+            {
+              account_id: selectedIds[0],
+              ok: true,
+              valid: true,
+              account_type: "free",
+              account_type_raw: "free",
+              account_type_source: "backend-api/accounts/check+subscriptions",
+              type_observed: true,
+              plan_detection_result: "confirmed",
+              plan_authority: "authoritative",
+            },
+            { account_id: selectedIds[1], ok: false, error: "proxy-user:proxy-password timeout" },
+          ],
+        };
+      };
+      try {
+        const response = await jsonRequest(runtime.app, "/api/registration/accounts/refresh-status", {
+          method: "POST",
+          body: JSON.stringify({ ids: [ids[0], String(ids[1]), ids[0]] }),
+        });
+        assert.equal(response.response.status, 200);
+        assert.deepEqual(calls, [ids]);
+        assert.equal(response.body.requested, 2);
+        assert.equal(response.body.checked, 1);
+        assert.equal(response.body.failed, 1);
+        const checkedItem = response.body.items.find((item) => item.id === ids[0]);
+        const failedItem = response.body.items.find((item) => item.id === ids[1]);
+        assert.equal(checkedItem.detection_status, "confirmed");
+        assert.equal(checkedItem.code, "check_completed");
+        assert.equal(checkedItem.type, "free");
+        assert.equal(checkedItem.status, "active");
+        assert.equal(checkedItem.retryable, false);
+        assert.equal(checkedItem.source, "registration-refresh");
+        assert.ok(Date.parse(checkedItem.time));
+        assert.equal(failedItem.detection_status, "inconclusive");
+        assert.equal(failedItem.code, "check_timeout");
+        assert.equal(failedItem.retryable, true);
+        assert.ok(failedItem.reason);
+        assert.equal(response.body.accounts.items.length, before.body.items.length);
+        assert.equal(response.body.accounts.items.find((item) => Number(item.id) === ids[0]).status_check_state, "checked");
+        assert.equal(response.body.accounts.items.find((item) => Number(item.id) === ids[1]).status_check_state, "failed");
+        assert.equal(db.prepare("SELECT COUNT(*) AS count FROM registered_account_status_checks").get().count, 2);
+        assert.doesNotMatch(JSON.stringify(response.body), /proxy-user|proxy-password/);
+
+        const unrelated = await jsonRequest(runtime.app, "/api/registration/accounts/refresh-status", {
+          method: "POST",
+          body: JSON.stringify({ ids: [999] }),
+        });
+        assert.equal(unrelated.response.status, 409);
+        assert.deepEqual(calls, [ids]);
+      } finally {
+        delete client.refreshAccountPlans;
+      }
+    });
+
     await t.test("edits registered account names and groups locally", async () => {
       const before = await jsonRequest(runtime.app, "/api/registration/accounts");
       const target = before.body.items[0];
       assert.equal(target.custom_name, "");
-      assert.equal(target.group_name, "");
+      assert.equal(target.group_name, "Free 套餐");
+      assert.equal(target.custom_group_name, "");
+      assert.equal(target.default_group_name, "Free 套餐");
+      assert.equal(target.group_source, "plan");
 
       const saved = await jsonRequest(runtime.app, `/api/registration/accounts/${target.id}`, {
         method: "PATCH",
@@ -864,6 +932,9 @@ test("registration integration generates isolated addresses and exposes mailbox 
       const updated = listed.body.items.find((item) => Number(item.id) === Number(target.id));
       assert.equal(updated.custom_name, "主账号");
       assert.equal(updated.group_name, "长期使用");
+      assert.equal(updated.custom_group_name, "长期使用");
+      assert.equal(updated.default_group_name, "Free 套餐");
+      assert.equal(updated.group_source, "custom");
 
       const invalidInputs = [
         [{}, "请填写要修改的账号名称或分组"],
@@ -896,6 +967,22 @@ test("registration integration generates isolated addresses and exposes mailbox 
       });
       assert.equal(cleared.response.status, 200);
       assert.equal(db.prepare("SELECT COUNT(*) AS count FROM registered_account_metadata WHERE external_account_id = ?").get(String(target.id)).count, 0);
+      const regrouped = await jsonRequest(runtime.app, "/api/registration/accounts");
+      const autoGrouped = regrouped.body.items.find((item) => Number(item.id) === Number(target.id));
+      assert.equal(autoGrouped.group_name, "Free 套餐");
+      assert.equal(autoGrouped.custom_group_name, "");
+      assert.equal(autoGrouped.group_source, "plan");
+
+      await jsonRequest(runtime.app, `/api/registration/accounts/${target.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ group_name: "free" }),
+      });
+      const legacyPlanGroup = await jsonRequest(runtime.app, "/api/registration/accounts");
+      const normalizedPlanGroup = legacyPlanGroup.body.items
+        .find((item) => Number(item.id) === Number(target.id));
+      assert.equal(normalizedPlanGroup.group_name, "Free 套餐");
+      assert.equal(normalizedPlanGroup.custom_group_name, "");
+      assert.equal(normalizedPlanGroup.group_source, "plan");
 
       await jsonRequest(runtime.app, `/api/registration/accounts/${target.id}`, {
         method: "PATCH",

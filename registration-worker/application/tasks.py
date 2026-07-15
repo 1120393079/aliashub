@@ -904,23 +904,38 @@ def _build_platform_instance(platform_name: str, payload: dict[str, Any], logger
     return platform
 
 
-def _run_single_account_check(account_id: int, logger: TaskLogger | None = None) -> tuple[bool, dict[str, Any]]:
+def _run_single_account_check(
+    account_id: int,
+    logger: TaskLogger | None = None,
+    *,
+    proxy_url: str | None = None,
+) -> tuple[bool, dict[str, Any]]:
     with Session(engine) as session:
         model = session.get(AccountModel, account_id)
         if not model:
             raise ValueError("账号不存在")
-        plugin = get(model.platform)(config=RegisterConfig())
+        plugin = get(model.platform)(config=RegisterConfig(proxy=proxy_url))
         account = build_platform_account(session, model)
 
     valid = plugin.check_valid(account)
+    check_overview = {}
+    if hasattr(plugin, "get_last_check_overview"):
+        check_overview = plugin.get_last_check_overview() or {}
+    checked_at = _utcnow_iso()
     with Session(engine) as session:
         model = session.get(AccountModel, account_id)
         if model:
             model.updated_at = _utcnow()
             current_graph = load_account_graphs(session, [account_id]).get(account_id, {})
-            summary_updates = {"checked_at": _utcnow_iso(), "valid": bool(valid)}
-            if hasattr(plugin, "get_last_check_overview"):
-                summary_updates.update(plugin.get_last_check_overview() or {})
+            summary_updates = {"checked_at": checked_at, "valid": bool(valid)}
+            summary_updates.update(check_overview)
+            if check_overview.get("type_observed") is False:
+                for unobserved_plan_key in (
+                    "plan", "plan_name", "plan_state", "chips",
+                    "account_type", "account_type_raw", "account_type_source",
+                    "subscription_status", "plans",
+                ):
+                    summary_updates.pop(unobserved_plan_key, None)
             lifecycle_status = None
             if valid:
                 # **bug 修复**：原实现 ``recover_lifecycle_status_for_valid_account``
@@ -942,7 +957,60 @@ def _run_single_account_check(account_id: int, logger: TaskLogger | None = None)
             session.add(model)
             session.commit()
 
-    result = {"account_id": account_id, "valid": bool(valid), "platform": account.platform, "email": account.email}
+    result = {
+        "account_id": account_id,
+        "valid": bool(valid),
+        "availability": "available" if valid else "unavailable",
+        "platform": account.platform,
+        "email": account.email,
+        "detection_result": str(check_overview.get("detection_result") or "confirmed"),
+        "type_observed": bool(check_overview.get("type_observed", False)),
+        "plan_detection_result": str(
+            check_overview.get("plan_detection_result") or "inconclusive"
+        ),
+        "plan_authority": str(check_overview.get("plan_authority") or ""),
+        "account_type_confidence": str(
+            check_overview.get("account_type_confidence") or "none"
+        ),
+        "account_status": str(check_overview.get("account_status") or ("active" if valid else "unknown")),
+        "credential_status": str(check_overview.get("credential_status") or "unknown"),
+        "subscription_status": str(check_overview.get("subscription_status") or "unknown"),
+        "account_type": str(
+            check_overview.get("account_type")
+            or check_overview.get("plan")
+            or "unknown"
+        ),
+        "account_type_raw": str(
+            check_overview.get("account_type_raw")
+            or check_overview.get("plan_name")
+            or ""
+        ),
+        "account_type_source": str(
+            check_overview.get("account_type_source")
+            or check_overview.get("plan_source")
+            or check_overview.get("check_source")
+            or ""
+        ),
+        "status_code": str(
+            check_overview.get("status_code")
+            or check_overview.get("validity_code")
+            or "ok"
+        ),
+        "status_reason": str(
+            check_overview.get("status_reason")
+            or check_overview.get("validity_reason")
+            or "状态检测成功"
+        )[:240],
+        "status_retryable": bool(check_overview.get("status_retryable", False)),
+        "status_http": int(check_overview.get("status_http") or 0),
+        "status_evidence_path": str(check_overview.get("status_evidence_path") or "")[:120],
+        "status_source": str(
+            check_overview.get("status_source")
+            or check_overview.get("check_source")
+            or ""
+        ),
+        "status_checked_at": checked_at,
+    }
     if logger:
         logger.log(f"{account.email}: {'有效' if valid else '失效'}")
     return valid, result

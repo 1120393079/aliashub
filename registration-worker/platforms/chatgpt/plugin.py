@@ -65,6 +65,133 @@ def _mask_proxy(proxy: str | None) -> str:
     return f"{scheme}{sep}***@{host}" if sep else f"***@{host}"
 
 
+def _fetch_authenticated_session_status_details(account: Account, proxy: str | None = None) -> dict:
+    """Confirm a web session when bearer-only account APIs return no conclusion."""
+    from curl_cffi import requests as cffi_requests
+    from platforms.chatgpt.oauth import _jwt_claims_no_verify
+    from platforms.chatgpt.payment import _recognized_subscription_plan
+
+    extra = dict(account.extra or {})
+    session_token = str(extra.get("session_token") or extra.get("sessionToken") or "").strip()
+    if not session_token:
+        raise ValueError("账号缺少 session_token")
+
+    stored_cookies = str(extra.get("cookies") or extra.get("cookie") or "").strip()
+    payload = None
+    last_error: Exception | None = None
+    cookie_headers = [stored_cookies, ""] if stored_cookies else [""]
+    for cookie_header in cookie_headers:
+        client = cffi_requests.Session(impersonate="chrome120", proxy=proxy)
+        client.cookies.set(
+            "__Secure-next-auth.session-token",
+            session_token,
+            domain=".chatgpt.com",
+            path="/",
+        )
+        try:
+            response = client.get(
+                "https://chatgpt.com/api/auth/session",
+                headers={
+                    "accept": "application/json",
+                    **({"cookie": cookie_header} if cookie_header else {}),
+                },
+                timeout=20,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            break
+        except Exception as exc:
+            last_error = exc
+    if payload is None:
+        raise last_error or RuntimeError("账号会话检测失败")
+    if not isinstance(payload, dict):
+        raise ValueError("账号会话检测响应格式异常")
+    user = payload.get("user")
+    access_token = str(payload.get("accessToken") or "").strip()
+    if not isinstance(user, dict) or not access_token:
+        raise ValueError("账号会话未返回已认证身份")
+
+    claims = _jwt_claims_no_verify(access_token)
+    auth_claims = claims.get("https://api.openai.com/auth")
+    if not isinstance(auth_claims, dict):
+        raise ValueError("账号会话 Token 缺少身份声明")
+    try:
+        expires_at = int(claims.get("exp") or 0)
+    except (TypeError, ValueError):
+        expires_at = 0
+    if expires_at and expires_at <= int(time.time()):
+        raise ValueError("账号会话返回了过期 Token")
+
+    expected_email = str(account.email or "").strip().lower()
+    session_emails = {
+        str(user.get("email") or "").strip().lower(),
+        str(claims.get("email") or "").strip().lower(),
+    }
+    session_emails.discard("")
+    if not expected_email or expected_email not in session_emails:
+        raise ValueError("账号会话身份与本地邮箱不匹配")
+
+    expected_account_id = str(
+        extra.get("account_id") or extra.get("accountId") or account.user_id or ""
+    ).strip()
+    actual_account_id = str(auth_claims.get("chatgpt_account_id") or "").strip()
+    if expected_account_id and actual_account_id != expected_account_id:
+        raise ValueError("账号会话身份与本地 workspace 不匹配")
+
+    existing_overview = extra.get("account_overview")
+    existing_overview = existing_overview if isinstance(existing_overview, dict) else {}
+    existing_plan = str(
+        existing_overview.get("plan_override")
+        or existing_overview.get("account_type")
+        or existing_overview.get("plan_name")
+        or existing_overview.get("plan")
+        or ""
+    ).strip().lower()
+    raw_plan = str(auth_claims.get("chatgpt_plan_type") or "").strip().lower()
+    plan_source = "session_jwt"
+    detected_plan = _recognized_subscription_plan(raw_plan) or "unknown"
+    paid_plans = {"plus", "pro", "go", "team", "business", "enterprise", "edu", "trial"}
+    plan_inferred = detected_plan in paid_plans
+    type_observed = False
+    if plan_inferred:
+        status = detected_plan
+        account_type_raw = raw_plan
+    else:
+        status = existing_plan if existing_plan in ({"free"} | paid_plans) else "unknown"
+        account_type_raw = existing_plan if status != "unknown" else ""
+        if existing_plan in paid_plans:
+            plan_source = "last_confirmed_paid_plan"
+        elif existing_plan == "free":
+            plan_source = "last_confirmed_plan"
+        elif detected_plan == "free":
+            plan_source = "session_jwt_free_unconfirmed"
+        else:
+            plan_source = "not_detected"
+    return {
+        "status": status,
+        "account_type": status,
+        "account_type_raw": account_type_raw,
+        "account_type_source": plan_source,
+        "type_observed": type_observed,
+        "plan_detection_result": "inferred" if plan_inferred else "inconclusive",
+        "plan_authority": "jwt" if plan_inferred else "last_known",
+        "account_type_confidence": "low" if plan_inferred else "none",
+        "account_status": "active",
+        "credential_status": "valid",
+        "subscription_status": "unknown",
+        "detection_result": "confirmed",
+        "status_code": "plan_inferred_from_token" if plan_inferred else "plan_not_confirmed",
+        "status_reason": (
+            "登录会话有效，JWT 套餐声明仅作推测，等待实时接口确认"
+            if plan_inferred else "登录会话有效，但 JWT/历史值不能确认当前套餐"
+        ),
+        "status_retryable": True,
+        "source": "api/auth/session+jwt",
+        "session_valid": True,
+        "plan_source": plan_source,
+    }
+
+
 def _build_checkout_har_path(email: str) -> str:
     """为 Camoufox checkout 生成 HAR 文件路径：tools/captures/checkout-<ts>-<email-slug>.har"""
     project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -83,6 +210,52 @@ def _build_get_rt_har_path(email: str) -> str:
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     slug = re.sub(r"[^a-zA-Z0-9._-]+", "_", str(email or "anon")).strip("_") or "anon"
     return os.path.join(capture_dir, f"get-rt-{timestamp}-{slug}.har")
+
+
+def _exception_chain(error: Exception | None) -> list[Exception]:
+    result: list[Exception] = []
+    seen: set[int] = set()
+    current = error
+    while isinstance(current, Exception) and id(current) not in seen:
+        seen.add(id(current))
+        result.append(current)
+        current = current.__cause__ or current.__context__
+    return result
+
+
+def _classify_inconclusive_check(errors: list[Exception], error_type):
+    flattened = [item for error in errors for item in _exception_chain(error)]
+    for error in reversed(flattened):
+        code = str(getattr(error, "code", "") or "").strip()
+        reason = str(getattr(error, "reason", "") or "").strip()
+        if code and reason:
+            return error_type(
+                code=code,
+                reason=reason[:240],
+                source=str(getattr(error, "source", "") or "")[:100],
+                retryable=bool(getattr(error, "retryable", True)),
+                http_status=int(getattr(error, "http_status", 0) or 0),
+                evidence_path=str(getattr(error, "evidence_path", "") or "")[:120],
+            )
+
+    text = " ".join(str(error) for error in flattened).lower()
+    if re.search(r"timeout|timed out|超时|abort", text):
+        code, reason = "check_timeout", "状态检测超时，已保留上次结果"
+    elif re.search(r"429|rate.?limit|too many|限流|请求过多", text):
+        code, reason = "rate_limited", "状态检测请求频率受限，已保留上次结果"
+    elif re.search(r"cloudflare|challenge|captcha|<!doctype|<html", text):
+        code, reason = "challenge_page", "上游返回了验证页面，已保留上次结果"
+    elif re.search(r"proxy|代理", text):
+        code, reason = "proxy_unavailable", "账号代理暂时不可用，已保留上次结果"
+    elif re.search(r"401|403|unauthori|forbidden|授权", text):
+        code, reason = "auth_unauthorized_unconfirmed", "授权失败但证据不足，已保留上次结果"
+    elif re.search(r"5\d\d|upstream|service unavailable", text):
+        code, reason = "upstream_unavailable", "上游服务暂时不可用，已保留上次结果"
+    elif re.search(r"network|connect|socket|dns|tls|ssl|网络", text):
+        code, reason = "network_error", "状态检测网络异常，已保留上次结果"
+    else:
+        code, reason = "check_inconclusive", "状态检测未得出可靠结论，已保留上次结果"
+    return error_type(code=code, reason=reason, source="chatgpt/status-check")
 
 
 def _run_sync_checkout_isolated(checkout_fn, **kwargs):
@@ -193,8 +366,16 @@ class ChatGPTPlatform(BasePlatform):
     def check_valid(self, account: Account) -> bool:
         self._last_check_overview = {}
         last_error: Exception | None = None
+        check_errors: list[Exception] = []
+        inconclusive_error_type = None
         try:
-            from platforms.chatgpt.payment import fetch_subscription_status_details
+            from platforms.chatgpt.payment import (
+                ConclusiveAccountStatusError,
+                StatusCheckInconclusiveError,
+                _recognized_subscription_plan,
+                fetch_subscription_status_details,
+            )
+            inconclusive_error_type = StatusCheckInconclusiveError
             from core.proxy_pool import proxy_pool
             class _A: pass
             a = _A()
@@ -202,6 +383,9 @@ class ChatGPTPlatform(BasePlatform):
             a.access_token = extra.get("access_token") or account.token
             a.id_token = extra.get("id_token", "")
             a.cookies = extra.get("cookies", "")
+            a.session_token = extra.get("session_token", "")
+            a.email = getattr(account, "email", "")
+            a.user_id = getattr(account, "user_id", "")
             a.extra = extra
 
             region = str(getattr(account, "region", "") or extra.get("region", "") or "").strip()
@@ -217,45 +401,322 @@ class ChatGPTPlatform(BasePlatform):
 
             for proxy, should_report in proxy_candidates:
                 try:
-                    details = fetch_subscription_status_details(a, proxy=proxy)
+                    try:
+                        details = fetch_subscription_status_details(a, proxy=proxy)
+                    except ConclusiveAccountStatusError as status_error:
+                        existing_overview = extra.get("account_overview")
+                        existing_overview = existing_overview if isinstance(existing_overview, dict) else {}
+                        existing_plan = str(
+                            existing_overview.get("plan_override")
+                            or existing_overview.get("plan_name")
+                            or existing_overview.get("plan")
+                            or "unknown"
+                        ).strip().lower()
+                        self._last_check_overview = {
+                            "plan": existing_plan,
+                            "plan_name": existing_plan,
+                            "plan_state": str(existing_overview.get("plan_state") or "unknown"),
+                            "chips": list(existing_overview.get("chips") or []),
+                            "check_source": status_error.source,
+                            "status_source": status_error.source,
+                            "detection_result": "confirmed",
+                            "account_status": status_error.account_state,
+                            "credential_status": status_error.credential_state,
+                            "subscription_status": str(
+                                existing_overview.get("subscription_status") or "unknown"
+                            ),
+                            "account_type": existing_plan,
+                            "account_type_raw": str(
+                                existing_overview.get("account_type_raw") or existing_plan
+                            ),
+                            "account_type_source": str(
+                                existing_overview.get("account_type_source") or "last_confirmed"
+                            ),
+                            "type_observed": False,
+                            "plan_detection_result": "inconclusive",
+                            "plan_authority": "last_known",
+                            "account_type_confidence": "none",
+                            "status_code": status_error.code,
+                            "status_reason": status_error.reason,
+                            "status_retryable": False,
+                            "status_http": status_error.http_status,
+                            "status_evidence_path": status_error.evidence_path,
+                            "validity_code": status_error.code,
+                            "validity_reason": status_error.reason,
+                        }
+                        return False
+                    except Exception as api_error:
+                        check_errors.append(api_error)
+                        try:
+                            details = _fetch_authenticated_session_status_details(account, proxy=proxy)
+                        except Exception as session_error:
+                            check_errors.append(session_error)
+                            raise session_error from api_error
+                        if not details.get("type_observed"):
+                            api_code = str(getattr(api_error, "code", "") or "").strip()
+                            api_reason = str(getattr(api_error, "reason", "") or "").strip()
+                            if api_code and api_reason:
+                                details = dict(details)
+                                details["status_code"] = api_code
+                                details["status_reason"] = api_reason[:240]
+                                details["status_retryable"] = bool(
+                                    getattr(api_error, "retryable", True)
+                                )
+                                details["plan_status_source"] = str(
+                                    getattr(api_error, "source", "") or ""
+                                )[:100]
+                                details["status_http"] = int(
+                                    getattr(api_error, "http_status", 0) or 0
+                                )
+                                details["status_evidence_path"] = str(
+                                    getattr(api_error, "evidence_path", "") or ""
+                                )[:120]
                     if should_report and proxy:
                         proxy_pool.report_success(proxy)
-                    status = details.get("status")
-                    # 把订阅状态同步映射成前端能用的 plan_state / chips
-                    # 来源（避免老 chips 还带 "Plus" 但实际已 free）。
-                    if status == "plus":
+                    existing_overview = extra.get("account_overview")
+                    existing_overview = existing_overview if isinstance(existing_overview, dict) else {}
+                    existing_plan = str(
+                        existing_overview.get("plan_override")
+                        or existing_overview.get("account_type")
+                        or existing_overview.get("plan_name")
+                        or existing_overview.get("plan")
+                        or "unknown"
+                    ).strip().lower()
+                    status = str(details.get("account_type") or details.get("status") or "unknown").strip().lower()
+                    raw_plan = str(
+                        details.get("account_type_raw")
+                        or (status if status != "unknown" else "")
+                    ).strip().lower()[:64]
+                    subscription_status = str(details.get("subscription_status") or "unknown").strip().lower()
+                    plan_type_source = str(
+                        details.get("account_type_source") or details.get("plan_source") or details.get("source") or ""
+                    )[:100]
+                    observed_marker = details.get("type_observed")
+                    type_observed = bool(observed_marker) if isinstance(observed_marker, bool) else bool(
+                        raw_plan
+                        and status not in {"", "unknown"}
+                        and not (status == "free" and details.get("source") == "api/auth/session+jwt")
+                        and plan_type_source not in {
+                            "last_confirmed", "last_confirmed_plan", "last_confirmed_paid_plan",
+                            "session_jwt_free_unconfirmed", "not_detected",
+                        }
+                    )
+                    plan_detection_result = str(
+                        details.get("plan_detection_result")
+                        or ("confirmed" if type_observed else "inconclusive")
+                    ).strip().lower()
+                    plan_authority = str(
+                        details.get("plan_authority")
+                        or ("legacy" if type_observed else "last_known")
+                    ).strip().lower()
+                    account_type_confidence = str(
+                        details.get("account_type_confidence")
+                        or ("medium" if type_observed else "none")
+                    ).strip().lower()
+                    if (
+                        not type_observed
+                        and status == "free"
+                        and existing_plan in {"", "unknown"}
+                        and (
+                            details.get("source") == "api/auth/session+jwt"
+                            or plan_type_source == "session_jwt_free_unconfirmed"
+                        )
+                    ):
+                        status = "unknown"
+                        raw_plan = ""
+                        plan_type_source = "session_jwt_free_unconfirmed"
+                    if status == "unknown" and existing_plan not in {"", "unknown"}:
+                        status = existing_plan
+                        raw_plan = str(
+                            existing_overview.get("account_type_raw")
+                            or existing_overview.get("plan_name")
+                            or existing_plan
+                        ).strip().lower()[:64]
+                        plan_type_source = "last_confirmed_plan"
+                        type_observed = False
+                        plan_detection_result = "inconclusive"
+                        plan_authority = "last_known"
+                        account_type_confidence = "none"
+                    plan_inferred_from_token = False
+                    if not type_observed and a.access_token:
+                        from platforms.chatgpt.oauth import _jwt_claims_no_verify
+
+                        token_claims = _jwt_claims_no_verify(str(a.access_token))
+                        token_auth = token_claims.get("https://api.openai.com/auth")
+                        token_auth = token_auth if isinstance(token_auth, dict) else {}
+                        expected_account_id = str(
+                            extra.get("account_id") or extra.get("accountId")
+                            or getattr(account, "user_id", "") or ""
+                        ).strip()
+                        token_account_id = str(token_auth.get("chatgpt_account_id") or "").strip()
+                        token_plan = _recognized_subscription_plan(token_auth.get("chatgpt_plan_type"))
+                        if token_plan in {
+                            "plus", "pro", "go", "team", "business", "enterprise", "edu", "trial",
+                        } and (
+                            not expected_account_id or token_account_id == expected_account_id
+                        ):
+                            status = token_plan
+                            raw_plan = token_plan
+                            plan_type_source = "matching_access_token_claim"
+                            subscription_status = "unknown"
+                            plan_inferred_from_token = True
+                            type_observed = False
+                            plan_detection_result = "inferred"
+                            plan_authority = "jwt"
+                            account_type_confidence = "low"
+                    paid_labels = {
+                        "plus": "Plus",
+                        "pro": "Pro",
+                        "go": "Go",
+                        "team": "Team",
+                        "business": "Business",
+                        "enterprise": "Enterprise",
+                        "edu": "Edu",
+                    }
+                    status_code = str(details.get("status_code") or "ok").strip().lower()
+                    status_reason = str(details.get("status_reason") or "状态检测成功").strip()[:240]
+                    status_retryable = bool(details.get("status_retryable", False))
+                    if plan_inferred_from_token and status_code == "ok":
+                        status_code = "plan_inferred_from_token"
+                        status_reason = "套餐接口未返回类型，已根据匹配账号的 Token 声明识别套餐"
+                    if not type_observed and status_code == "ok":
+                        status_code = "plan_not_confirmed"
+                        status_reason = "账号身份有效，但本次未从实时套餐接口确认类型，保留上次显示"
+                        status_retryable = True
+                    if subscription_status in {"expired", "canceled", "past_due"}:
+                        if status in {"unknown", "other", "expired"} and existing_plan not in {"", "unknown"}:
+                            status = existing_plan
+                            raw_plan = str(
+                                existing_overview.get("account_type_raw")
+                                or existing_overview.get("plan_name")
+                                or existing_plan
+                            ).strip().lower()[:64]
+                            plan_type_source = "last_confirmed_plan"
+                        plan_state = "expired"
+                        chips = [paid_labels[status]] if status in paid_labels else []
+                        if status_code == "ok":
+                            status_code = "subscription_expired"
+                            status_reason = "付费订阅已过期，账号登录状态仍有效"
+                    elif status in paid_labels:
                         plan_state = "subscribed"
-                        chips = ["Plus"]
-                    elif status == "team":
-                        plan_state = "subscribed"
-                        chips = ["Team"]
+                        chips = [paid_labels[status]]
+                    elif status == "trial":
+                        plan_state = "trial"
+                        chips = ["Trial"]
                     elif status == "free":
                         plan_state = "free"
                         chips = ["Free"]
-                    elif status in ("expired", "invalid", "banned"):
-                        plan_state = "expired"
-                        chips = []
+                    elif status == "other":
+                        plan_state = "subscribed" if subscription_status == "active" else "unknown"
+                        chips = [raw_plan] if raw_plan else []
                     else:
                         plan_state = "unknown"
                         chips = []
+                    source = str(details.get("source") or "")[:100]
+                    status_source = str(details.get("plan_status_source") or source)[:100]
                     overview = {
                         "plan": status,
-                        "plan_name": status,
+                        "plan_name": raw_plan or status,
                         "plan_state": plan_state,
                         "chips": chips,
-                        "check_source": details.get("source"),
+                        "check_source": source,
+                        "status_source": status_source,
+                        "detection_result": str(details.get("detection_result") or "confirmed"),
+                        "type_observed": type_observed,
+                        "plan_detection_result": plan_detection_result,
+                        "plan_authority": plan_authority,
+                        "account_type_confidence": account_type_confidence,
+                        "account_status": str(details.get("account_status") or "active"),
+                        "credential_status": str(details.get("credential_status") or "valid"),
+                        "subscription_status": subscription_status,
+                        "account_type": status,
+                        "account_type_raw": raw_plan,
+                        "account_type_source": plan_type_source or source,
+                        "status_code": status_code,
+                        "status_reason": status_reason,
+                        "status_retryable": status_retryable,
+                        "status_http": int(details.get("status_http") or 0),
+                        "status_evidence_path": str(details.get("status_evidence_path") or "")[:120],
+                        "validity_code": status_code if status_code != "ok" else "",
+                        "validity_reason": status_reason if status_code != "ok" else "",
                     }
                     if isinstance(details.get("usage"), dict):
                         overview["chatgpt_usage"] = details["usage"]
+                    if isinstance(details.get("plans"), list):
+                        overview["plans"] = details["plans"]
+                    if details.get("plan_conflict"):
+                        overview["plan_conflict"] = True
+                    if details.get("session_valid") is True:
+                        overview["session_valid"] = True
+                    if details.get("plan_source"):
+                        overview["plan_source"] = details["plan_source"]
+                    if type_observed and source.startswith("backend-api/") and status not in {"", "unknown", "other"} \
+                            and plan_type_source not in {"last_confirmed_plan", "last_confirmed_paid_plan"}:
+                        overview["plan_override"] = ""
+                        overview["plan_override_source"] = ""
                     self._last_check_overview = overview
-                    return status not in ("expired", "invalid", "banned", None)
+                    return True
                 except Exception as exc:
                     last_error = exc
+                    if exc not in check_errors:
+                        check_errors.append(exc)
                     if should_report and proxy:
                         proxy_pool.report_fail(proxy)
                     continue
         except Exception as exc:
             last_error = exc
+            if exc not in check_errors:
+                check_errors.append(exc)
+        try:
+            from platforms.chatgpt.oauth import _jwt_claims_no_verify
+
+            fallback_extra = dict(account.extra or {})
+            access_token = str(fallback_extra.get("access_token") or account.token or "")
+            claims = _jwt_claims_no_verify(access_token)
+            expires_at = int(claims.get("exp") or 0)
+            if expires_at and expires_at <= int(time.time()):
+                existing_overview = fallback_extra.get("account_overview")
+                existing_overview = existing_overview if isinstance(existing_overview, dict) else {}
+                existing_plan = str(
+                    existing_overview.get("plan_override")
+                    or existing_overview.get("plan_name")
+                    or existing_overview.get("plan")
+                    or "unknown"
+                ).strip().lower()
+                self._last_check_overview = {
+                    "plan": existing_plan,
+                    "plan_name": existing_plan,
+                    "plan_state": str(existing_overview.get("plan_state") or "unknown"),
+                    "chips": list(existing_overview.get("chips") or []),
+                    "check_source": "credential/access-token-jwt",
+                    "status_source": "credential/access-token-jwt",
+                    "detection_result": "confirmed",
+                    "account_status": "unknown",
+                    "credential_status": "expired",
+                    "subscription_status": str(
+                        existing_overview.get("subscription_status") or "unknown"
+                    ),
+                    "account_type": existing_plan,
+                    "account_type_raw": str(
+                        existing_overview.get("account_type_raw") or existing_plan
+                    ),
+                    "account_type_source": str(
+                        existing_overview.get("account_type_source") or "last_confirmed"
+                    ),
+                    "status_code": "access_token_expired",
+                    "status_reason": "Access Token 已过期，需重新登录授权",
+                    "status_retryable": False,
+                    "validity_code": "access_token_expired",
+                    "validity_reason": "Access Token 已过期，需重新登录授权",
+                }
+                return False
+        except (TypeError, ValueError):
+            pass
+        if inconclusive_error_type is not None:
+            raise _classify_inconclusive_check(
+                check_errors or ([last_error] if last_error else []),
+                inconclusive_error_type,
+            ) from last_error
         raise RuntimeError("ChatGPT 账号状态检测失败，未更新有效性") from last_error
 
     def get_last_check_overview(self) -> dict:

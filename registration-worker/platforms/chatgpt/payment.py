@@ -17,7 +17,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, unquote, urlparse
 
 from curl_cffi import requests as cffi_requests
@@ -54,6 +54,11 @@ logger = logging.getLogger(__name__)
 PAYMENT_CHECKOUT_URL = "https://chatgpt.com/backend-api/payments/checkout"
 TEAM_CHECKOUT_BASE_URL = "https://chatgpt.com/checkout/openai_llc/"
 WHAM_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+ACCOUNTS_CHECK_URL = "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27"
+SUBSCRIPTIONS_URL = "https://chatgpt.com/backend-api/subscriptions"
+WHAM_USAGE_MAX_ATTEMPTS = 3
+WHAM_USAGE_RETRY_DELAYS = (0.2, 0.5)
+AUTHORITATIVE_STATUS_MAX_ATTEMPTS = 2
 
 # ── Stripe payment_pages init（accessToken → 完整 pay.openai.com 长链）────
 # 移植自 gopay-auto-protocol/oaipayy/server.py：在拿到 OpenAI 的
@@ -588,6 +593,8 @@ def _extract_chatgpt_account_id(account) -> str:
     if isinstance(extra, dict):
         direct_candidates.extend(
             [
+                extra.get("account_id", ""),
+                extra.get("accountId", ""),
                 extra.get("chatgpt_account_id", ""),
                 extra.get("chatgptAccountId", ""),
             ]
@@ -597,60 +604,618 @@ def _extract_chatgpt_account_id(account) -> str:
         if text:
             return text
 
-    id_token = getattr(account, "id_token", "") or (extra.get("id_token") if isinstance(extra, dict) else "")
-    parsed = None
-    if isinstance(id_token, dict):
-        parsed = id_token
-    elif isinstance(id_token, str) and id_token.strip().startswith("{"):
-        try:
-            parsed = json.loads(id_token)
-        except Exception:
-            parsed = None
-    if isinstance(parsed, dict):
-        for key in ("chatgpt_account_id", "chatgptAccountId", "account_id"):
-            value = str(parsed.get(key) or "").strip()
-            if value:
-                return value
+    token_candidates = [
+        getattr(account, "access_token", ""),
+        getattr(account, "id_token", ""),
+    ]
+    if isinstance(extra, dict):
+        token_candidates.extend(
+            [
+                extra.get("access_token", ""),
+                extra.get("accessToken", ""),
+                extra.get("id_token", ""),
+                extra.get("idToken", ""),
+            ]
+        )
+    from platforms.chatgpt.oauth import _jwt_claims_no_verify
+
+    for token in token_candidates:
+        parsed = token if isinstance(token, dict) else None
+        if isinstance(token, str) and token.strip().startswith("{"):
+            try:
+                parsed = json.loads(token)
+            except Exception:
+                parsed = None
+        if parsed is None and isinstance(token, str):
+            parsed = _jwt_claims_no_verify(token)
+        if not isinstance(parsed, dict):
+            continue
+        auth = parsed.get("https://api.openai.com/auth")
+        nodes = [parsed, auth] if isinstance(auth, dict) else [parsed]
+        for node in nodes:
+            for key in ("chatgpt_account_id", "chatgptAccountId", "account_id", "accountId"):
+                value = str(node.get(key) or "").strip()
+                if value:
+                    return value
     return ""
+
+
+_CONCLUSIVE_ACCOUNT_CODES = {
+    "account_banned": "banned",
+    "account_deactivated": "invalid",
+    "account_deleted": "invalid",
+    "account_disabled": "invalid",
+    "account_suspended": "suspended",
+    "user_banned": "banned",
+    "user_deactivated": "invalid",
+    "user_deleted": "invalid",
+    "user_disabled": "invalid",
+    "user_suspended": "suspended",
+    "access_token_expired": "expired",
+    "authentication_expired": "expired",
+    "invalid_token": "expired",
+    "session_expired": "expired",
+    "token_expired": "expired",
+    "auth_revoked": "invalid",
+    "authentication_revoked": "invalid",
+    "credentials_revoked": "invalid",
+    "session_revoked": "invalid",
+    "token_revoked": "invalid",
+}
+_ACCOUNT_STATUS_REASONS = {
+    "account_banned": "账号已被封禁",
+    "account_deactivated": "账号已被停用",
+    "account_deleted": "账号已被删除",
+    "account_disabled": "账号已被禁用",
+    "account_suspended": "账号已被暂停",
+    "user_banned": "用户已被封禁",
+    "user_deactivated": "用户已被停用",
+    "user_deleted": "用户已被删除",
+    "user_disabled": "用户已被禁用",
+    "user_suspended": "用户已被暂停",
+    "access_token_expired": "Access Token 已过期",
+    "authentication_expired": "登录凭据已过期",
+    "invalid_token": "Access Token 已失效",
+    "session_expired": "登录会话已过期",
+    "token_expired": "Access Token 已过期",
+    "auth_revoked": "登录授权已撤销",
+    "authentication_revoked": "登录授权已撤销",
+    "credentials_revoked": "账号凭据已撤销",
+    "session_revoked": "登录会话已撤销",
+    "token_revoked": "Access Token 已撤销",
+}
+
+
+class ConclusiveAccountStatusError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        result: str,
+        code: str,
+        reason: str,
+        source: str,
+        account_state: str = "unknown",
+        credential_state: str = "unknown",
+        http_status: int = 0,
+        evidence_path: str = "",
+    ):
+        super().__init__(reason)
+        self.result = result
+        self.code = code
+        self.reason = reason
+        self.source = source
+        self.account_state = account_state
+        self.credential_state = credential_state
+        self.http_status = http_status
+        self.evidence_path = evidence_path
+        self.retryable = False
+
+
+class StatusCheckInconclusiveError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        code: str,
+        reason: str,
+        source: str = "",
+        retryable: bool = True,
+        http_status: int = 0,
+        evidence_path: str = "",
+    ):
+        super().__init__(reason)
+        self.code = code
+        self.reason = reason
+        self.source = source
+        self.retryable = retryable
+        self.http_status = http_status
+        self.evidence_path = evidence_path
+
+
+def _failure_axes(code: str) -> tuple[str, str]:
+    if code.startswith("account_") or code.startswith("user_"):
+        state = code.rsplit("_", 1)[-1]
+        if state in {"disabled", "banned", "suspended", "deleted", "deactivated"}:
+            return state, "unknown"
+    if "revoked" in code or code == "invalid_token":
+        return "unknown", "revoked"
+    if "expired" in code:
+        return "unknown", "expired"
+    return "unknown", "unknown"
+
+
+def _normalize_status_code(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    normalized = re.sub(r"[^a-z0-9]+", "_", raw).strip("_")
+    return normalized[:80]
+
+
+def _conclusive_account_failure(response: Any, *, source: str) -> ConclusiveAccountStatusError | None:
+    status_code = int(getattr(response, "status_code", 0) or 0)
+    if status_code in {408, 425, 429} or status_code >= 500:
+        return None
+    try:
+        payload = response.json()
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    nodes: list[tuple[str, dict[str, Any]]] = [("response", payload)]
+    for parent_name in ("error", "detail", "account", "user", "auth", "authentication"):
+        parent = payload.get(parent_name)
+        if isinstance(parent, dict):
+            nodes.append((parent_name, parent))
+            for child_name in ("account", "user", "auth", "authentication"):
+                child = parent.get(child_name)
+                if isinstance(child, dict):
+                    nodes.append((f"{parent_name}.{child_name}", child))
+
+    for node_name, node in nodes:
+        context = node_name.rsplit(".", 1)[-1]
+        account_context = context in {"account", "user", "auth", "authentication"}
+        for field_name in ("code", "error_code", "type", "reason", "status"):
+            code = _normalize_status_code(node.get(field_name))
+            result = _CONCLUSIVE_ACCOUNT_CODES.get(code)
+            if result:
+                account_state, credential_state = _failure_axes(code)
+                return ConclusiveAccountStatusError(
+                    result=result,
+                    code=code,
+                    reason=_ACCOUNT_STATUS_REASONS[code],
+                    source=source,
+                    account_state=account_state,
+                    credential_state=credential_state,
+                    http_status=status_code,
+                    evidence_path=f"{node_name}.{field_name}",
+                )
+            if account_context and field_name in {"reason", "status"}:
+                contextual_code = {
+                    "banned": "account_banned",
+                    "deactivated": "account_deactivated",
+                    "deleted": "account_deleted",
+                    "disabled": "account_disabled",
+                    "expired": "authentication_expired",
+                    "revoked": "auth_revoked",
+                    "suspended": "account_suspended",
+                }.get(code)
+                if contextual_code:
+                    account_state, credential_state = _failure_axes(contextual_code)
+                    return ConclusiveAccountStatusError(
+                        result=_CONCLUSIVE_ACCOUNT_CODES[contextual_code],
+                        code=contextual_code,
+                        reason=_ACCOUNT_STATUS_REASONS[contextual_code],
+                        source=source,
+                        account_state=account_state,
+                        credential_state=credential_state,
+                        http_status=status_code,
+                        evidence_path=f"{node_name}.{field_name}",
+                    )
+        for flag_name in (
+            "account_banned", "account_deactivated", "account_deleted", "account_disabled",
+            "account_suspended", "user_banned", "user_deactivated", "user_deleted",
+            "user_disabled", "user_suspended", "auth_revoked", "authentication_revoked",
+            "credentials_revoked", "session_revoked", "token_revoked",
+        ):
+            if node.get(flag_name) is True:
+                account_state, credential_state = _failure_axes(flag_name)
+                return ConclusiveAccountStatusError(
+                    result=_CONCLUSIVE_ACCOUNT_CODES[flag_name],
+                    code=flag_name,
+                    reason=_ACCOUNT_STATUS_REASONS[flag_name],
+                    source=source,
+                    account_state=account_state,
+                    credential_state=credential_state,
+                    http_status=status_code,
+                    evidence_path=f"{node_name}.{flag_name}",
+                )
+    return None
+
+
+def _raise_conclusive_account_failure(response: Any, *, source: str) -> None:
+    evidence = _conclusive_account_failure(response, source=source)
+    if evidence:
+        raise evidence
+
+
+def _raise_inconclusive_http_failure(response: Any, *, source: str) -> None:
+    status_code = int(getattr(response, "status_code", 0) or 0)
+    if status_code < 400:
+        return
+    if status_code in {408, 425}:
+        code, reason = "check_timeout", "上游状态检测超时，已保留上次结果"
+    elif status_code == 429:
+        code, reason = "rate_limited", "上游请求频率受限，已保留上次结果"
+    elif status_code >= 500:
+        code, reason = "upstream_unavailable", "上游服务暂时不可用，已保留上次结果"
+    elif status_code in {401, 403}:
+        code, reason = "auth_unauthorized_unconfirmed", "上游授权失败但证据不足，已保留上次结果"
+    else:
+        code, reason = "upstream_rejected", "上游拒绝状态检测请求，已保留上次结果"
+    raise StatusCheckInconclusiveError(
+        code=code,
+        reason=reason,
+        source=source,
+        http_status=status_code,
+        evidence_path="http.status",
+    )
 
 
 def _recognized_subscription_plan(plan: str) -> str | None:
     raw = str(plan or "").strip().lower()
     if not raw:
         return None
-    if any(token in raw for token in ("team", "enterprise", "business")):
-        return "team"
-    if any(token in raw for token in ("plus", "pro", "premium", "paid")):
-        return "plus"
-    if raw in {"free", "basic", "starter", "hobby", "chatgptfreeplan"}:
-        return "free"
-    return None
+    compact = re.sub(r"[^a-z0-9]+", "", raw)
+    aliases = {
+        "free": {"free", "basic", "starter", "hobby", "chatgptfree", "chatgptfreeplan"},
+        "go": {"go", "goplan", "chatgptgo", "chatgptgoplan"},
+        "plus": {"plus", "premium", "chatgptplus", "chatgptplusplan"},
+        "pro": {"pro", "proplan", "chatgptpro", "chatgptproplan"},
+        "team": {"team", "teamplan", "chatgptteam", "chatgptteamplan"},
+        "business": {"business", "businessplan", "chatgptbusiness", "chatgptbusinessplan"},
+        "enterprise": {
+            "enterprise", "enterpriseplan", "chatgptenterprise", "chatgptenterpriseplan",
+            "corporate", "corporateplan",
+        },
+        "edu": {"edu", "eduplan", "education", "chatgptedu", "chatgpteduplan"},
+        "trial": {"trial", "trialing", "freetrial", "chatgpttrial"},
+    }
+    exact = next((family for family, values in aliases.items() if compact in values), None)
+    if exact:
+        return exact
+    tokens = set(re.findall(r"[a-z0-9]+", raw))
+    token_aliases = (
+        ("enterprise", {"enterprise", "corporate"}),
+        ("business", {"business"}),
+        ("team", {"team"}),
+        ("edu", {"edu", "education"}),
+        ("pro", {"pro"}),
+        ("plus", {"plus", "premium"}),
+        ("go", {"go"}),
+        ("trial", {"trial", "trialing"}),
+        ("free", {"free", "basic", "starter", "hobby"}),
+    )
+    return next((family for family, values in token_aliases if tokens & values), None)
+
+
+def _raw_subscription_plan(plan: Any) -> str:
+    raw = str(plan or "").strip().lower()
+    return re.sub(r"[^a-z0-9]+", "_", raw).strip("_")[:64]
 
 
 def _normalize_subscription_plan(plan: str) -> str:
-    return _recognized_subscription_plan(plan) or "free"
+    recognized = _recognized_subscription_plan(plan)
+    if recognized:
+        return recognized
+    return "other" if _raw_subscription_plan(plan) else "unknown"
+
+
+def _subscription_state_from_plan(plan: Any, family: str = "") -> str:
+    compact = re.sub(r"[^a-z0-9]+", "", str(plan or "").strip().lower())
+    if compact in {"expired", "subscriptionexpired", "planexpired", "ended"}:
+        return "expired"
+    if compact in {"cancelled", "canceled"}:
+        return "canceled"
+    if compact in {"pastdue", "past_due"}:
+        return "past_due"
+    if family == "free":
+        return "free"
+    if family == "trial":
+        return "trialing"
+    if family not in {"", "unknown"}:
+        return "active"
+    return "unknown"
+
+
+def _plan_observation(value: Any, *, source: str, scope: str) -> dict[str, Any] | None:
+    raw = _raw_subscription_plan(value)
+    if not raw:
+        return None
+    family = _recognized_subscription_plan(value) or "unknown"
+    return {
+        "plan_family": family,
+        "plan_code_raw": raw,
+        "subscription_state": _subscription_state_from_plan(value, family),
+        "source": source,
+        "scope": scope,
+    }
+
+
+def _subscription_details_from_me(data: dict) -> dict[str, Any]:
+    plans: list[dict[str, Any]] = []
+    top = _plan_observation(data.get("plan_type"), source="backend-api/me", scope="personal")
+    if top:
+        plans.append(top)
+    org_container = data.get("orgs")
+    orgs = org_container.get("data", []) if isinstance(org_container, dict) else (
+        org_container if isinstance(org_container, list) else []
+    )
+    if isinstance(orgs, list):
+        for org in orgs:
+            if not isinstance(org, dict):
+                continue
+            settings_ = org.get("settings") if isinstance(org.get("settings"), dict) else {}
+            observation = _plan_observation(
+                settings_.get("workspace_plan_type"),
+                source="backend-api/me",
+                scope="workspace",
+            )
+            if observation:
+                observation["workspace_id"] = str(org.get("id") or org.get("account_id") or "")[:80]
+                plans.append(observation)
+    rank = {
+        "enterprise": 90, "business": 80, "team": 70, "edu": 60,
+        "pro": 50, "plus": 40, "go": 30, "trial": 20, "free": 10,
+        "unknown": 1,
+    }
+    primary = max(plans, key=lambda item: rank.get(item["plan_family"], 1), default=None)
+    return {
+        "status": (primary or {}).get("plan_family", "unknown"),
+        "account_type_raw": (primary or {}).get("plan_code_raw", ""),
+        "subscription_state": (primary or {}).get("subscription_state", "unknown"),
+        "plans": plans,
+    }
 
 
 def _subscription_status_from_me(data: dict) -> str:
-    plan = data.get("plan_type") or ""
-    normalized = _normalize_subscription_plan(plan)
-    if normalized != "free":
-        return normalized
-
-    orgs = data.get("orgs", {}).get("data", [])
-    for org in orgs:
-        settings_ = org.get("settings", {})
-        normalized = _normalize_subscription_plan(settings_.get("workspace_plan_type"))
-        if normalized != "free":
-            return normalized
-    return "free"
+    details = _subscription_details_from_me(data)
+    return details["status"] if details["status"] != "unknown" else (
+        "other" if details["account_type_raw"] else "unknown"
+    )
 
 
 def _subscription_status_from_usage(data: dict) -> str:
     return _normalize_subscription_plan(data.get("plan_type"))
 
 
-def _fetch_usage_data(account, proxy: Optional[str] = None) -> dict:
+def _usage_account_id(data: dict[str, Any]) -> str:
+    for key in ("account_id", "accountId", "chatgpt_account_id", "chatgptAccountId"):
+        value = str(data.get(key) or "").strip()
+        if value:
+            return value
+    account = data.get("account")
+    if isinstance(account, dict):
+        return _usage_account_id(account)
+    return ""
+
+
+def _status_api_headers(account, account_id: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {account.access_token}",
+        "Chatgpt-Account-Id": account_id,
+        "Accept": "application/json",
+        "Origin": "https://chatgpt.com",
+        "Referer": "https://chatgpt.com/",
+        "User-Agent": WHAM_USAGE_USER_AGENT,
+    }
+
+
+def _fetch_authoritative_status_data(
+    account,
+    *,
+    account_id: str,
+    url: str,
+    source: str,
+    proxy: Optional[str] = None,
+    params: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    last_error: Exception | None = None
+    for attempt in range(AUTHORITATIVE_STATUS_MAX_ATTEMPTS):
+        try:
+            response = cffi_requests.get(
+                url,
+                headers=_status_api_headers(account, account_id),
+                params=params,
+                proxies=_build_proxies(proxy),
+                timeout=20,
+                impersonate="chrome124",
+            )
+            payload = None
+            try:
+                payload = response.json()
+            except Exception:
+                pass
+            status_code = int(getattr(response, "status_code", 0) or 0)
+            if source == "backend-api/subscriptions" and status_code == 404:
+                detail = str((payload or {}).get("detail") or "") if isinstance(payload, dict) else ""
+                if "no subscription found for account" in detail.lower():
+                    return {"_no_subscription": True}
+            _raise_conclusive_account_failure(response, source=source)
+            _raise_inconclusive_http_failure(response, source=source)
+            response.raise_for_status()
+            if not isinstance(payload, dict):
+                raise StatusCheckInconclusiveError(
+                    code="response_unrecognized",
+                    reason="上游状态响应格式异常，已保留上次结果",
+                    source=source,
+                    evidence_path="response.body",
+                )
+            return payload
+        except ConclusiveAccountStatusError:
+            raise
+        except StatusCheckInconclusiveError as exc:
+            last_error = exc
+            if not exc.retryable:
+                raise
+        except Exception as exc:
+            last_error = StatusCheckInconclusiveError(
+                code="network_error",
+                reason="权威套餐接口网络异常，已保留上次结果",
+                source=source,
+                evidence_path="request",
+            )
+            last_error.__cause__ = exc
+
+        if attempt + 1 < AUTHORITATIVE_STATUS_MAX_ATTEMPTS:
+            time.sleep(WHAM_USAGE_RETRY_DELAYS[0])
+
+    if last_error is not None:
+        raise last_error
+    raise StatusCheckInconclusiveError(
+        code="check_inconclusive",
+        reason="权威套餐接口未得出可靠结论，已保留上次结果",
+        source=source,
+    )
+
+
+def _fetch_accounts_check_data(account, account_id: str, proxy: Optional[str] = None) -> dict[str, Any]:
+    data = _fetch_authoritative_status_data(
+        account,
+        account_id=account_id,
+        url=ACCOUNTS_CHECK_URL,
+        source="backend-api/accounts/check",
+        proxy=proxy,
+    )
+    accounts = data.get("accounts")
+    if not isinstance(accounts, dict) or account_id not in accounts:
+        raise StatusCheckInconclusiveError(
+            code="account_identity_mismatch",
+            reason="权威状态响应缺少当前账号的精确 workspace 节点，已保留上次结果",
+            source="backend-api/accounts/check",
+            retryable=False,
+            evidence_path="response.accounts[account_id]",
+        )
+    if not isinstance(accounts[account_id], dict):
+        raise StatusCheckInconclusiveError(
+            code="response_unrecognized",
+            reason="权威账号状态节点格式异常，已保留上次结果",
+            source="backend-api/accounts/check",
+            evidence_path="response.accounts[account_id]",
+        )
+    return data
+
+
+def _fetch_subscriptions_data(account, account_id: str, proxy: Optional[str] = None) -> dict[str, Any]:
+    data = _fetch_authoritative_status_data(
+        account,
+        account_id=account_id,
+        url=SUBSCRIPTIONS_URL,
+        source="backend-api/subscriptions",
+        proxy=proxy,
+        params={"account_id": account_id},
+    )
+    if data.get("_no_subscription") is True:
+        return data
+    response_account_id = str(data.get("account_id") or data.get("id") or "").strip()
+    if not response_account_id or response_account_id != account_id:
+        raise StatusCheckInconclusiveError(
+            code="account_identity_mismatch",
+            reason="订阅响应与当前账号 workspace 不匹配，已保留上次结果",
+            source="backend-api/subscriptions",
+            retryable=False,
+            evidence_path="response.account_id",
+        )
+    return data
+
+
+def _accounts_check_plan_signal(data: dict[str, Any], account_id: str) -> dict[str, Any]:
+    node = data["accounts"][account_id]
+    account_data = node.get("account") if isinstance(node.get("account"), dict) else {}
+    entitlement = node.get("entitlement") if isinstance(node.get("entitlement"), dict) else {}
+    account_observation = _plan_observation(
+        account_data.get("plan_type"),
+        source="backend-api/accounts/check",
+        scope="account",
+    )
+    entitlement_observation = _plan_observation(
+        entitlement.get("subscription_plan"),
+        source="backend-api/accounts/check",
+        scope="entitlement",
+    )
+    entitlement_active = entitlement.get("has_active_subscription")
+    paid_observation = None
+    if (
+        entitlement_active is True
+        and entitlement_observation
+        and entitlement_observation["plan_family"] != "free"
+    ):
+        paid_observation = entitlement_observation
+    elif account_observation and account_observation["plan_family"] != "free":
+        paid_observation = account_observation
+    elif entitlement_observation and entitlement_observation["plan_family"] != "free":
+        paid_observation = entitlement_observation
+
+    if paid_observation:
+        paid_observation = dict(paid_observation)
+        paid_observation["evidence_path"] = (
+            "accounts[account_id].entitlement.subscription_plan"
+            if paid_observation.get("scope") == "entitlement"
+            else "accounts[account_id].account.plan_type"
+        )
+        if entitlement_active is True:
+            paid_observation["subscription_state"] = (
+                "trialing" if paid_observation["plan_family"] == "trial" else "active"
+            )
+        elif entitlement_active is False:
+            paid_observation["subscription_state"] = "expired"
+
+    free_inactive = bool(
+        account_observation
+        and account_observation["plan_family"] == "free"
+        and entitlement_observation
+        and entitlement_observation["plan_family"] == "free"
+        and entitlement_active is False
+    )
+    free_observation = dict(account_observation) if free_inactive else None
+    if free_observation:
+        free_observation["subscription_state"] = "free"
+        free_observation["evidence_path"] = "accounts[account_id].account.plan_type+entitlement"
+    return {
+        "paid_observation": paid_observation,
+        "free_observation": free_observation,
+        "free_inactive": free_inactive,
+    }
+
+
+def _subscriptions_plan_signal(data: dict[str, Any]) -> dict[str, Any] | None:
+    if data.get("_no_subscription") is True:
+        return None
+    observation = _plan_observation(
+        data.get("plan_type"),
+        source="backend-api/subscriptions",
+        scope="subscription",
+    )
+    if not observation:
+        return None
+    observation = dict(observation)
+    observation["evidence_path"] = "response.plan_type"
+    if data.get("is_delinquent") is True:
+        observation["subscription_state"] = "past_due"
+    elif observation["plan_family"] == "free":
+        observation["subscription_state"] = "free"
+    elif observation["plan_family"] == "trial":
+        observation["subscription_state"] = "trialing"
+    else:
+        observation["subscription_state"] = "active"
+    return observation
+
+
+def _fetch_usage_data(
+    account,
+    proxy: Optional[str] = None,
+    *,
+    max_attempts: int = WHAM_USAGE_MAX_ATTEMPTS,
+    require_identity: bool = False,
+) -> dict:
     if not account.access_token:
         raise ValueError("账号缺少 access_token")
 
@@ -659,21 +1224,91 @@ def _fetch_usage_data(account, proxy: Optional[str] = None) -> dict:
         "User-Agent": WHAM_USAGE_USER_AGENT,
     }
     chatgpt_account_id = _extract_chatgpt_account_id(account)
+    if require_identity and not chatgpt_account_id:
+        raise StatusCheckInconclusiveError(
+            code="account_identity_missing",
+            reason="账号缺少 workspace ID，无法核对套餐响应",
+            source="backend-api/wham/usage",
+            retryable=False,
+            evidence_path="credentials.account_id",
+        )
     if chatgpt_account_id:
         headers["Chatgpt-Account-Id"] = chatgpt_account_id
 
-    resp = cffi_requests.get(
-        WHAM_USAGE_URL,
-        headers=headers,
-        proxies=_build_proxies(proxy),
-        timeout=20,
-        impersonate="chrome124",
+    attempts = max(1, min(int(max_attempts or 1), 5))
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            resp = cffi_requests.get(
+                WHAM_USAGE_URL,
+                headers=headers,
+                proxies=_build_proxies(proxy),
+                timeout=20,
+                impersonate="chrome124",
+            )
+            _raise_conclusive_account_failure(resp, source="backend-api/wham/usage")
+            _raise_inconclusive_http_failure(resp, source="backend-api/wham/usage")
+            resp.raise_for_status()
+            try:
+                data = resp.json()
+            except Exception as exc:
+                raise StatusCheckInconclusiveError(
+                    code="response_unrecognized",
+                    reason="上游返回了无法识别的状态响应，已保留上次结果",
+                    source="backend-api/wham/usage",
+                    evidence_path="response.json",
+                ) from exc
+            if not isinstance(data, dict):
+                raise StatusCheckInconclusiveError(
+                    code="response_unrecognized",
+                    reason="上游状态响应格式异常，已保留上次结果",
+                    source="backend-api/wham/usage",
+                    evidence_path="response.body",
+                )
+            response_account_id = _usage_account_id(data)
+            if require_identity and response_account_id != chatgpt_account_id:
+                raise StatusCheckInconclusiveError(
+                    code="account_identity_mismatch",
+                    reason="套餐响应缺少当前账号的精确 workspace 身份，已保留上次结果",
+                    source="backend-api/wham/usage",
+                    retryable=False,
+                    evidence_path="response.account_id",
+                )
+            if chatgpt_account_id and response_account_id and response_account_id != chatgpt_account_id:
+                raise StatusCheckInconclusiveError(
+                    code="account_identity_mismatch",
+                    reason="状态响应与当前账号 workspace 不匹配，已保留上次结果",
+                    source="backend-api/wham/usage",
+                    retryable=False,
+                    evidence_path="response.account_id",
+                )
+            return data
+        except ConclusiveAccountStatusError:
+            raise
+        except StatusCheckInconclusiveError as exc:
+            last_error = exc
+            if not exc.retryable:
+                raise
+        except Exception as exc:
+            last_error = StatusCheckInconclusiveError(
+                code="network_error",
+                reason="套餐状态接口网络异常，已保留上次结果",
+                source="backend-api/wham/usage",
+                evidence_path="request",
+            )
+            last_error.__cause__ = exc
+
+        if attempt + 1 < attempts:
+            delay_index = min(attempt, len(WHAM_USAGE_RETRY_DELAYS) - 1)
+            time.sleep(WHAM_USAGE_RETRY_DELAYS[delay_index])
+
+    if last_error is not None:
+        raise last_error
+    raise StatusCheckInconclusiveError(
+        code="check_inconclusive",
+        reason="套餐状态检测未得出可靠结论，已保留上次结果",
+        source="backend-api/wham/usage",
     )
-    resp.raise_for_status()
-    data = resp.json()
-    if not isinstance(data, dict):
-        raise ValueError("wham/usage 响应格式异常")
-    return data
 
 
 def _parse_cookie_str(cookies_str: str, domain: str) -> list:
@@ -9058,53 +9693,252 @@ def check_subscription_status(account: Account, proxy: Optional[str] = None) -> 
     """
     检测账号当前订阅状态。
 
-    Returns:
-        'free' / 'plus' / 'team'
+    Returns the canonical plan family. Unknown future plans return ``other`` and
+    remain available in ``fetch_subscription_status_details.account_type_raw``.
     """
     return fetch_subscription_status_details(account, proxy=proxy)["status"]
 
 
-def fetch_subscription_status_details(account: Account, proxy: Optional[str] = None) -> dict:
-    """Return normalized subscription status plus raw usage data when available."""
-    if not account.access_token:
-        raise ValueError("账号缺少 access_token")
-
-    headers = {
-        "Authorization": f"Bearer {account.access_token}",
-        "Content-Type": "application/json",
+def _confirmed_subscription_details(
+    observation: dict[str, Any],
+    *,
+    plans: list[dict[str, Any]] | None = None,
+    plan_conflict: bool = False,
+    me: dict[str, Any] | None = None,
+    usage: dict[str, Any] | None = None,
+    accounts_check: dict[str, Any] | None = None,
+    subscriptions: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    raw_status = str(observation.get("plan_code_raw") or "")
+    status = str(observation.get("plan_family") or "unknown")
+    subscription_state = str(observation.get("subscription_state") or "unknown")
+    if status == "unknown" and raw_status and subscription_state not in {
+        "expired", "canceled", "past_due",
+    }:
+        status = "other"
+    source = str(observation.get("source") or "")
+    if source.startswith(("backend-api/accounts/check", "backend-api/subscriptions")):
+        plan_authority, confidence = "authoritative", "high"
+    elif source == "backend-api/wham/usage":
+        plan_authority, confidence = "verified", "medium"
+    else:
+        plan_authority, confidence = "weak", "low"
+    return {
+        "status": status,
+        "account_type": status,
+        "account_type_raw": raw_status,
+        "account_type_source": source,
+        "type_observed": bool(raw_status),
+        "plan_detection_result": "confirmed" if raw_status else "inconclusive",
+        "plan_authority": plan_authority,
+        "account_type_confidence": confidence,
+        "account_status": "active",
+        "credential_status": "valid",
+        "subscription_status": subscription_state,
+        "detection_result": "confirmed",
+        "status_code": "plan_conflict" if plan_conflict else "ok",
+        "status_reason": (
+            "套餐来源存在冲突，已按权威证据优先级保留本次观测类型"
+            if plan_conflict else "状态检测成功"
+        ),
+        "status_retryable": bool(plan_conflict),
+        "status_evidence_path": str(observation.get("evidence_path") or "")[:120],
+        "source": source,
+        "plans": list(plans or [observation]),
+        "plan_conflict": plan_conflict,
+        "me": me,
+        "usage": usage,
+        "accounts_check": accounts_check,
+        "subscriptions": subscriptions,
     }
 
+
+def fetch_subscription_status_details(account: Account, proxy: Optional[str] = None) -> dict:
+    """Return a plan observed from the strongest identity-matched live endpoint."""
+    if not account.access_token:
+        raise StatusCheckInconclusiveError(
+            code="credentials_missing",
+            reason="账号缺少 Access Token，无法完成状态检测",
+            source="local/credentials",
+            retryable=False,
+            evidence_path="credentials.access_token",
+        )
+
+    errors: list[Exception] = []
+    account_id = _extract_chatgpt_account_id(account)
+    accounts_check_data = None
+    subscriptions_data = None
+    accounts_signal: dict[str, Any] = {}
+    subscriptions_observation = None
+
+    if account_id:
+        try:
+            accounts_check_data = _fetch_accounts_check_data(account, account_id, proxy=proxy)
+            accounts_signal = _accounts_check_plan_signal(accounts_check_data, account_id)
+        except ConclusiveAccountStatusError:
+            raise
+        except Exception as exc:
+            errors.append(exc)
+            logger.info("accounts/check plan detection failed: %s", exc)
+
+        try:
+            subscriptions_data = _fetch_subscriptions_data(account, account_id, proxy=proxy)
+            subscriptions_observation = _subscriptions_plan_signal(subscriptions_data)
+        except ConclusiveAccountStatusError:
+            raise
+        except Exception as exc:
+            errors.append(exc)
+            logger.info("subscriptions plan detection failed: %s", exc)
+    else:
+        errors.append(StatusCheckInconclusiveError(
+            code="account_identity_missing",
+            reason="账号缺少 workspace ID，无法核对权威套餐响应",
+            source="local/credentials",
+            retryable=False,
+            evidence_path="credentials.account_id",
+        ))
+
+    accounts_paid = accounts_signal.get("paid_observation")
+    subscriptions_paid = (
+        subscriptions_observation
+        if subscriptions_observation
+        and subscriptions_observation.get("plan_family") != "free"
+        else None
+    )
+    authoritative_plans = [
+        item for item in (
+            accounts_paid,
+            accounts_signal.get("free_observation"),
+            subscriptions_observation,
+        ) if item
+    ]
+    if accounts_paid:
+        conflict = bool(
+            subscriptions_paid
+            and subscriptions_paid.get("plan_family") != accounts_paid.get("plan_family")
+        )
+        return _confirmed_subscription_details(
+            accounts_paid,
+            plans=authoritative_plans,
+            plan_conflict=conflict,
+            accounts_check=accounts_check_data,
+            subscriptions=subscriptions_data,
+        )
+    if subscriptions_paid:
+        conflict = bool(accounts_signal.get("free_inactive"))
+        return _confirmed_subscription_details(
+            subscriptions_paid,
+            plans=authoritative_plans,
+            plan_conflict=conflict,
+            accounts_check=accounts_check_data,
+            subscriptions=subscriptions_data,
+        )
+    if (
+        accounts_signal.get("free_inactive")
+        and isinstance(subscriptions_data, dict)
+        and subscriptions_data.get("_no_subscription") is True
+    ):
+        free_observation = dict(accounts_signal["free_observation"])
+        free_observation["source"] = "backend-api/accounts/check+subscriptions"
+        free_observation["evidence_path"] = "account.plan_type+entitlement+subscriptions.404"
+        return _confirmed_subscription_details(
+            free_observation,
+            plans=authoritative_plans,
+            accounts_check=accounts_check_data,
+            subscriptions=subscriptions_data,
+        )
+
+    usage_data = None
+    usage_observation = None
+    if account_id:
+        try:
+            usage_data = _fetch_usage_data(account, proxy=proxy, require_identity=True)
+            usage_observation = _plan_observation(
+                usage_data.get("plan_type"),
+                source="backend-api/wham/usage",
+                scope="workspace",
+            )
+        except ConclusiveAccountStatusError:
+            raise
+        except Exception as exc:
+            errors.append(exc)
+            logger.info("wham/usage plan detection failed: %s", exc)
+    if usage_observation:
+        usage_observation = dict(usage_observation)
+        usage_observation["evidence_path"] = "response.plan_type"
+        return _confirmed_subscription_details(
+            usage_observation,
+            plans=authoritative_plans + [usage_observation],
+            usage=usage_data,
+            accounts_check=accounts_check_data,
+            subscriptions=subscriptions_data,
+        )
+
+    me_data = None
+    me_details: dict[str, Any] = {"status": "unknown", "plans": []}
     try:
-        resp = cffi_requests.get(
+        response = cffi_requests.get(
             "https://chatgpt.com/backend-api/me",
-            headers=headers,
+            headers={
+                "Authorization": f"Bearer {account.access_token}",
+                "Content-Type": "application/json",
+            },
             proxies=_build_proxies(proxy),
             timeout=20,
             impersonate="chrome110",
         )
-        resp.raise_for_status()
-        data = resp.json()
-        if isinstance(data, dict):
-            usage_data = None
-            try:
-                usage_data = _fetch_usage_data(account, proxy=proxy)
-            except Exception as usage_exc:
-                logger.info("check_subscription_status usage enrichment failed: %s", usage_exc)
-            me_status = _subscription_status_from_me(data)
-            usage_status = _recognized_subscription_plan(usage_data.get("plan_type")) if isinstance(usage_data, dict) else None
-            return {
-                "status": usage_status or me_status,
-                "source": "backend-api/wham/usage" if usage_status else "backend-api/me",
-                "me": data,
-                "usage": usage_data,
-            }
+        _raise_conclusive_account_failure(response, source="backend-api/me")
+        _raise_inconclusive_http_failure(response, source="backend-api/me")
+        response.raise_for_status()
+        me_data = response.json()
+        if not isinstance(me_data, dict):
+            raise StatusCheckInconclusiveError(
+                code="response_unrecognized",
+                reason="上游账号状态响应格式异常，已保留上次结果",
+                source="backend-api/me",
+                evidence_path="response.body",
+            )
+        me_details = _subscription_details_from_me(me_data)
+    except ConclusiveAccountStatusError:
+        raise
     except Exception as exc:
-        logger.info("check_subscription_status fallback to wham/usage: %s", exc)
+        errors.append(exc)
+        logger.info("backend-api/me plan detection failed: %s", exc)
 
-    data = _fetch_usage_data(account, proxy=proxy)
-    return {
-        "status": _subscription_status_from_usage(data),
-        "source": "backend-api/wham/usage",
-        "me": None,
-        "usage": data,
-    }
+    me_status = str(me_details.get("status") or "unknown")
+    me_observation = next(
+        (
+            plan for plan in me_details.get("plans", [])
+            if plan.get("plan_family") == me_status
+        ),
+        None,
+    )
+    if me_observation:
+        me_observation = dict(me_observation)
+        me_observation["evidence_path"] = "response.plan_type|orgs[].settings.workspace_plan_type"
+        return _confirmed_subscription_details(
+            me_observation,
+            plans=authoritative_plans + list(me_details.get("plans") or []),
+            me=me_data,
+            usage=usage_data,
+            accounts_check=accounts_check_data,
+            subscriptions=subscriptions_data,
+        )
+
+    structured_errors = [
+        error for error in errors if isinstance(error, StatusCheckInconclusiveError)
+    ]
+    if structured_errors:
+        raise structured_errors[-1]
+    if errors:
+        raise StatusCheckInconclusiveError(
+            code="check_inconclusive",
+            reason="实时套餐检测未得出可靠结论，已保留上次结果",
+            source="chatgpt/status-check",
+        ) from errors[-1]
+    raise StatusCheckInconclusiveError(
+        code="plan_not_detected",
+        reason="实时套餐接口均未返回可确认的类型，已保留上次结果",
+        source="chatgpt/status-check",
+        evidence_path="plan_type",
+    )

@@ -1,7 +1,13 @@
 import crypto from "node:crypto";
 import { isIP } from "node:net";
 import { generateSplits, persistInboxScanResult } from "./account-service.js";
-import { getSetting, nowIso, setSetting } from "./db.js";
+import {
+  getSetting,
+  listRegisteredAccountStatusChecks,
+  nowIso,
+  setSetting,
+  upsertRegisteredAccountStatusCheck,
+} from "./db.js";
 
 const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled", "interrupted"]);
 const ACTIVE_STATUSES = new Set(["pending", "claimed", "running", "cancel_requested"]);
@@ -42,6 +48,18 @@ function normalizeSelectedIds(input, label, maximum = 500) {
     throw Object.assign(new Error(`请选择有效的${label}`), { status: 400 });
   }
   if (ids.length > maximum) throw Object.assign(new Error(`单次最多删除 ${maximum} 个${label}`), { status: 400 });
+  return ids;
+}
+
+function normalizeAccountCheckIds(input, maximum = 500) {
+  if (!Array.isArray(input?.ids)) {
+    throw Object.assign(new Error("请选择要检测的注册账号"), { status: 400 });
+  }
+  const ids = [...new Set(input.ids.map((value) => Number(value)))];
+  if (!ids.length || ids.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
+    throw Object.assign(new Error("请选择有效的注册账号"), { status: 400 });
+  }
+  if (ids.length > maximum) throw Object.assign(new Error(`单次最多检测 ${maximum} 个注册账号`), { status: 400 });
   return ids;
 }
 
@@ -219,6 +237,19 @@ function materializeProxySession(value, usedSessions = new Set()) {
   throw new Error("动态代理会话生成失败");
 }
 
+function statusCheckProxyRoute(proxyLabel, proxyPool, usedSessions = new Set()) {
+  const label = String(proxyLabel || "").trim();
+  if (!label || label === "直连") return { primary: "", fallback: "" };
+  const matches = proxyPool.filter((proxy) => maskProxy(proxy) === label);
+  if (matches.length !== 1) return { primary: "", fallback: "" };
+  const primary = matches[0];
+  const materialized = materializeProxySession(primary, usedSessions);
+  return {
+    primary,
+    fallback: materialized && materialized !== primary ? materialized : "",
+  };
+}
+
 function safeProxySamples(result, maximum) {
   const sourceSamples = Array.isArray(result?.samples) ? result.samples : [];
   return sourceSamples.slice(0, maximum).map((item) => {
@@ -287,7 +318,8 @@ function safeRemoteText(value, maximum = 120) {
 function normalizeRemoteSignal(value, fallback = "") {
   const normalized = safeRemoteText(value, 80)
     .toLowerCase()
-    .replace(/[\s-]+/g, "_");
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
   return normalized || fallback;
 }
 
@@ -299,19 +331,413 @@ function firstRemoteText(...values) {
   return "";
 }
 
-function accountTypeFromPlan(planName, planState) {
-  const compact = String(planName || "").replace(/[^a-z0-9]/g, "");
-  if (compact === "free" || compact === "chatgptfreeplan") return "free";
-  if (compact === "plus" || compact === "chatgptplusplan") return "plus";
-  if (compact === "team" || compact === "chatgptteamplan") return "team";
-  if (planName && !new Set(["unknown", "none", "invalid", "expired", "banned", "disabled", "inactive"]).has(planName)) {
-    return planName;
-  }
-  if (new Set(["free", "trial", "eligible", "subscribed"]).has(planState)) return planState;
-  return "unknown";
+const PLAN_TYPE_ALIASES = new Map([
+  ["free", "free"], ["basic", "free"], ["starter", "free"], ["hobby", "free"],
+  ["chatgptfree", "free"], ["chatgptfreeplan", "free"],
+  ["go", "go"], ["goplan", "go"], ["chatgptgo", "go"], ["chatgptgoplan", "go"],
+  ["plus", "plus"], ["premium", "plus"], ["chatgptplus", "plus"], ["chatgptplusplan", "plus"],
+  ["pro", "pro"], ["chatgptpro", "pro"], ["chatgptproplan", "pro"],
+  ["team", "team"], ["chatgptteam", "team"], ["chatgptteamplan", "team"],
+  ["business", "business"], ["chatgptbusiness", "business"], ["chatgptbusinessplan", "business"],
+  ["enterprise", "enterprise"], ["corporate", "enterprise"],
+  ["chatgptenterprise", "enterprise"], ["chatgptenterpriseplan", "enterprise"],
+  ["edu", "edu"], ["education", "edu"], ["chatgptedu", "edu"], ["chatgpteduplan", "edu"],
+  ["trial", "trial"], ["trialing", "trial"], ["freetrial", "trial"],
+  ["chatgpttrial", "trial"], ["chatgpttrialplan", "trial"],
+  ["chatgptfreetrial", "trial"], ["chatgptfreetrialplan", "trial"],
+]);
+
+const PLAN_GROUP_LABELS = new Map([
+  ["free", "Free 套餐"],
+  ["go", "Go 套餐"],
+  ["plus", "Plus 套餐"],
+  ["pro", "Pro 套餐"],
+  ["team", "Team 套餐"],
+  ["business", "Business 套餐"],
+  ["enterprise", "Enterprise 套餐"],
+  ["edu", "Edu 套餐"],
+  ["trial", "Trial 套餐"],
+]);
+
+function defaultPlanGroupName(accountSignals = {}) {
+  const type = normalizeRemoteSignal(accountSignals.account_type, "unknown");
+  if (PLAN_GROUP_LABELS.has(type)) return PLAN_GROUP_LABELS.get(type);
+  return safeAccountCheckText(accountSignals.account_type_raw, 120)
+    && !new Set(["unknown", "none", "null"]).has(normalizeRemoteSignal(accountSignals.account_type_raw))
+    ? "Other 套餐"
+    : "待识别套餐";
 }
 
-function accountStatusSignals(item = {}) {
+function isPlanManagedGroupName(value) {
+  const text = safeAccountCheckText(value, 80);
+  if (!text) return false;
+  if (new Set(["Other 套餐", "待识别套餐"]).has(text)) return true;
+  const normalized = normalizeRemoteSignal(text);
+  if (new Set(["other", "unknown", "pending", "unrecognized"]).has(normalized)) return true;
+  return normalizePlanType(text).known;
+}
+
+const ACCOUNT_UNAVAILABLE_CODES = new Map([
+  ["account_banned", "banned"], ["user_banned", "banned"],
+  ["account_disabled", "disabled"], ["user_disabled", "disabled"],
+  ["account_deactivated", "deactivated"], ["user_deactivated", "deactivated"],
+  ["account_deleted", "deleted"], ["user_deleted", "deleted"],
+  ["account_suspended", "suspended"], ["user_suspended", "suspended"],
+]);
+
+const CREDENTIAL_EXPIRED_CODES = new Set([
+  "access_token_expired", "authentication_expired", "jwt_expired", "session_expired", "token_expired",
+]);
+const CREDENTIAL_REVOKED_CODES = new Set([
+  "auth_revoked", "authentication_revoked", "credentials_revoked", "invalid_token",
+  "session_revoked", "token_revoked",
+]);
+const SUBSCRIPTION_STATUS_CODES = new Map([
+  ["subscription_expired", "expired"], ["subscription_canceled", "canceled"],
+  ["subscription_cancelled", "canceled"], ["subscription_past_due", "past_due"],
+]);
+
+function normalizeCheckCode(value, fallback = "") {
+  return normalizeRemoteSignal(value, fallback).slice(0, 80);
+}
+
+function safeAccountCheckText(value, maximum = 240) {
+  const raw = value instanceof Error ? value.message : value;
+  return safeRemoteText(redactProxySecrets(raw), maximum)
+    .replace(/\b((?:bearer|basic)\s+)[a-z0-9._~+/=-]{8,}/gi, "$1[REDACTED]")
+    .replace(/\beyj[a-z0-9_-]{10,}(?:\.[a-z0-9_-]{4,}){1,2}\b/gi, "[REDACTED_TOKEN]")
+    .replace(/((?:access[_ -]?token|refresh[_ -]?token|session[_ -]?token|authorization|cookie|password)\s*[:=]\s*)[^\s,;]+/gi, "$1[REDACTED]")
+    .slice(0, maximum);
+}
+
+function classifyAccountCheckError(value, fallbackCode = "check_failed") {
+  const text = safeAccountCheckText(value);
+  const lower = text.toLowerCase();
+  if (/timeout|timed out|\bdecode.*abort|aborted|超时/.test(lower)) {
+    return { code: "check_timeout", reason: "状态检测超时，请稍后重试", retryable: true };
+  }
+  if (/\b429\b|rate.?limit|too many|请求过多|限流/.test(lower)) {
+    return { code: "rate_limited", reason: "状态检测请求过多，请稍后重试", retryable: true };
+  }
+  if (/cloudflare|challenge|captcha|<!doctype|<html|网页/.test(lower)) {
+    return { code: "upstream_challenge", reason: "状态检测被上游网页验证拦截，请稍后重试", retryable: true };
+  }
+  if (/\bdns\b|enotfound|eai_again|getaddrinfo/.test(lower)) {
+    return { code: "dns_failure", reason: "状态检测域名解析暂时失败，请稍后重试", retryable: true };
+  }
+  if (/\btls\b|ssl|certificate|handshake/.test(lower)) {
+    return { code: "tls_failure", reason: "状态检测安全连接暂时失败，请稍后重试", retryable: true };
+  }
+  if (/proxy|代理/.test(lower)) {
+    return { code: "proxy_unavailable", reason: "状态检测代理暂时不可用，请稍后重试", retryable: true };
+  }
+  if (/\b5\d\d\b|service unavailable|bad gateway|gateway timeout/.test(lower)) {
+    return { code: "upstream_unavailable", reason: "状态检测上游服务暂时不可用，请稍后重试", retryable: true };
+  }
+  if (/\b401\b|unauthori[sz]ed/.test(lower)) {
+    return {
+      code: "authentication_unconfirmed",
+      reason: "登录凭据未通过本次检测，但证据不足，已保留上次结果",
+      retryable: true,
+    };
+  }
+  if (/\b403\b|forbidden/.test(lower)) {
+    return { code: "access_forbidden", reason: "本次状态检测被上游拒绝，账号状态未改变", retryable: true };
+  }
+  if (/network|connect|socket|fetch failed|econn|网页/.test(lower)) {
+    return { code: "network_error", reason: "状态检测网络暂时不可用，请稍后重试", retryable: true };
+  }
+  return {
+    code: normalizeCheckCode(fallbackCode, "check_failed"),
+    reason: "状态检测暂时失败，请稍后重试",
+    retryable: true,
+  };
+}
+
+function normalizePlanType(rawPlanName, planState = "unknown") {
+  const raw = safeAccountCheckText(rawPlanName, 120);
+  const normalized = normalizeRemoteSignal(raw);
+  const compact = normalized.replace(/[^a-z0-9]/g, "");
+  let type = PLAN_TYPE_ALIASES.get(compact) || "unknown";
+  let source = raw ? "plan_name" : "not_detected";
+  if (type === "unknown" && !raw && planState === "free") {
+    type = "free";
+    source = "plan_state";
+  } else if (type === "unknown" && !raw && new Set(["trial", "trialing"]).has(planState)) {
+    type = "trial";
+    source = "plan_state";
+  }
+  return {
+    type,
+    raw,
+    normalized: normalized || "unknown",
+    known: type !== "unknown",
+    source,
+  };
+}
+
+function isAuthoritativeStatusSource(source, { terminal = false } = {}) {
+  const normalized = safeAccountCheckText(source, 120).toLowerCase();
+  if (/^(?:backend[-_]?api)(?:[/:_-]|$)/.test(normalized)) return true;
+  if (normalized === "registration-refresh") return true;
+  return !terminal && normalized === "api/auth/session+jwt";
+}
+
+function isAuthoritativeCredentialSource(source) {
+  const normalized = safeAccountCheckText(source, 120).toLowerCase();
+  return /^(?:backend[-_]?api)(?:[/:_-]|$)/.test(normalized)
+    || normalized === "registration-refresh"
+    || normalized === "credential/access-token-jwt"
+    || normalized === "credential/session-jwt";
+}
+
+function normalizeAccountStatus(value) {
+  const status = normalizeRemoteSignal(value, "unknown");
+  return new Set(["active", "banned", "disabled", "deactivated", "deleted", "suspended"]).has(status)
+    ? status : "unknown";
+}
+
+function normalizeCredentialStatus(value) {
+  const status = normalizeRemoteSignal(value, "unknown");
+  return new Set(["valid", "expired", "revoked", "missing"]).has(status) ? status : "unknown";
+}
+
+function normalizeSubscriptionStatus(value, planState = "unknown") {
+  const status = normalizeRemoteSignal(value);
+  const aliases = new Map([
+    ["active", "active"], ["subscribed", "active"],
+    ["trial", "trialing"], ["trialing", "trialing"],
+    ["free", "free"], ["eligible", "free"],
+    ["past_due", "past_due"], ["canceled", "canceled"], ["cancelled", "canceled"],
+    ["expired", "expired"],
+  ]);
+  return aliases.get(status) || aliases.get(planState) || "unknown";
+}
+
+function refreshPlanEvidence(result = {}) {
+  const raw = firstRemoteText(
+    result?.account_type_raw,
+    result?.type_raw,
+    result?.plan_code_raw,
+    result?.plan_type_raw,
+    result?.account_type,
+    result?.type,
+    result?.plan_name,
+    result?.plan,
+  );
+  const normalizedRaw = normalizeRemoteSignal(raw);
+  const meaningful = Boolean(raw)
+    && !new Set(["unknown", "none", "null", "not_detected", "unavailable"]).has(normalizedRaw);
+  const planSource = safeAccountCheckText(firstRemoteText(
+    result?.account_type_source,
+    result?.type_source,
+    result?.plan_type_source,
+    result?.plan_source,
+  ), 120).toLowerCase();
+  const statusSource = safeAccountCheckText(firstRemoteText(
+    result?.status_source,
+    result?.source,
+    result?.check_source,
+  ), 120).toLowerCase();
+  let explicitlyObserved;
+  for (const value of [
+    result?.type_observed,
+    result?.account_type_observed,
+    result?.plan_observed,
+  ]) {
+    if (typeof value === "boolean") {
+      explicitlyObserved = value;
+      break;
+    }
+  }
+  const planDetection = normalizeRemoteSignal(result?.plan_detection_result);
+  const planDetectionInconclusive = new Set([
+    "error", "failed", "inconclusive", "timeout", "transient", "unconfirmed", "not_detected",
+  ]).has(planDetection);
+  const authority = normalizeRemoteSignal(result?.plan_authority);
+  const confidence = normalizeRemoteSignal(result?.account_type_confidence || result?.plan_confidence);
+  const weakSource = /(?:last[_ /.-]*confirmed|persisted|cached|fallback|session|jwt|token|unconfirmed|not[_ /.-]*detected)/i
+    .test(`${planSource} ${statusSource}`);
+  const authoritativeSource = /^(?:backend[-_]?api)(?:[/:_.-]|$)/i.test(planSource)
+    || /^(?:backend[-_]?api)(?:[/:_.-]|$)/i.test(statusSource);
+  const observed = result?.ok === true && meaningful && !planDetectionInconclusive && !weakSource
+    && (explicitlyObserved === true
+      || (explicitlyObserved !== false && (authoritativeSource || (!planSource && !statusSource))));
+  const normalizedPlan = normalizePlanType(raw);
+  return {
+    raw,
+    observed,
+    type: normalizedPlan.type,
+    known: normalizedPlan.known,
+    high_authority: observed && (new Set(["authoritative", "high"]).has(authority)
+      || confidence === "high"
+      || /backend[-_]?api\/accounts?\/check\+subscriptions?/i.test(planSource)),
+    explicitly_observed: explicitlyObserved,
+    weak_source: weakSource,
+  };
+}
+
+function refreshResultHasConclusiveNonPlanEvidence(result = {}) {
+  const code = normalizeCheckCode(firstRemoteText(
+    result?.status_code,
+    result?.code,
+    result?.validity_code,
+    result?.error_code,
+  ));
+  const source = safeAccountCheckText(firstRemoteText(
+    result?.status_source,
+    result?.source,
+    result?.check_source,
+  ), 120);
+  return (ACCOUNT_UNAVAILABLE_CODES.has(code) && isAuthoritativeStatusSource(source, { terminal: true }))
+    || ((CREDENTIAL_EXPIRED_CODES.has(code) || CREDENTIAL_REVOKED_CODES.has(code))
+      && isAuthoritativeCredentialSource(source))
+    || (SUBSCRIPTION_STATUS_CODES.has(code) && isAuthoritativeStatusSource(source, { terminal: true }));
+}
+
+function refreshResultNeedsProxyReview(result) {
+  if (!result || result.ok !== true) return true;
+  const detection = normalizeRemoteSignal(result.detection_status || result.detection_result);
+  if (new Set(["error", "failed", "inconclusive", "timeout", "transient"]).has(detection)) return true;
+  if (refreshResultHasConclusiveNonPlanEvidence(result)) return false;
+  const evidence = refreshPlanEvidence(result);
+  return !evidence.observed || evidence.type === "free";
+}
+
+function refreshResultMap(response, allowedIds) {
+  const result = new Map();
+  for (const item of Array.isArray(response?.items) ? response.items : []) {
+    const id = Number(item?.account_id ?? item?.id);
+    if (allowedIds.has(id) && !result.has(id)) result.set(id, item);
+  }
+  return result;
+}
+
+async function requestPlanRefreshChannel(client, ids, proxiesById) {
+  let response = { items: [], timed_out: 0 };
+  let failure = null;
+  try {
+    response = await client.refreshAccountPlans(ids, proxiesById);
+  } catch (error) {
+    failure = classifyAccountCheckError(error);
+  }
+  return {
+    resultById: refreshResultMap(response, new Set(ids)),
+    failure,
+    timedOut: Number(response?.timed_out) > 0,
+  };
+}
+
+function appendPlanRefreshAttempts(attemptsById, ids, channel) {
+  for (const id of ids) {
+    const result = channel.resultById.get(id);
+    let failure = null;
+    if (!result) {
+      failure = channel.failure || (channel.timedOut
+        ? classifyAccountCheckError("timeout", "check_timeout")
+        : classifyAccountCheckError("missing result", "missing_result"));
+    }
+    attemptsById.get(id).push({ result, failure });
+  }
+}
+
+function conclusivePlanRefreshResults(attempts) {
+  return attempts.filter(({ result }) => {
+    if (!result || result.ok !== true) return false;
+    const detection = normalizeRemoteSignal(result.detection_status || result.detection_result);
+    return !new Set(["error", "failed", "inconclusive", "timeout", "transient"]).has(detection)
+      && refreshPlanEvidence(result).observed;
+  });
+}
+
+function planRefreshAttemptsResolved(attempts) {
+  if (attempts.some(({ result }) => refreshResultHasConclusiveNonPlanEvidence(result))) return true;
+  const conclusive = conclusivePlanRefreshResults(attempts);
+  if (conclusive.some(({ result }) => refreshPlanEvidence(result).type !== "free")) return true;
+  const free = conclusive.filter(({ result }) => refreshPlanEvidence(result).type === "free");
+  return free.length >= 2 || free.some(({ result }) => refreshPlanEvidence(result).high_authority);
+}
+
+function selectPlanRefreshAttempt(attempts) {
+  const terminal = attempts.filter(({ result }) => refreshResultHasConclusiveNonPlanEvidence(result));
+  if (terminal.length) return terminal.at(-1);
+  const conclusive = conclusivePlanRefreshResults(attempts);
+  const nonFree = conclusive.filter(({ result }) => refreshPlanEvidence(result).type !== "free");
+  if (nonFree.length) return nonFree.at(-1);
+  const free = conclusive.filter(({ result }) => refreshPlanEvidence(result).type === "free");
+  if (free.length >= 2) return free.at(-1);
+  const highAuthorityFree = free.filter(({ result }) => refreshPlanEvidence(result).high_authority);
+  if (highAuthorityFree.length) return highAuthorityFree.at(-1);
+  if (free.length) {
+    const result = free.at(-1).result;
+    const latestFailure = [...attempts].reverse().find(({ failure }) => Boolean(failure))?.failure || null;
+    return {
+      result: {
+        ...result,
+        type_observed: false,
+        plan_detection_result: "inconclusive",
+        detection_result: "inconclusive",
+        status_code: "plan_confirmation_inconclusive",
+        status_reason: "检测通道未能共同确认 Free，已保留上次套餐",
+        status_retryable: true,
+      },
+      failure: latestFailure,
+    };
+  }
+  const latestResult = [...attempts].reverse().find(({ result }) => Boolean(result))?.result || null;
+  const latestFailure = [...attempts].reverse().find(({ failure }) => Boolean(failure))?.failure || null;
+  return { result: latestResult, failure: latestFailure };
+}
+
+async function refreshPlansWithProxyReview(client, ids, proxyRoutesById = new Map()) {
+  const attemptsById = new Map(ids.map((id) => [id, []]));
+  const primaryProxies = Object.fromEntries(ids
+    .map((id) => [id, proxyRoutesById.get(id)?.primary || ""])
+    .filter(([, proxy]) => Boolean(proxy)));
+  const primary = await requestPlanRefreshChannel(client, ids, primaryProxies);
+  appendPlanRefreshAttempts(attemptsById, ids, primary);
+
+  const fallbackIds = ids.filter((id) => proxyRoutesById.get(id)?.fallback
+    && refreshResultNeedsProxyReview(primary.resultById.get(id)));
+  if (fallbackIds.length) {
+    const fallbackProxies = Object.fromEntries(fallbackIds.map((id) => [
+      id,
+      proxyRoutesById.get(id).fallback,
+    ]));
+    const fallback = await requestPlanRefreshChannel(client, fallbackIds, fallbackProxies);
+    appendPlanRefreshAttempts(attemptsById, fallbackIds, fallback);
+
+    const directIds = fallbackIds.filter((id) => !planRefreshAttemptsResolved(attemptsById.get(id)));
+    if (directIds.length) {
+      const direct = await requestPlanRefreshChannel(client, directIds, {});
+      appendPlanRefreshAttempts(attemptsById, directIds, direct);
+    }
+  }
+
+  const resultById = new Map();
+  const failureById = new Map();
+  for (const id of ids) {
+    const selected = selectPlanRefreshAttempt(attemptsById.get(id));
+    if (selected.result) resultById.set(id, selected.result);
+    if (selected.failure) failureById.set(id, selected.failure);
+    if (selected.result && !refreshResultNeedsProxyReview(selected.result)) {
+      failureById.delete(id);
+    }
+  }
+
+  return {
+    resultById,
+    failureById,
+    received_results: [...attemptsById.values()].some((attempts) => attempts.some(({ result }) => result)),
+  };
+}
+
+function outcomeTimestamp(outcome = {}) {
+  const parsed = Date.parse(outcome.checked_at || outcome.attempted_at || "");
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function accountStatusSignals(item = {}, persistedOutcome = null) {
   const overview = item.overview && typeof item.overview === "object" && !Array.isArray(item.overview)
     ? item.overview : {};
   const summaryStatus = item.display_summary?.status && typeof item.display_summary.status === "object"
@@ -328,7 +754,15 @@ function accountStatusSignals(item = {}) {
     firstRemoteText(item.plan_state, overview.plan_state, summaryStatus.plan_state),
     "unknown",
   );
+  const declaredAccountType = firstRemoteText(
+    overview.account_type,
+    item.account_type,
+  );
   const rawPlanName = firstRemoteText(
+    overview.account_type_raw,
+    item.account_type_raw,
+    overview.plan_code_raw,
+    overview.plan_type_raw,
     item.plan_name,
     overview.plan_name,
     overview.plan,
@@ -337,51 +771,238 @@ function accountStatusSignals(item = {}) {
     summaryStatus.plan_name,
   );
   const planName = normalizeRemoteSignal(rawPlanName);
+  const declaredPlan = normalizePlanType(declaredAccountType);
+  const rawDetectedPlan = normalizePlanType(rawPlanName, planState);
+  const rawConflictsWithDeclared = declaredPlan.known && rawDetectedPlan.known
+    && declaredPlan.type !== rawDetectedPlan.type;
+  const detectedPlan = declaredPlan.known ? {
+    ...declaredPlan,
+    raw: rawConflictsWithDeclared ? declaredPlan.raw : (rawDetectedPlan.raw || declaredPlan.raw),
+    source: "account_type",
+  } : rawDetectedPlan;
   const displayStatus = normalizeRemoteSignal(
     firstRemoteText(item.display_status, overview.display_status, summaryStatus.display),
     lifecycleStatus,
   );
   const statusCheckedAt = safeRemoteText(
-    firstRemoteText(overview.checked_at, summaryStatus.checked_at),
+    firstRemoteText(
+      overview.status_checked_at,
+      item.status_checked_at,
+      overview.checked_at,
+      summaryStatus.checked_at,
+    ),
     80,
   );
   const statusCheckedAtMs = Date.parse(statusCheckedAt);
-  const statusStale = !Number.isFinite(statusCheckedAtMs)
+  let statusStale = !Number.isFinite(statusCheckedAtMs)
     || Date.now() - statusCheckedAtMs >= ACCOUNT_STATUS_REFRESH_COOLDOWN_MS;
-  const source = safeRemoteText(firstRemoteText(overview.check_source, overview.status_source), 100);
-  const unavailableStatuses = new Set(["invalid", "expired", "banned", "disabled", "deactivated", "deleted", "inactive"]);
-  const unavailableSignal = [
-    ["validity_status", validityStatus],
-    ["lifecycle_status", lifecycleStatus],
-    ["display_status", displayStatus],
-    ["plan_state", planState],
-  ].find(([, value]) => unavailableStatuses.has(value));
+  const source = safeAccountCheckText(firstRemoteText(
+    overview.status_source,
+    item.status_source,
+    overview.check_source,
+    item.source,
+  ), 100);
+  const authoritativeCheck = Number.isFinite(statusCheckedAtMs)
+    && isAuthoritativeStatusSource(source);
+  const remoteCode = normalizeCheckCode(firstRemoteText(
+    overview.status_code,
+    item.status_code,
+    overview.validity_code,
+    item.validity_code,
+    overview.detection_code,
+    overview.error_code,
+  ));
+  const remoteReason = safeAccountCheckText(firstRemoteText(
+    overview.status_reason,
+    item.status_reason,
+    overview.validity_reason,
+    item.validity_reason,
+    overview.detection_reason,
+    overview.check_error,
+  ));
+  const persisted = persistedOutcome && typeof persistedOutcome === "object" ? persistedOutcome : null;
+  const persistedSource = safeAccountCheckText(persisted?.source, 100);
+  const persistedCode = normalizeCheckCode(persisted?.code);
+  const remoteRetryable = typeof overview.status_retryable === "boolean"
+    ? overview.status_retryable : Boolean(item.status_retryable);
+  const remoteHttpStatus = Math.max(0, Number(
+    overview.status_http ?? item.status_http ?? overview.http_status ?? item.http_status,
+  ) || 0);
+  const remoteEvidencePath = safeAccountCheckText(firstRemoteText(
+    overview.status_evidence_path,
+    item.status_evidence_path,
+    overview.evidence_path,
+    item.evidence_path,
+  ), 160);
+  const persistedAt = outcomeTimestamp(persisted || {});
+  const remoteAt = Number.isFinite(statusCheckedAtMs) ? statusCheckedAtMs : 0;
+  const persistedHasStateEvidence = normalizeAccountStatus(persisted?.account_status) !== "unknown"
+    || normalizeCredentialStatus(persisted?.credential_status) !== "unknown"
+    || Boolean(persistedCode && persistedCode !== "check_completed");
+  const latestIsPersisted = Boolean(persisted && persistedAt >= remoteAt
+    && (!authoritativeCheck
+      || persisted?.detection_status === "inconclusive"
+      || persistedHasStateEvidence));
+  const remoteExplicitEvidence = Number.isFinite(statusCheckedAtMs)
+    && ((ACCOUNT_UNAVAILABLE_CODES.has(remoteCode)
+      && isAuthoritativeStatusSource(source, { terminal: true }))
+      || ((CREDENTIAL_EXPIRED_CODES.has(remoteCode) || CREDENTIAL_REVOKED_CODES.has(remoteCode))
+        && isAuthoritativeCredentialSource(source))
+      || (SUBSCRIPTION_STATUS_CODES.has(remoteCode)
+        && isAuthoritativeStatusSource(source, { terminal: true })));
+  const latestDetection = latestIsPersisted
+    ? normalizeRemoteSignal(persisted.detection_status, "unchecked")
+    : ((authoritativeCheck && overview.valid === true) || remoteExplicitEvidence ? "confirmed" : "unchecked");
+  const latestCode = latestIsPersisted ? persistedCode : remoteCode;
+  const latestReason = latestIsPersisted ? safeAccountCheckText(persisted.reason) : remoteReason;
+  const latestSource = latestIsPersisted ? persistedSource : source;
+  const latestHttpStatus = latestIsPersisted
+    ? Math.max(0, Number(persisted.http_status) || 0) : remoteHttpStatus;
+  const latestEvidencePath = latestIsPersisted
+    ? safeAccountCheckText(persisted.evidence_path, 160) : remoteEvidencePath;
+  const latestCheckedAt = latestIsPersisted
+    ? safeRemoteText(persisted.checked_at, 80)
+    : statusCheckedAt;
+  const latestAttemptedAt = persisted && persistedAt >= remoteAt
+    ? safeRemoteText(persisted.attempted_at, 80)
+    : statusCheckedAt;
+  const latestCheckedAtMs = Date.parse(latestCheckedAt);
+  statusStale = !Number.isFinite(latestCheckedAtMs)
+    || Date.now() - latestCheckedAtMs >= ACCOUNT_STATUS_REFRESH_COOLDOWN_MS;
+
+  const terminalCandidates = [
+    remoteCode && ACCOUNT_UNAVAILABLE_CODES.has(remoteCode)
+      && Number.isFinite(statusCheckedAtMs)
+      && isAuthoritativeStatusSource(source, { terminal: true })
+      ? { code: remoteCode, source, at: remoteAt, origin: "remote" } : null,
+    persistedCode && ACCOUNT_UNAVAILABLE_CODES.has(persistedCode)
+      && isAuthoritativeStatusSource(persistedSource, { terminal: true })
+      ? { code: persistedCode, source: persistedSource, at: persistedAt, origin: "persisted" } : null,
+  ].filter(Boolean).sort((left, right) => right.at - left.at);
+  const terminalCandidate = terminalCandidates[0] || null;
+  const credentialCandidates = [
+    remoteCode && (CREDENTIAL_EXPIRED_CODES.has(remoteCode) || CREDENTIAL_REVOKED_CODES.has(remoteCode))
+      && Number.isFinite(statusCheckedAtMs)
+      && isAuthoritativeCredentialSource(source)
+      ? { code: remoteCode, source, at: remoteAt, origin: "remote" } : null,
+    persistedCode && (CREDENTIAL_EXPIRED_CODES.has(persistedCode) || CREDENTIAL_REVOKED_CODES.has(persistedCode))
+      && persisted?.detection_status === "confirmed"
+      && isAuthoritativeCredentialSource(persistedSource)
+      ? { code: persistedCode, source: persistedSource, at: persistedAt, origin: "persisted" } : null,
+  ].filter(Boolean).sort((left, right) => right.at - left.at);
+  const credentialCandidate = credentialCandidates[0] || null;
+  const subscriptionCandidates = [
+    remoteCode && SUBSCRIPTION_STATUS_CODES.has(remoteCode)
+      && Number.isFinite(statusCheckedAtMs)
+      && isAuthoritativeStatusSource(source, { terminal: true })
+      ? { code: remoteCode, source, at: remoteAt, origin: "remote" } : null,
+    persistedCode && SUBSCRIPTION_STATUS_CODES.has(persistedCode)
+      && persisted?.detection_status === "confirmed"
+      && isAuthoritativeStatusSource(persistedSource, { terminal: true })
+      ? { code: persistedCode, source: persistedSource, at: persistedAt, origin: "persisted" } : null,
+  ].filter(Boolean).sort((left, right) => right.at - left.at);
+  const subscriptionCandidate = subscriptionCandidates[0] || null;
+  const confirmedRemoteActive = (authoritativeCheck
+    && (overview.valid === true || (typeof overview.valid !== "boolean" && validityStatus === "valid")))
+    || subscriptionCandidate?.origin === "remote";
+  const confirmedPersistedActive = persisted?.detection_status === "confirmed"
+    && ((normalizeAccountStatus(persisted.account_status) === "active"
+      && isAuthoritativeStatusSource(persistedSource))
+      || subscriptionCandidate?.origin === "persisted");
+  const confirmedActive = confirmedRemoteActive || confirmedPersistedActive;
+  const activeAt = Math.max(
+    confirmedRemoteActive ? remoteAt : 0,
+    confirmedPersistedActive ? persistedAt : 0,
+  );
+  const terminalEvidence = terminalCandidate && terminalCandidate.at >= activeAt
+    ? terminalCandidate : null;
+  const credentialEvidence = credentialCandidate && credentialCandidate.at >= activeAt
+    ? credentialCandidate : null;
+  const subscriptionEvidence = subscriptionCandidate && subscriptionCandidate.at >= activeAt
+    ? subscriptionCandidate : null;
 
   let availability = "unchecked";
   let available = null;
   let availabilitySource = "not_checked";
-  if (unavailableSignal || overview.disabled === true || overview.valid === false) {
+  const conflictingRemoteStatus = Boolean(terminalCandidate && confirmedActive);
+  if (terminalEvidence) {
     availability = "unavailable";
     available = false;
-    availabilitySource = unavailableSignal
-      ? `${unavailableSignal[0]}:${unavailableSignal[1]}`
-      : (overview.disabled === true ? "overview.disabled" : "overview.valid");
-  } else if (validityStatus === "valid" || overview.valid === true) {
+    availabilitySource = `code:${terminalEvidence.code}:confirmed`;
+  } else if (credentialEvidence) {
+    availability = "unavailable";
+    available = false;
+    availabilitySource = `code:${credentialEvidence.code}:credential`;
+  } else if (confirmedActive) {
     availability = "available";
     available = true;
-    availabilitySource = validityStatus === "valid" ? "validity_status:valid" : "overview.valid";
+    availabilitySource = confirmedRemoteActive
+      ? (overview.valid === true ? "overview.valid:confirmed" : "validity_status:valid:confirmed")
+      : "persisted.account_status:active";
   }
 
-  const accountType = accountTypeFromPlan(planName, planState);
-  const accountTypeSource = planName && accountType !== "unknown" ? "plan_name"
-    : (accountType !== "unknown" ? "plan_state" : "not_detected");
   const accessTokenAvailable = Boolean(accessTokenFromAccount(item));
   const sessionTokenAvailable = Boolean(accountCredential(item, ["session_token", "sessionToken"]));
   const refreshTokenAvailable = Boolean(accountCredential(item, ["refresh_token", "refreshToken"]));
   const idTokenAvailable = Boolean(accountCredential(item, ["id_token", "idToken"]));
+  const anyCredentialAvailable = accessTokenAvailable || sessionTokenAvailable || refreshTokenAvailable || idTokenAvailable;
+  const evidenceCode = terminalEvidence?.code || credentialEvidence?.code
+    || subscriptionEvidence?.code || latestCode;
+  let accountStatus = terminalEvidence
+    ? ACCOUNT_UNAVAILABLE_CODES.get(terminalEvidence.code)
+    : (credentialEvidence ? "unknown" : (confirmedActive ? "active" : "unknown"));
+  if (accountStatus === "unknown" && latestIsPersisted) {
+    accountStatus = normalizeAccountStatus(persisted.account_status);
+  }
+  let credentialStatus = normalizeCredentialStatus(firstRemoteText(
+    overview.credential_status,
+    overview.credential_state,
+  ));
+  if (credentialEvidence && CREDENTIAL_EXPIRED_CODES.has(credentialEvidence.code)) credentialStatus = "expired";
+  else if (credentialEvidence && CREDENTIAL_REVOKED_CODES.has(credentialEvidence.code)) credentialStatus = "revoked";
+  else if (credentialStatus === "unknown" && confirmedActive) credentialStatus = "valid";
+  else if (credentialStatus === "unknown" && !anyCredentialAvailable) credentialStatus = "missing";
+  else if (credentialStatus === "unknown" && latestIsPersisted) {
+    credentialStatus = normalizeCredentialStatus(persisted.credential_status);
+  }
+  let subscriptionStatus = normalizeSubscriptionStatus(
+    firstRemoteText(overview.subscription_status, overview.subscription_state),
+    planState,
+  );
+  if (subscriptionEvidence) {
+    subscriptionStatus = SUBSCRIPTION_STATUS_CODES.get(subscriptionEvidence.code);
+  } else if (subscriptionStatus === "unknown" && latestIsPersisted) {
+    subscriptionStatus = normalizeSubscriptionStatus(persisted.subscription_status);
+  }
+  const persistedType = normalizePlanType(persisted?.account_type_raw || persisted?.account_type || "");
+  const accountType = detectedPlan.known ? detectedPlan.type : (persistedType.known ? persistedType.type : "unknown");
+  const accountTypeRaw = detectedPlan.raw || safeAccountCheckText(persisted?.account_type_raw, 120);
+  const accountTypeSource = detectedPlan.known ? detectedPlan.source
+    : (persistedType.known ? "persisted" : (detectedPlan.raw ? "raw_plan_name" : "not_detected"));
+  const confirmation = terminalEvidence || credentialEvidence || subscriptionEvidence || confirmedActive
+    ? "confirmed" : "unconfirmed";
+  const confirmedAt = confirmation === "confirmed"
+    ? (terminalEvidence || credentialEvidence || subscriptionEvidence
+      ? ((terminalEvidence || credentialEvidence || subscriptionEvidence).origin === "persisted"
+        ? safeRemoteText(persisted?.checked_at, 80) : statusCheckedAt)
+      : (confirmedPersistedActive && persistedAt >= remoteAt
+        ? safeRemoteText(persisted?.checked_at, 80) : statusCheckedAt))
+    : "";
   return {
     account_type: accountType,
+    account_type_raw: accountTypeRaw,
+    account_type_known: accountType !== "unknown",
     account_type_source: accountTypeSource,
+    account_status: accountStatus,
+    credential_status: credentialStatus,
+    subscription_status: subscriptionStatus,
+    detection_status: latestDetection,
+    status_code: evidenceCode,
+    status_reason: latestReason,
+    status_retryable: latestIsPersisted ? Boolean(persisted.retryable) : remoteRetryable,
+    status_http: latestHttpStatus,
+    status_evidence_path: latestEvidencePath,
+    status_attempted_at: latestAttemptedAt,
     availability,
     available,
     availability_source: availabilitySource,
@@ -390,15 +1011,202 @@ function accountStatusSignals(item = {}) {
     display_status: displayStatus,
     plan_state: planState,
     plan_name: planName,
-    status_checked_at: statusCheckedAt,
-    status_source: source,
-    source,
-    status_check_required: availability === "unchecked" || accountType === "unknown" || statusStale,
+    status_checked_at: latestCheckedAt,
+    status_confirmed_at: confirmedAt,
+    status_source: latestSource,
+    source: latestSource,
+    status_confirmation: conflictingRemoteStatus ? "conflict" : confirmation,
+    status_conflict: conflictingRemoteStatus,
+    status_check_required: availability === "unchecked" || accountType === "unknown"
+      || latestDetection === "inconclusive" || statusStale,
     access_token_available: accessTokenAvailable,
     session_token_available: sessionTokenAvailable,
     refresh_token_available: refreshTokenAvailable,
     id_token_available: idTokenAvailable,
-    credentials_available: accessTokenAvailable || sessionTokenAvailable || refreshTokenAvailable || idTokenAvailable,
+    credentials_available: anyCredentialAvailable,
+  };
+}
+
+function refreshOutcomeFromResult(result, {
+  id,
+  email,
+  attemptedAt,
+  fallbackSignals = {},
+  requestFailure = null,
+} = {}) {
+  const source = safeAccountCheckText(firstRemoteText(
+    result?.status_source,
+    result?.source,
+    result?.check_source,
+  ), 100) || "registration-refresh";
+  const checkedAt = safeRemoteText(firstRemoteText(
+    result?.status_checked_at,
+    result?.checked_at,
+    result?.time,
+    result?.attempted_at,
+  ), 80) || attemptedAt;
+  const rawCode = normalizeCheckCode(firstRemoteText(
+    result?.status_code,
+    result?.code,
+    result?.validity_code,
+    result?.error_code,
+    result?.detection_code,
+    result?.error?.code,
+  ));
+  const rawReason = safeAccountCheckText(firstRemoteText(
+    result?.status_reason,
+    result?.reason,
+    result?.validity_reason,
+    result?.detection_reason,
+    result?.error?.message,
+    result?.error,
+  ));
+  const planEvidence = refreshPlanEvidence(result);
+  const observedRawPlan = planEvidence.observed ? planEvidence.raw : "";
+  const rawPlan = firstRemoteText(
+    observedRawPlan,
+    fallbackSignals.account_type_raw,
+    fallbackSignals.account_type,
+  );
+  const plan = normalizePlanType(rawPlan, fallbackSignals.plan_state);
+  const explicitAccountStatus = normalizeAccountStatus(result?.account_status || result?.account_state);
+  const explicitCredentialStatus = normalizeCredentialStatus(
+    result?.credential_status || result?.credential_state,
+  );
+  const explicitSubscriptionStatus = normalizeSubscriptionStatus(
+    result?.subscription_status || result?.subscription_state,
+    fallbackSignals.plan_state,
+  );
+  const terminalStatus = ACCOUNT_UNAVAILABLE_CODES.get(rawCode) || "";
+  const authoritativeTerminal = Boolean(terminalStatus)
+    && isAuthoritativeStatusSource(source, { terminal: true });
+  const rawCredentialCodeStatus = CREDENTIAL_EXPIRED_CODES.has(rawCode) ? "expired"
+    : (CREDENTIAL_REVOKED_CODES.has(rawCode) ? "revoked" : "");
+  const credentialCodeStatus = rawCredentialCodeStatus && isAuthoritativeCredentialSource(source)
+    ? rawCredentialCodeStatus : "";
+  const rawSubscriptionCodeStatus = SUBSCRIPTION_STATUS_CODES.get(rawCode) || "";
+  const subscriptionCodeStatus = rawSubscriptionCodeStatus
+    && isAuthoritativeStatusSource(source, { terminal: true })
+    ? rawSubscriptionCodeStatus : "";
+  const rawDetection = normalizeRemoteSignal(result?.detection_status || result?.detection_result);
+  const transientDetection = new Set(["error", "failed", "inconclusive", "timeout", "transient"])
+    .has(rawDetection);
+
+  let detectionStatus = "confirmed";
+  let code = rawCode;
+  let reason = rawReason;
+  let retryable = typeof result?.status_retryable === "boolean"
+    ? result.status_retryable : Boolean(result?.retryable);
+  let accountStatus = authoritativeTerminal ? terminalStatus : explicitAccountStatus;
+  let credentialStatus = credentialCodeStatus || explicitCredentialStatus;
+  let subscriptionStatus = subscriptionCodeStatus || explicitSubscriptionStatus;
+
+  if (requestFailure || !result || result.ok !== true || transientDetection) {
+    if (!authoritativeTerminal && !credentialCodeStatus && !subscriptionCodeStatus) {
+      const failure = requestFailure || classifyAccountCheckError(
+        `${rawCode} ${rawReason}`,
+        rawCode || (!result ? "missing_result" : "check_failed"),
+      );
+      detectionStatus = "inconclusive";
+      code = failure.code;
+      reason = failure.reason;
+      retryable = failure.retryable;
+      accountStatus = "unknown";
+      credentialStatus = "unknown";
+      subscriptionStatus = "unknown";
+    }
+  }
+  if (result?.ok === true && result?.valid === false
+    && !authoritativeTerminal && !credentialCodeStatus && !subscriptionCodeStatus) {
+    detectionStatus = "inconclusive";
+    code = "invalidity_unconfirmed";
+    reason = "上游未返回明确失效代码，账号状态保持不变";
+    retryable = false;
+    accountStatus = "unknown";
+  }
+  if (!requestFailure && result?.ok === true && result?.valid !== false && !transientDetection
+    && !authoritativeTerminal && !credentialCodeStatus && !subscriptionCodeStatus
+    && !planEvidence.observed) {
+    detectionStatus = "inconclusive";
+    code = rawCode && !new Set(["ok", "check_completed"]).has(rawCode)
+      ? rawCode : "plan_not_detected";
+    reason = rawReason && code !== "plan_not_detected"
+      ? rawReason : "本次未从权威套餐接口取得类型，已保留上次套餐";
+    retryable = true;
+    accountStatus = "unknown";
+    credentialStatus = "unknown";
+    subscriptionStatus = "unknown";
+  }
+  if (detectionStatus === "confirmed") {
+    if (authoritativeTerminal) {
+      accountStatus = terminalStatus;
+    } else if (result?.valid === true) {
+      accountStatus = "active";
+      if (credentialStatus === "unknown") credentialStatus = "valid";
+    }
+    if (!code) code = "check_completed";
+    if (!reason) reason = "账号状态检测完成";
+    retryable = false;
+  }
+  if (subscriptionStatus === "unknown") {
+    subscriptionStatus = normalizeSubscriptionStatus("", fallbackSignals.plan_state);
+  }
+  const accountType = plan.known ? plan.type : "unknown";
+  const outcome = {
+    external_account_id: String(id),
+    id: Number(id),
+    account_id: Number(id),
+    email: safeRemoteText(email, 320).toLowerCase(),
+    checked: detectionStatus === "confirmed",
+    detection_status: detectionStatus,
+    account_status: accountStatus,
+    credential_status: credentialStatus,
+    subscription_status: subscriptionStatus,
+    account_type: accountType,
+    account_type_raw: plan.raw,
+    type_observed: planEvidence.observed,
+    type: accountType,
+    type_raw: plan.raw,
+    status: accountStatus,
+    code,
+    reason,
+    retryable,
+    source,
+    http_status: Math.max(0, Number(result?.status_http ?? result?.http_status) || 0),
+    evidence_path: safeAccountCheckText(
+      result?.status_evidence_path ?? result?.evidence_path,
+      160,
+    ),
+    checked_at: checkedAt,
+    attempted_at: attemptedAt,
+    time: checkedAt,
+  };
+  return {
+    ...outcome,
+    status_http: outcome.http_status,
+    status_evidence_path: outcome.evidence_path,
+    error: outcome.checked ? "" : outcome.reason,
+  };
+}
+
+function normalizeStoredStatusOutcome(row = {}) {
+  return {
+    external_account_id: String(row.external_account_id || row.id || ""),
+    email: safeRemoteText(row.email, 320).toLowerCase(),
+    detection_status: normalizeRemoteSignal(row.detection_status, "unchecked"),
+    account_status: normalizeAccountStatus(row.account_status),
+    credential_status: normalizeCredentialStatus(row.credential_status),
+    subscription_status: normalizeSubscriptionStatus(row.subscription_status),
+    account_type: normalizePlanType(row.account_type).type,
+    account_type_raw: safeAccountCheckText(row.account_type_raw, 120),
+    code: normalizeCheckCode(row.code),
+    reason: safeAccountCheckText(row.reason),
+    retryable: Boolean(row.retryable),
+    source: safeAccountCheckText(row.source, 100),
+    http_status: Math.max(0, Number(row.http_status || row.status_http) || 0),
+    evidence_path: safeAccountCheckText(row.evidence_path || row.status_evidence_path, 160),
+    checked_at: safeRemoteText(row.checked_at, 80),
+    attempted_at: safeRemoteText(row.attempted_at, 80),
   };
 }
 
@@ -582,6 +1390,29 @@ export class RegistrationService {
     this.browserUrl = browserUrl || "/alias-hub/browser/vnc.html?autoconnect=true&resize=scale&path=websockify";
     this.scanPromises = new Map();
     this.accountStatusRefreshAttempts = new Map();
+    this.accountStatusCheckOutcomes = new Map();
+    try {
+      for (const row of listRegisteredAccountStatusChecks(db)) {
+        const outcome = normalizeStoredStatusOutcome(row);
+        if (outcome.external_account_id) {
+          this.accountStatusCheckOutcomes.set(outcome.external_account_id, outcome);
+        }
+      }
+    } catch {
+      // Keep the in-memory Map fallback for callers using an older test database.
+    }
+  }
+
+  persistAccountStatusOutcome(outcome) {
+    const normalized = normalizeStoredStatusOutcome(outcome);
+    if (!normalized.external_account_id || !normalized.email) return normalized;
+    this.accountStatusCheckOutcomes.set(normalized.external_account_id, normalized);
+    try {
+      upsertRegisteredAccountStatusCheck(this.db, normalized);
+    } catch {
+      // Existing in-memory behavior remains available if SQLite cannot be upgraded.
+    }
+    return normalized;
   }
 
   requireConnectorKey(req, res, next) {
@@ -1245,35 +2076,68 @@ export class RegistrationService {
   async refreshUncheckedAccountSignals(matched = []) {
     if (typeof this.client.refreshAccountPlans !== "function") return false;
     const now = Date.now();
+    const proxyPool = this.getProxyPool();
+    const usedProxySessions = new Set();
     for (const [key, attemptedAt] of this.accountStatusRefreshAttempts) {
       if (now - attemptedAt >= ACCOUNT_STATUS_REFRESH_COOLDOWN_MS) {
         this.accountStatusRefreshAttempts.delete(key);
       }
     }
     const candidates = [];
-    for (const { item } of matched) {
-      const signals = accountStatusSignals(item);
+    for (const { item, job } of matched) {
       const id = Number(item?.id);
       const email = safeRemoteText(item?.email, 320).toLowerCase();
+      const persisted = this.accountStatusCheckOutcomes.get(String(id));
+      const persistedMatches = persisted
+        && String(persisted.email || "").toLowerCase() === email;
+      const signals = accountStatusSignals(item, persistedMatches ? persisted : null);
       const key = Number.isSafeInteger(id) && id > 0 && email ? `${id}\n${email}` : "";
       if (!key || !signals.status_check_required || !signals.access_token_available
         || this.accountStatusRefreshAttempts.has(key)) {
         continue;
       }
-      candidates.push({ id, key });
+      const proxyRoute = statusCheckProxyRoute(job?.proxy_label, proxyPool, usedProxySessions);
+      candidates.push({ id, email, key, proxyRoute, signals });
       if (candidates.length >= ACCOUNT_STATUS_REFRESH_BATCH_SIZE) break;
     }
     if (!candidates.length) return false;
     candidates.forEach(({ key }) => this.accountStatusRefreshAttempts.set(key, now));
+    const proxyRoutesById = new Map(candidates.map(({ id, proxyRoute }) => [id, proxyRoute]));
+    const attemptedAt = nowIso();
     try {
-      await this.client.refreshAccountPlans(candidates.map(({ id }) => id));
-      return true;
-    } catch {
+      const refresh = await refreshPlansWithProxyReview(
+        this.client,
+        candidates.map(({ id }) => id),
+        proxyRoutesById,
+      );
+      for (const candidate of candidates) {
+        const outcome = refreshOutcomeFromResult(refresh.resultById.get(candidate.id), {
+          id: candidate.id,
+          email: candidate.email,
+          attemptedAt,
+          fallbackSignals: candidate.signals,
+          requestFailure: refresh.failureById.get(candidate.id) || null,
+        });
+        this.persistAccountStatusOutcome(outcome);
+      }
+      return refresh.received_results;
+    } catch (error) {
+      const requestFailure = classifyAccountCheckError(error);
+      for (const candidate of candidates) {
+        const outcome = refreshOutcomeFromResult(null, {
+          id: candidate.id,
+          email: candidate.email,
+          attemptedAt,
+          fallbackSignals: candidate.signals,
+          requestFailure,
+        });
+        this.persistAccountStatusOutcome(outcome);
+      }
       return false;
     }
   }
 
-  async listRegisteredAccounts() {
+  async listRegisteredAccounts({ refreshUnchecked = true } = {}) {
     let response = await this.client.listAccounts({ pageSize: 500 });
     const jobs = this.db.prepare(`
       SELECT * FROM registration_jobs
@@ -1310,7 +2174,7 @@ export class RegistrationService {
       return { item, job };
     }).filter(({ job }) => Boolean(job));
     let matched = matchRemoteItems(response.items);
-    if (await this.refreshUncheckedAccountSignals(matched)) {
+    if (refreshUnchecked && await this.refreshUncheckedAccountSignals(matched)) {
       try {
         response = await this.client.listAccounts({ pageSize: 500 });
         matched = matchRemoteItems(response.items);
@@ -1323,13 +2187,24 @@ export class RegistrationService {
       items: matched.map(({ item, job }) => {
         const passwordMetadata = passwordMetadataFromAccount(item);
         const passwordSetup = this.passwordSetupAvailability(job, item, passwordMetadata);
-        const accountSignals = accountStatusSignals(item);
         const metadata = metadataByAccountId.get(String(item.id || ""));
         const nfapiLink = nfapiByAccountId.get(String(item.id || ""));
+        const checkOutcome = this.accountStatusCheckOutcomes.get(String(item.id || ""));
+        const checkOutcomeMatches = checkOutcome
+          && String(checkOutcome.email || "").toLowerCase() === String(item.email || "").toLowerCase();
+        const accountSignals = accountStatusSignals(item, checkOutcomeMatches ? checkOutcome : null);
+        const checkState = checkOutcomeMatches
+          ? (checkOutcome.detection_status === "confirmed" ? "checked" : "failed")
+          : "";
+        const checkError = checkOutcomeMatches && checkOutcome.detection_status !== "confirmed"
+          ? checkOutcome.reason : "";
         const metadataMatches = metadata
           && String(metadata.email || "").toLowerCase() === String(item.email || "").toLowerCase();
         const nfapiMatches = nfapiLink
           && String(nfapiLink.email || "").toLowerCase() === String(item.email || "").toLowerCase();
+        const storedGroupName = metadataMatches ? String(metadata.group_name || "") : "";
+        const customGroupName = isPlanManagedGroupName(storedGroupName) ? "" : storedGroupName;
+        const defaultGroupName = defaultPlanGroupName(accountSignals);
         return {
           id: item.id,
           email: item.email,
@@ -1338,6 +2213,9 @@ export class RegistrationService {
           password_setup_reason: passwordSetup.reason,
           user_id: item.user_id,
           ...accountSignals,
+          status_check_state: checkState,
+          status_check_error: checkError,
+          status_check_attempted_at: checkOutcomeMatches ? checkOutcome.attempted_at : "",
           status: accountSignals.display_status !== "unknown"
             ? accountSignals.display_status : accountSignals.lifecycle_status,
           plan: accountSignals.account_type !== "unknown"
@@ -1346,7 +2224,10 @@ export class RegistrationService {
           birth_date: job?.birth_date || "",
           exit_ip: job?.exit_ip || "",
           custom_name: metadataMatches ? metadata.custom_name : "",
-          group_name: metadataMatches ? metadata.group_name : "",
+          group_name: customGroupName || defaultGroupName,
+          custom_group_name: customGroupName,
+          default_group_name: defaultGroupName,
+          group_source: customGroupName ? "custom" : "plan",
           nfapi: nfapiMatches ? {
             linked: nfapiLink.status === "imported",
             base_url: nfapiLink.nfapi_base_url,
@@ -1360,6 +2241,120 @@ export class RegistrationService {
           created_at: item.created_at,
         };
       }),
+    };
+  }
+
+  async refreshRegisteredAccountSignals(input = {}) {
+    const ids = normalizeAccountCheckIds(input);
+    if (typeof this.client.refreshAccountPlans !== "function") {
+      throw Object.assign(new Error("注册账号状态检测服务尚未配置"), { status: 503 });
+    }
+
+    const before = await this.listRegisteredAccounts({ refreshUnchecked: false });
+    const selected = before.items.filter((item) => ids.includes(Number(item.id)));
+    if (selected.length !== ids.length) {
+      throw Object.assign(new Error("选择中包含不属于本注册页面的账号"), { status: 409 });
+    }
+    const emailById = new Map(selected.map((item) => [Number(item.id), String(item.email || "")]));
+    const placeholders = ids.map(() => "?").join(",");
+    const jobs = this.db.prepare(`
+      SELECT external_account_id, email, proxy_label
+      FROM registration_jobs
+      WHERE external_account_id IN (${placeholders}) AND status = 'completed'
+      ORDER BY created_at DESC, id DESC
+    `).all(...ids.map(String));
+    const jobById = new Map();
+    for (const job of jobs) {
+      const id = Number(job.external_account_id);
+      if (!jobById.has(id)
+        && String(job.email || "").toLowerCase() === String(emailById.get(id) || "").toLowerCase()) {
+        jobById.set(id, job);
+      }
+    }
+    const proxyPool = this.getProxyPool();
+    const usedProxySessions = new Set();
+    const proxyRoutesById = new Map();
+    for (const id of ids) {
+      proxyRoutesById.set(id, statusCheckProxyRoute(
+        jobById.get(id)?.proxy_label,
+        proxyPool,
+        usedProxySessions,
+      ));
+    }
+    const refresh = await refreshPlansWithProxyReview(this.client, ids, proxyRoutesById);
+    const attemptedAt = nowIso();
+    const preliminaryResults = ids.map((id) => {
+      const result = refresh.resultById.get(id);
+      const fallbackSignals = selected.find((item) => Number(item.id) === id) || {};
+      const outcome = refreshOutcomeFromResult(result, {
+        id,
+        email: emailById.get(id),
+        attemptedAt,
+        fallbackSignals,
+        requestFailure: refresh.failureById.get(id) || null,
+      });
+      this.persistAccountStatusOutcome(outcome);
+      const email = emailById.get(id).toLowerCase();
+      this.accountStatusRefreshAttempts.delete(`${id}\n${email}`);
+      return outcome;
+    });
+
+    const accounts = await this.listRegisteredAccounts({ refreshUnchecked: false });
+    const selectedAfter = accounts.items.filter((item) => ids.includes(Number(item.id)));
+    const accountById = new Map(selectedAfter.map((item) => [Number(item.id), item]));
+    const publicResults = preliminaryResults.map((outcome) => {
+      const account = accountById.get(Number(outcome.id)) || {};
+      const credentialTerminal = CREDENTIAL_EXPIRED_CODES.has(outcome.code)
+        || CREDENTIAL_REVOKED_CODES.has(outcome.code);
+      const merged = {
+        ...outcome,
+        account_status: outcome.account_status !== "unknown" || credentialTerminal
+          ? outcome.account_status : String(account.account_status || "unknown"),
+        credential_status: outcome.credential_status !== "unknown"
+          ? outcome.credential_status : String(account.credential_status || "unknown"),
+        subscription_status: outcome.subscription_status !== "unknown"
+          ? outcome.subscription_status : String(account.subscription_status || "unknown"),
+        account_type: outcome.type_observed
+          ? outcome.account_type : String(account.account_type || "unknown"),
+        account_type_raw: outcome.type_observed
+          ? outcome.account_type_raw : String(account.account_type_raw || outcome.account_type_raw || ""),
+        availability: String(account.availability || "unchecked"),
+        available: typeof account.available === "boolean" ? account.available : null,
+      };
+      merged.type = merged.account_type;
+      merged.type_raw = merged.account_type_raw;
+      merged.status = merged.account_status;
+      this.persistAccountStatusOutcome(merged);
+      if (account && account.id) {
+        account.detection_status = merged.detection_status;
+        account.status_code = merged.code;
+        account.status_reason = merged.reason;
+        account.status_retryable = merged.retryable;
+        account.status_source = merged.source;
+        account.status_check_state = merged.checked ? "checked" : "failed";
+        account.status_check_error = merged.error;
+        account.status_check_attempted_at = merged.attempted_at;
+      }
+      return merged;
+    });
+    const typeCounts = {};
+    for (const item of selectedAfter) {
+      const type = String(item.account_type || "unknown");
+      typeCounts[type] = (typeCounts[type] || 0) + 1;
+    }
+    const checked = publicResults.filter((item) => item.checked).length;
+    return {
+      requested: ids.length,
+      checked,
+      failed: ids.length - checked,
+      inconclusive: publicResults.filter((item) => item.detection_status === "inconclusive").length,
+      timed_out: publicResults.filter((item) => item.code === "check_timeout").length,
+      available: selectedAfter.filter((item) => item.availability === "available").length,
+      unavailable: selectedAfter.filter((item) => item.availability === "unavailable").length,
+      unchecked: selectedAfter.filter((item) => item.availability === "unchecked").length,
+      types: typeCounts,
+      items: publicResults,
+      accounts,
     };
   }
 

@@ -139,13 +139,18 @@ export class RegistrationClient {
     return this.request(`/api/accounts?${params}`);
   }
 
-  refreshAccountPlans(accountIds = []) {
+  refreshAccountPlans(accountIds = [], proxiesById = {}) {
     const ids = [...new Set(accountIds.map(Number))]
       .filter((id) => Number.isSafeInteger(id) && id > 0);
     if (!ids.length) return Promise.resolve({ updated: 0, items: [], timed_out: 0 });
+    const normalizedProxies = {};
+    for (const id of ids) {
+      const proxy = typeof proxiesById?.[id] === "string" ? proxiesById[id].trim() : "";
+      if (proxy) normalizedProxies[id] = proxy;
+    }
     return this.request("/api/accounts/refresh-plan?platform=chatgpt", {
       method: "POST",
-      body: { ids },
+      body: { ids, proxies_by_id: normalizedProxies },
       timeoutMs: 120_000,
     });
   }
