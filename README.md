@@ -18,8 +18,12 @@ service credentials on the installation that you control.
   Free, Go, Plus, Pro, Team, Business, Enterprise, Edu, Trial, and unknown
   future plans. Dynamic proxies are rechecked across independent sessions, and
   transient upstream failures preserve the last confirmed result.
+- Group accounts automatically by detected plan or override groups manually in
+  the account workspace.
 - Optionally import registered accounts into one SUB2-compatible service through
-  its OpenAI OAuth flow.
+  OpenAI OAuth or a locally generated Ed25519 Agent Identity. Agent Identity
+  imports validate the target account, use idempotent replay, recover ambiguous
+  responses, and reject stale OAuth residue before activating the account.
 
 ## What is included
 

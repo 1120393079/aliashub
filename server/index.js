@@ -320,6 +320,10 @@ export function createApp(options = {}) {
     registrationClient,
     encryptionKey: options.dataEncryptionKey || process.env.DATA_ENCRYPTION_KEY,
     fetchFn: options.nfapiFetchFn,
+    agentIdentityFetchFn: options.agentIdentityFetchFn,
+    agentIdentityRegistrar: options.agentIdentityRegistrar,
+    agentIdentityVersion: options.agentIdentityVersion,
+    agentIdentityPendingTtlMs: options.agentIdentityPendingTtlMs,
     baseUrl: options.nfapiBaseUrl || process.env.SUB2_BASE_URL || process.env.NFAPI_BASE_URL,
     apiKey: options.nfapiApiKey || process.env.SUB2_ADMIN_API_KEY || process.env.NFAPI_ADMIN_API_KEY,
   });
@@ -350,13 +354,14 @@ export function createApp(options = {}) {
   });
 
   app.get("/api/health", (_req, res) => {
-    res.json({ status: "ok", service: "outlook-alias-hub", time: nowIso(), accounts: db.prepare("SELECT COUNT(*) AS count FROM source_accounts").get().count });
+    res.json({ status: "ok", service: "outlook-alias-hub", time: nowIso() });
   });
   app.get("/api/auth/status", auth.status);
+  app.get("/api/auth/check", auth.check);
   app.post("/api/auth/login", auth.login);
   app.post("/api/auth/logout", auth.logout);
 
-  app.get("/api/extension/download", (_req, res, next) => {
+  app.get("/api/extension/download", auth.requireAdmin, (_req, res, next) => {
     const archive = path.join(projectRoot, "release", "aliashub-outlook-extension.zip");
     if (!fs.existsSync(archive)) return next(Object.assign(new Error("浏览器扩展安装包尚未生成"), { status: 404 }));
     return res.download(archive, "aliashub-outlook-extension.zip");
@@ -462,8 +467,17 @@ export function createApp(options = {}) {
   app.post("/api/registration/accounts/:id/nfapi-oauth/:sessionId/complete", async (req, res, next) => {
     try { res.json(await nfapi.completeOAuthImport(req.params.sessionId, req.body?.callback_url, req.params.id)); } catch (error) { next(error); }
   });
+  app.post("/api/registration/accounts/:id/nfapi-agent-identity/import", async (req, res, next) => {
+    try {
+      res.json(await nfapi.importAgentIdentity({
+        id: req.params.id,
+        options: req.body && Object.hasOwn(req.body, "options") ? req.body.options : {},
+        save_defaults: req.body?.save_defaults,
+      }));
+    } catch (error) { next(error); }
+  });
   app.post("/api/registration/accounts/import-nfapi", async (req, res, next) => {
-    next(Object.assign(new Error("SUB2 兼容服务已改为逐账号 OAuth 授权，请使用 OAuth 添加账号入口"), { status: 410 }));
+    next(Object.assign(new Error("SUB2 兼容服务已改为逐账号 Agent Identity 或 OAuth 导入，请使用对应的添加账号入口"), { status: 410 }));
   });
 
   app.get("/api/nfapi/config", (_req, res, next) => {

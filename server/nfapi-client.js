@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 
-const SENSITIVE_KEY = /(?:authorization|cookie|credential|password|secret|session|token|api[_-]?key)/i;
+const SENSITIVE_KEY = /(?:authorization|cookie|credential|password|secret|session|token|api[_-]?key|private[_-]?key|agent[_-]?runtime[_-]?id|task[_-]?id)/i;
 
 function collectSensitiveStrings(value, key = "", output = new Set(), seen = new Set()) {
   if (typeof value === "string") {
@@ -29,10 +29,11 @@ export function redactNfapiMessage(value, secrets = []) {
   });
   return message
     .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [REDACTED]")
+    .replace(/\bAgentAssertion\s+[^\s,;]+/gi, "AgentAssertion [REDACTED]")
     .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*\b/g, "[REDACTED-JWT]")
     .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "[REDACTED-KEY]")
     .replace(/([a-z][a-z0-9+.-]*:\/\/)([^/@\s]+)@/gi, "$1[REDACTED]@")
-    .replace(/((?:(?:access|refresh|id)[_-]?token|authorization|cookie|password|secret|api[_-]?key)\s*[:=]\s*["']?)[^"'\s,;}]+/gi, "$1[REDACTED]")
+    .replace(/((?:(?:access|refresh|id)[_-]?token|authorization|cookie|password|secret|api[_-]?key|(?:agent[_-]?)?private[_-]?key|agent[_-]?runtime[_-]?id|task[_-]?id)\s*[:=]\s*["']?)[^"'\s,;}]+/gi, "$1[REDACTED]")
     .slice(0, 500);
 }
 
@@ -64,10 +65,17 @@ export class NfapiClient {
     return Boolean(this.baseUrl && this.apiKey && this.fetchFn);
   }
 
-  async request(path, { method = "GET", body, idempotent = false, idempotencyKey = "" } = {}) {
+  async request(path, {
+    method = "GET",
+    body,
+    idempotent = false,
+    idempotencyKey = "",
+    timeoutMs,
+  } = {}) {
     if (!this.configured) throw Object.assign(new Error("SUB2 兼容服务连接尚未配置"), { status: 503 });
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const effectiveTimeoutMs = Math.max(1_000, Number(timeoutMs) || this.timeoutMs);
+    const timer = setTimeout(() => controller.abort(), effectiveTimeoutMs);
     timer.unref?.();
     try {
       const response = await this.fetchFn(`${this.baseUrl}${path}`, {
@@ -127,12 +135,16 @@ export class NfapiClient {
       const pages = Number(data?.pages || data?.data?.pages || 0);
       const total = Number(data?.total || data?.data?.total || 0);
       const reportedPageSize = Number(data?.page_size || data?.data?.page_size || pageSize);
-      if (!items.length
+      const complete = !items.length
         || (pages > 0 && page >= pages)
         || (total > 0 && accounts.length >= total)
-        || (pages <= 0 && total <= 0 && items.length < Math.max(1, reportedPageSize))) break;
+        || (pages <= 0 && total <= 0 && items.length < Math.max(1, reportedPageSize));
+      if (complete) return accounts;
+      if (page === 100) {
+        throw Object.assign(new Error("NFapi OpenAI 账号分页超过安全上限，无法证明预检列表完整"), { status: 502 });
+      }
     }
-    return accounts;
+    throw Object.assign(new Error("NFapi OpenAI 账号分页结果不完整"), { status: 502 });
   }
 
   getAccount(id) {
@@ -150,6 +162,19 @@ export class NfapiClient {
     return this.request("/api/v1/admin/openai/exchange-code", {
       method: "POST",
       body: payload,
+    });
+  }
+
+  importCodexSession(payload, idempotencyKey) {
+    if (!String(idempotencyKey || "").trim()) {
+      throw Object.assign(new Error("NFapi Agent Identity 导入缺少幂等键"), { status: 500 });
+    }
+    return this.request("/api/v1/admin/accounts/import/codex-session", {
+      method: "POST",
+      body: payload,
+      idempotent: true,
+      idempotencyKey: String(idempotencyKey),
+      timeoutMs: 120_000,
     });
   }
 

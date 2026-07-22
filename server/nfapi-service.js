@@ -1,10 +1,12 @@
 import crypto from "node:crypto";
 import { getSetting, nowIso, setSetting } from "./db.js";
 import { NfapiClient, redactNfapiMessage } from "./nfapi-client.js";
+import { registerOpenAiAgentIdentity } from "./openai-agent-identity.js";
 
 const DEFAULT_BASE_URL = "";
 const NFAPI_OAUTH_CALLBACK = "http://localhost:1455/auth/callback";
 const DEFAULT_OAUTH_SESSION_TTL_MS = 25 * 60_000;
+const DEFAULT_AGENT_IDENTITY_PENDING_TTL_MS = 30 * 60_000;
 const MAX_CALLBACK_URL_LENGTH = 16_384;
 const OAUTH_SESSION_PAYLOAD_VERSION = 2;
 const DEFAULT_MODEL_MAPPING = {
@@ -208,10 +210,22 @@ export function normalizeNfapiImportOptions(input = {}, stored = {}) {
   };
 }
 
-function decodeJwt(value) {
+function parseJwtClaims(value) {
   const parts = String(value || "").split(".");
-  if (parts.length !== 3) return {};
-  try { return JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")); } catch { return {}; }
+  if (parts.length !== 3 || parts.some((part) => !part)) return null;
+  try {
+    const header = JSON.parse(Buffer.from(parts[0], "base64url").toString("utf8"));
+    const claims = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+    if (!header || typeof header !== "object" || Array.isArray(header)
+      || !claims || typeof claims !== "object" || Array.isArray(claims)) return null;
+    return claims;
+  } catch {
+    return null;
+  }
+}
+
+function decodeJwt(value) {
+  return parseJwtClaims(value) || {};
 }
 
 function identityText(value) {
@@ -238,6 +252,7 @@ function jwtIdentitySources(claims = {}) {
     accountIds: [auth.chatgpt_account_id, auth.account_id],
     userIds: [auth.chatgpt_user_id, auth.user_id],
     subjects: [claims.sub],
+    fedRamp: auth.chatgpt_account_is_fedramp,
   };
 }
 
@@ -247,6 +262,15 @@ function singleSourceId(input = {}) {
   if (!Array.isArray(supplied) || supplied.length !== 1) throw errorWithStatus("SUB2 兼容服务 OAuth 每次只能授权一个账号");
   const id = Number(supplied[0]);
   if (!Number.isSafeInteger(id) || id <= 0) throw errorWithStatus("SUB2 兼容服务 OAuth 账号选择无效");
+  return id;
+}
+
+function singleAgentIdentitySourceId(input = {}) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw errorWithStatus("NFapi Agent Identity 导入请求格式无效");
+  const supplied = input.id === undefined ? input.ids : [input.id];
+  if (!Array.isArray(supplied) || supplied.length !== 1) throw errorWithStatus("NFapi Agent Identity 每次只能导入一个账号");
+  const id = Number(supplied[0]);
+  if (!Number.isSafeInteger(id) || id <= 0) throw errorWithStatus("NFapi Agent Identity 账号选择无效");
   return id;
 }
 
@@ -350,13 +374,21 @@ function tokenInfoFrom(value) {
 function oauthCredentialsForUpdate(existingAccount, token) {
   const current = existingAccount?.credentials;
   const preserved = {};
+  const agentOnlyKeys = new Set([
+    "auth_mode",
+    "openai_auth_mode",
+    "agent_runtime_id",
+    "agent_private_key",
+    "task_id",
+  ]);
   if (current && typeof current === "object" && !Array.isArray(current)) {
     for (const [key, value] of Object.entries(current)) {
       const normalizedKey = String(key)
         .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
         .replace(/[^a-zA-Z0-9]+/g, "_")
         .toLowerCase();
-      if (/(?:token|secret|password|cookie|session|authorization|credential)/.test(normalizedKey)) continue;
+      if (agentOnlyKeys.has(normalizedKey)
+        || /(?:token|secret|password|cookie|session|authorization|credential)/.test(normalizedKey)) continue;
       preserved[key] = value;
     }
   }
@@ -424,6 +456,9 @@ function registrationCredentials(account = {}) {
     ...idIdentity.userIds,
   ], "注册账号用户");
   consistentIdentity([...accessIdentity.subjects, ...idIdentity.subjects], "注册账号 subject");
+  const explicitFedRamp = values.chatgpt_account_is_fedramp ?? values.chatgptAccountIsFedramp;
+  const fedRamp = explicitFedRamp === true || String(explicitFedRamp || "").toLowerCase() === "true"
+    || accessIdentity.fedRamp === true || idIdentity.fedRamp === true;
   return {
     accessToken,
     refreshToken,
@@ -434,6 +469,7 @@ function registrationCredentials(account = {}) {
     userId,
     planType: String(values.plan_type || accessClaims["https://api.openai.com/auth"]?.chatgpt_plan_type || account.plan_name || account.plan_state || "free").trim(),
     expiresAt: expiresAt > 0 ? expiresAt : null,
+    fedRamp,
   };
 }
 
@@ -527,15 +563,187 @@ function controlledCredentials(options) {
   };
 }
 
+function validateAgentIdentitySource(source, now) {
+  const credentials = source?.credentials || {};
+  if (!credentials.accessToken) throw errorWithStatus("注册账号缺少 access token，请改用 OAuth 导入", 409);
+  const claims = parseJwtClaims(credentials.accessToken);
+  if (!claims) throw errorWithStatus("注册账号 access token 不是可解析 JWT，请改用 OAuth 导入", 409);
+  if (!Number.isSafeInteger(claims.exp) || claims.exp <= 0) {
+    throw errorWithStatus("注册账号 access token 缺少有效 exp，请改用 OAuth 导入", 409);
+  }
+  if (!credentials.email || !credentials.accountId || !credentials.userId) {
+    throw errorWithStatus("注册账号缺少可核验的邮箱、workspace ID 或用户 ID，无法创建 Agent Identity", 409);
+  }
+  if (claims.exp <= Math.floor(now.getTime() / 1_000) + 120) {
+    throw errorWithStatus("注册账号 access token 已过期或即将过期，请改用 OAuth 导入", 409);
+  }
+  return credentials;
+}
+
+function agentIdentityImportPayload(authJson, source, name, options) {
+  return {
+    content: JSON.stringify(authJson),
+    name,
+    notes: options.notes || null,
+    group_ids: options.group_ids,
+    proxy_id: options.proxy_id > 0 ? options.proxy_id : null,
+    concurrency: options.concurrency,
+    priority: options.priority,
+    rate_multiplier: options.rate_multiplier,
+    load_factor: options.load_factor,
+    expires_at: 0,
+    auto_pause_on_expired: false,
+    credential_extras: controlledCredentials(options),
+    extra: {
+      ...controlledExtra(options, source),
+      access_token_sha256: null,
+      session_token_present: null,
+      session_expires_at: null,
+      auth_provider: null,
+    },
+    update_existing: options.update_existing,
+    skip_default_group_bind: options.skip_default_group_bind,
+    confirm_mixed_channel_risk: options.confirm_mixed_channel_risk,
+  };
+}
+
+function parseAgentIdentityImportResult(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw errorWithStatus("NFapi Agent Identity 导入响应无效", 502);
+  }
+  const counts = Object.fromEntries(["created", "updated", "skipped", "failed"].map((key) => [key, value[key]]));
+  const total = value.total;
+  const items = Array.isArray(value.items) ? value.items : [];
+  if (!Number.isSafeInteger(total) || total !== 1
+    || Object.values(counts).some((count) => !Number.isSafeInteger(count) || count < 0)
+    || Object.values(counts).reduce((sum, count) => sum + count, 0) !== 1
+    || items.length !== 1) {
+    throw errorWithStatus("NFapi Agent Identity 导入统计无效", 502);
+  }
+  if (counts.failed === 1) {
+    const failedItem = items[0];
+    if (String(failedItem?.action || "") !== "failed") {
+      throw errorWithStatus("NFapi Agent Identity 导入响应无效", 502);
+    }
+    const detail = value.errors?.[0]?.message || failedItem?.message;
+    const error = errorWithStatus(String(detail || "NFapi Agent Identity 导入失败"), 502);
+    Object.defineProperty(error, "agentImportOutcome", { value: "failed_confirmed" });
+    throw error;
+  }
+  const item = items[0];
+  const action = String(item?.action || "");
+  const accountId = item?.account_id;
+  if (!item
+    || !["created", "updated", "skipped"].includes(action)
+    || counts[action] !== 1
+    || !Number.isSafeInteger(accountId) || accountId <= 0) {
+    throw errorWithStatus("NFapi Agent Identity 导入未返回唯一的账号结果", 502);
+  }
+  return { action, accountId };
+}
+
+function durableAgentIdentityStatus(account, source) {
+  const credentials = account?.credentials && typeof account.credentials === "object" && !Array.isArray(account.credentials)
+    ? account.credentials : {};
+  const mode = String(account?.auth_mode || credentials.auth_mode || "").trim().toLowerCase();
+  const status = account?.credentials_status;
+  return mode === "agentidentity"
+    && identityComplete(source?.credentials, nfapiIdentity(account))
+    && status?.has_agent_private_key === true
+    && status.has_access_token !== true
+    && status.has_refresh_token !== true
+    && status.has_id_token !== true
+    && !["client_id", "expires_at", "expires_in", "scope", "token_type", "openai_auth_mode"]
+      .some((key) => Object.hasOwn(credentials, key))
+    && [undefined, null, 0].includes(account?.expires_at)
+    && account?.auto_pause_on_expired === false;
+}
+
+function validateAgentIdentityTarget(account, source, runtimeId) {
+  const invalidTarget = (message, status = 502, { remediationRequired = false } = {}) => {
+    const error = errorWithStatus(message, status);
+    if (remediationRequired) {
+      Object.defineProperty(error, "agentTargetRemediationRequired", { value: true });
+    }
+    return error;
+  };
+  const credentials = account?.credentials && typeof account.credentials === "object" && !Array.isArray(account.credentials)
+    ? account.credentials : {};
+  const mode = String(account?.auth_mode || credentials.auth_mode || "").trim().toLowerCase();
+  if (mode !== "agentidentity") {
+    throw invalidTarget("NFapi 目标账号未切换为 Agent Identity", 502, { remediationRequired: Boolean(mode) });
+  }
+  if (!identityComplete(source?.credentials, nfapiIdentity(account))) {
+    throw invalidTarget("NFapi Agent Identity 目标账号身份不匹配", 409);
+  }
+  if (String(credentials.agent_runtime_id || "").trim() !== String(runtimeId || "").trim()) {
+    throw invalidTarget("NFapi Agent Identity 目标账号 runtime 不匹配");
+  }
+  const status = account?.credentials_status;
+  if (!status || status.has_agent_private_key !== true) {
+    throw invalidTarget("NFapi Agent Identity 目标账号未保存签名密钥");
+  }
+  if (status.has_access_token === true || status.has_refresh_token === true || status.has_id_token === true) {
+    throw invalidTarget("NFapi Agent Identity 目标账号仍残留 OAuth Token", 502, { remediationRequired: true });
+  }
+  if (["client_id", "expires_at", "expires_in", "scope", "token_type", "openai_auth_mode"]
+    .some((key) => Object.hasOwn(credentials, key))) {
+    throw invalidTarget("NFapi Agent Identity 目标账号仍残留 OAuth 元数据", 502, { remediationRequired: true });
+  }
+  if (![undefined, null, 0].includes(account?.expires_at)
+    || account?.auto_pause_on_expired !== false) {
+    throw invalidTarget("NFapi Agent Identity 目标账号未设置为长期有效");
+  }
+}
+
+function validateOAuthTarget(account) {
+  const credentials = account?.credentials && typeof account.credentials === "object" && !Array.isArray(account.credentials)
+    ? account.credentials : {};
+  const mode = String(account?.auth_mode || credentials.auth_mode || credentials.openai_auth_mode || "")
+    .trim().toLowerCase();
+  if (mode === "agentidentity"
+    || ["auth_mode", "openai_auth_mode", "agent_runtime_id", "agent_private_key", "task_id"]
+      .some((key) => Object.hasOwn(credentials, key))
+    || account?.credentials_status?.has_agent_private_key === true) {
+    throw errorWithStatus("NFapi OAuth 目标账号仍残留 Agent Identity 凭据", 502);
+  }
+}
+
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map((item) => stableJson(item)).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function agentIdentityPayloadFingerprint(payload) {
+  return crypto.createHash("sha256").update(stableJson(payload)).digest("hex");
+}
+
+function importFailureIsConfirmed(error) {
+  if (error?.agentImportOutcome === "failed_confirmed") return true;
+  const status = Number(error?.upstreamStatus || error?.status || 0);
+  return Number.isInteger(status) && status >= 400 && status < 500
+    && ![408, 409, 425, 429].includes(status);
+}
+
+function agentIdentityOperationKey(baseUrl, sourceId, accountId, runtimeId, importAttempt) {
+  return `aliashub-agent-${crypto.createHash("sha256")
+    .update(`${baseUrl}\0${sourceId}\0${accountId}\0${runtimeId}\0${importAttempt}`)
+    .digest("hex")}`;
+}
+
 function safeNfapiMessage(client, value, source) {
   const sourceSecrets = Object.values(source?.credentials || {}).filter((item) => typeof item === "string");
   return redactNfapiMessage(value, [client?.apiKey, ...sourceSecrets]);
 }
 
-function nfapiHasRefreshToken(account = {}) {
+function nfapiHasDurableAuth(account = {}) {
   return Boolean(
     account?.credentials_status?.has_refresh_token
-    || account?.credentials?.refresh_token,
+    || account?.credentials?.refresh_token
+    || String(account?.credentials?.auth_mode || "").trim().toLowerCase() === "agentidentity",
   );
 }
 
@@ -571,6 +779,10 @@ export class NfapiService {
     baseUrl,
     apiKey,
     oauthSessionTtlMs = DEFAULT_OAUTH_SESSION_TTL_MS,
+    agentIdentityPendingTtlMs = DEFAULT_AGENT_IDENTITY_PENDING_TTL_MS,
+    agentIdentityFetchFn,
+    agentIdentityRegistrar = registerOpenAiAgentIdentity,
+    agentIdentityVersion,
     nowFn = () => new Date(),
   } = {}) {
     this.db = db;
@@ -582,8 +794,18 @@ export class NfapiService {
       .update(String(encryptionKey || process.env.DATA_ENCRYPTION_KEY || "aliashub-development-key"))
       .digest();
     this.oauthSessionTtlMs = Math.max(1_000, Math.min(30 * 60_000, Number(oauthSessionTtlMs) || DEFAULT_OAUTH_SESSION_TTL_MS));
+    this.agentIdentityPendingTtlMs = Math.max(5 * 60_000, Math.min(2 * 60 * 60_000,
+      Number(agentIdentityPendingTtlMs) || DEFAULT_AGENT_IDENTITY_PENDING_TTL_MS));
+    this.agentIdentityFetchFn = agentIdentityFetchFn || globalThis.fetch;
+    this.agentIdentityRegistrar = agentIdentityRegistrar;
+    this.agentIdentityVersion = String(agentIdentityVersion || process.env.CODEX_AGENT_VERSION || "0.144.0");
     this.nowFn = nowFn;
     this.oauthStartLocks = new Map();
+    this.agentIdentityImportLocks = new Map();
+    // Registration succeeds before NFapi import. Keep the generated identity and
+    // the current import operation in process for bounded, replay-safe recovery.
+    // Private material and idempotency state are never persisted.
+    this.pendingAgentIdentities = new Map();
   }
 
   encrypt(value) {
@@ -839,6 +1061,32 @@ export class NfapiService {
     throw errorWithStatus("SUB2 兼容服务中存在同邮箱但用户、workspace 或身份字段不完整的账号，已停止以免更新错误账号", 409);
   }
 
+  findAgentIdentityExisting(accounts, source, preferredAccountId = 0) {
+    const expected = source?.credentials || {};
+    const expectedAccountId = String(expected.accountId || "").trim();
+    const expectedUserId = String(expected.userId || "").trim();
+    const candidates = (Array.isArray(accounts) ? accounts : []).filter((account) => {
+      const credentials = account?.credentials && typeof account.credentials === "object"
+        && !Array.isArray(account.credentials) ? account.credentials : {};
+      const id = Number(account?.id || 0);
+      const accountId = String(credentials.chatgpt_account_id || "").trim();
+      const userId = String(credentials.chatgpt_user_id || "").trim();
+      return Number.isSafeInteger(id) && id > 0
+        && accountId === expectedAccountId
+        && (!userId || userId === expectedUserId);
+    });
+    if (candidates.length > 1) {
+      throw errorWithStatus("NFapi 中存在多个会被 Agent Identity 导入器匹配的账号，无法安全确定更新目标", 409);
+    }
+
+    const importerTarget = candidates[0] || null;
+    const existing = this.findExisting(accounts, source, preferredAccountId);
+    if (Number(importerTarget?.id || 0) !== Number(existing?.id || 0)) {
+      throw errorWithStatus("NFapi Agent Identity 导入器的目标账号与已核验账号不一致，已停止以免更新错误账号", 409);
+    }
+    return importerTarget;
+  }
+
   linkedAccount(source) {
     const row = this.db.prepare(`
       SELECT email, nfapi_account_id
@@ -870,11 +1118,11 @@ export class NfapiService {
       rate_multiplier: options.rate_multiplier,
       status: options.status,
       confirm_mixed_channel_risk: options.confirm_mixed_channel_risk,
-      auto_pause_on_expired: options.auto_pause_on_expired,
+      auto_pause_on_expired: longLived ? false : options.auto_pause_on_expired,
     };
     if (options.group_ids.length || options.skip_default_group_bind) payload.group_ids = options.group_ids;
-    if (options.expires_at !== null) payload.expires_at = options.expires_at;
-    else if (longLived) payload.expires_at = 0;
+    if (longLived) payload.expires_at = 0;
+    else if (options.expires_at !== null) payload.expires_at = options.expires_at;
     await client.updateAccount(targetId, payload);
     const merged = await client.bulkUpdateAccounts({
       account_ids: [targetId],
@@ -912,6 +1160,290 @@ export class NfapiService {
       String(source.id), source.account.email, this.baseUrl(), Number(accountId) || 0, status,
       shortLived ? 1 : 0, action, String(error || "").slice(0, 1_000), JSON.stringify(options || {}), now, now,
     );
+  }
+
+  clearPendingAgentIdentity(sourceId, expected = null) {
+    const id = Number(sourceId || 0);
+    const pending = this.pendingAgentIdentities.get(id);
+    if (!pending || (expected && pending !== expected)) return false;
+    clearTimeout(pending.expiryTimer);
+    this.pendingAgentIdentities.delete(id);
+    return true;
+  }
+
+  touchPendingAgentIdentity(sourceId, pending) {
+    const id = Number(sourceId || 0);
+    if (!pending || this.pendingAgentIdentities.get(id) !== pending) return false;
+    clearTimeout(pending.expiryTimer);
+    pending.expiresAtMs = Date.now() + this.agentIdentityPendingTtlMs;
+    const expire = () => {
+      if (this.pendingAgentIdentities.get(id) !== pending) return;
+      if (this.agentIdentityImportLocks.has(id)) {
+        pending.expiryTimer = setTimeout(expire, Math.min(1_000, Math.max(10, this.agentIdentityPendingTtlMs)));
+        pending.expiryTimer.unref?.();
+        return;
+      }
+      this.clearPendingAgentIdentity(id, pending);
+    };
+    pending.expiryTimer = setTimeout(expire, this.agentIdentityPendingTtlMs);
+    pending.expiryTimer.unref?.();
+    return true;
+  }
+
+  storePendingAgentIdentity(sourceId, pending) {
+    const id = Number(sourceId || 0);
+    this.clearPendingAgentIdentity(id);
+    this.pendingAgentIdentities.set(id, pending);
+    this.touchPendingAgentIdentity(id, pending);
+    return pending;
+  }
+
+  reusablePendingAgentIdentity(source) {
+    const pending = this.pendingAgentIdentities.get(Number(source?.id || 0));
+    if (!pending) return null;
+    const credentials = source?.credentials || {};
+    const expired = !Number.isFinite(pending.expiresAtMs) || Date.now() >= pending.expiresAtMs;
+    const matches = pending.nfapiBaseUrl === this.baseUrl()
+      && pending.accountId === String(credentials.accountId || "")
+      && pending.userId === String(credentials.userId || "")
+      && pending.email === String(credentials.email || "").toLowerCase();
+    if (expired || !matches) {
+      this.clearPendingAgentIdentity(source?.id, pending);
+      return null;
+    }
+    return pending;
+  }
+
+  importAgentIdentity(input = {}) {
+    const sourceId = singleAgentIdentitySourceId(input);
+    const active = this.agentIdentityImportLocks.get(sourceId);
+    if (active) return active;
+    const operation = this.importAgentIdentityLocked(input, sourceId)
+      .finally(() => {
+        if (this.agentIdentityImportLocks.get(sourceId) === operation) {
+          this.agentIdentityImportLocks.delete(sourceId);
+        }
+      });
+    this.agentIdentityImportLocks.set(sourceId, operation);
+    return operation;
+  }
+
+  async importAgentIdentityLocked(input, sourceId) {
+    if (input.save_defaults !== undefined && typeof input.save_defaults !== "boolean") {
+      throw errorWithStatus("保存默认设置必须是布尔值");
+    }
+    const rawOptions = input.options === undefined ? {} : input.options;
+    if (!rawOptions || typeof rawOptions !== "object" || Array.isArray(rawOptions)
+      || ![Object.prototype, null].includes(Object.getPrototypeOf(rawOptions))) {
+      throw errorWithStatus("NFapi Agent Identity 导入设置格式无效");
+    }
+    const storedOptions = this.storedDefaults();
+    const options = normalizeNfapiImportOptions({
+      ...rawOptions,
+      expires_at: null,
+      auto_pause_on_expired: false,
+    }, storedOptions);
+    let requestedOptions = options;
+    if (input.save_defaults) {
+      const defaultsInput = { ...rawOptions };
+      if (Object.hasOwn(defaultsInput, "expires_at")) {
+        try { expirationFrom(defaultsInput.expires_at); }
+        catch { defaultsInput.expires_at = null; }
+      }
+      requestedOptions = normalizeNfapiImportOptions(defaultsInput, storedOptions);
+    }
+    let source = null;
+    let pending = null;
+    let targetId = 0;
+    let action = "agent_identity_import";
+    try {
+      [source] = await this.loadSources([sourceId]);
+      pending = this.reusablePendingAgentIdentity(source);
+      const credentials = pending
+        ? source.credentials
+        : validateAgentIdentitySource(source, this.currentDate());
+      const client = this.client();
+      const name = this.desiredName(source, options, 1);
+      let importOperation = pending?.importOperation || null;
+      let imported = null;
+
+      if (importOperation?.state === "imported") {
+        imported = importOperation.result;
+      } else {
+        const replayingUnknown = importOperation
+          && ["ready", "in_flight", "unknown"].includes(importOperation.state);
+        if (replayingUnknown) {
+          const candidatePayload = agentIdentityImportPayload(pending.authJson, source, name, options);
+          if (agentIdentityPayloadFingerprint(candidatePayload) !== importOperation.payloadFingerprint) {
+            throw errorWithStatus("上一次 NFapi Agent Identity 导入结果尚未确认，请使用相同设置重试", 409);
+          }
+          const accounts = await client.listOpenAiOauthAccounts();
+          const link = this.linkedAccount(source);
+          const replayTarget = this.findAgentIdentityExisting(accounts, source, Number(link?.nfapi_account_id || 0));
+          if (importOperation.expectedTargetId > 0
+            && Number(replayTarget?.id || 0) !== importOperation.expectedTargetId) {
+            throw errorWithStatus("NFapi Agent Identity 重试目标与首次预检不一致，已停止以免更新错误账号", 409);
+          }
+        } else {
+          const accounts = await client.listOpenAiOauthAccounts();
+          const link = this.linkedAccount(source);
+          const existing = this.findAgentIdentityExisting(accounts, source, Number(link?.nfapi_account_id || 0));
+          const remediationTargetId = Number(pending?.remediationTargetId || 0);
+          if (remediationTargetId > 0 && Number(existing?.id || 0) !== remediationTargetId) {
+            throw errorWithStatus("NFapi Agent Identity 修复目标已变化，已停止以免更新错误账号", 409);
+          }
+          if (remediationTargetId > 0 && !options.update_existing) {
+            throw errorWithStatus("修复 NFapi Agent Identity 目标必须开启“更新已有账号”", 409);
+          }
+          if (existing && !options.update_existing && remediationTargetId === 0) {
+            if (!durableAgentIdentityStatus(existing, source)) {
+              throw errorWithStatus("NFapi 已有账号尚未迁移为耐久 Agent Identity，请开启“更新已有账号”后重试", 409);
+            }
+            targetId = Number(existing.id);
+            if (input.save_defaults) this.saveDefaults(requestedOptions);
+            this.saveLink(source, {
+              accountId: targetId,
+              status: "imported",
+              shortLived: false,
+              action: "agent_identity_skipped",
+              options: { ...options, import_mode: "agent_identity" },
+            });
+            this.clearPendingAgentIdentity(sourceId, pending);
+            return {
+              auth_mode: "agentIdentity",
+              action: "skipped",
+              nfapi_account_id: targetId,
+              short_lived: false,
+            };
+          }
+
+          if (!pending) {
+            const registered = await this.agentIdentityRegistrar({
+              accessToken: credentials.accessToken,
+              accountId: credentials.accountId,
+              userId: credentials.userId,
+              email: credentials.email,
+              planType: credentials.planType,
+              fedRamp: credentials.fedRamp,
+              fetchFn: this.agentIdentityFetchFn,
+              agentVersion: this.agentIdentityVersion,
+            });
+            const identity = registered?.authJson?.agent_identity;
+            if (registered?.authJson?.auth_mode !== "agentIdentity" || !identity
+              || String(identity.account_id || "") !== credentials.accountId
+              || String(identity.chatgpt_user_id || "") !== credentials.userId
+              || !String(identity.agent_runtime_id || "").trim()
+              || !String(identity.agent_private_key || "").trim()) {
+              throw errorWithStatus("OpenAI Agent Identity 注册结果无效", 502);
+            }
+            pending = {
+              authJson: registered.authJson,
+              runtimeId: String(identity.agent_runtime_id),
+              secrets: [String(identity.agent_private_key), String(identity.agent_runtime_id)],
+              nfapiBaseUrl: this.baseUrl(),
+              accountId: credentials.accountId,
+              userId: credentials.userId,
+              email: credentials.email.toLowerCase(),
+              createdAt: this.currentDate().getTime(),
+              importAttempt: 0,
+              importOperation: null,
+              remediationTargetId: 0,
+            };
+            this.storePendingAgentIdentity(sourceId, pending);
+          }
+
+          const payload = agentIdentityImportPayload(pending.authJson, source, name, options);
+          pending.importAttempt += 1;
+          importOperation = {
+            state: "ready",
+            payload,
+            payloadFingerprint: agentIdentityPayloadFingerprint(payload),
+            idempotencyKey: agentIdentityOperationKey(
+              this.baseUrl(), sourceId, credentials.accountId, pending.runtimeId, pending.importAttempt,
+            ),
+            expectedTargetId: remediationTargetId || Number(existing?.id || 0),
+            result: null,
+          };
+          pending.importOperation = importOperation;
+        }
+
+        importOperation.state = "in_flight";
+        try {
+          imported = parseAgentIdentityImportResult(await client.importCodexSession(
+            importOperation.payload,
+            importOperation.idempotencyKey,
+          ));
+          importOperation.state = "imported";
+          importOperation.result = imported;
+        } catch (error) {
+          importOperation.state = importFailureIsConfirmed(error) ? "failed_confirmed" : "unknown";
+          throw error;
+        }
+      }
+
+      targetId = imported.accountId;
+      action = imported.action;
+      if ((importOperation.expectedTargetId > 0 && importOperation.expectedTargetId !== targetId)
+        || (importOperation.expectedTargetId === 0 && action !== "created")) {
+        throw errorWithStatus("NFapi Agent Identity 导入更新了非预期账号", 409);
+      }
+
+      const target = await client.getAccount(targetId);
+      try {
+        validateAgentIdentityTarget(target, source, pending.runtimeId);
+      } catch (error) {
+        if (error?.agentTargetRemediationRequired === true) {
+          pending.remediationTargetId = targetId;
+          importOperation.state = "remediation_required";
+        }
+        throw error;
+      }
+      await this.applyAllSettings(client, targetId, source, name, options, { longLived: true });
+      if (input.save_defaults) this.saveDefaults(requestedOptions);
+      this.saveLink(source, {
+        accountId: targetId,
+        status: "imported",
+        shortLived: false,
+        action: `agent_identity_${action}`,
+        options: { ...options, import_mode: "agent_identity" },
+      });
+      this.clearPendingAgentIdentity(sourceId, pending);
+      return {
+        auth_mode: "agentIdentity",
+        action,
+        nfapi_account_id: targetId,
+        short_lived: false,
+      };
+    } catch (error) {
+      const secrets = [
+        this.apiKey(),
+        ...Object.values(source?.credentials || {}).filter((value) => typeof value === "string"),
+        ...(pending?.secrets || []),
+      ];
+      const baseMessage = redactNfapiMessage(error?.message || "NFapi Agent Identity 导入失败", secrets)
+        || "NFapi Agent Identity 导入失败";
+      if (!pending) this.clearPendingAgentIdentity(sourceId);
+      else this.touchPendingAgentIdentity(sourceId, pending);
+      const retained = pending && this.pendingAgentIdentities.get(sourceId) === pending;
+      const remainingMinutes = retained
+        ? Math.max(1, Math.ceil((pending.expiresAtMs - Date.now()) / 60_000))
+        : 0;
+      const message = retained
+        ? `${baseMessage}；已在内存中保留本次 Agent Identity，${remainingMinutes} 分钟内重试会复用`
+        : baseMessage;
+      if (source) {
+        this.saveLink(source, {
+          accountId: targetId,
+          status: "failed",
+          shortLived: false,
+          action,
+          error: message,
+          options: { ...options, import_mode: "agent_identity" },
+        });
+      }
+      const status = Number(error?.status);
+      throw errorWithStatus(message, Number.isInteger(status) && status >= 400 && status <= 504 ? status : 502);
+    }
   }
 
   async startOAuthImport(input = {}) {
@@ -988,7 +1520,7 @@ export class NfapiService {
       ? text(restartedPayload.name, 120, "账号名称") || this.desiredName(source, options, 1)
       : this.desiredName(source, options, 1);
     if (existing && !options.update_existing) {
-      const shortLived = !nfapiHasRefreshToken(existing);
+      const shortLived = !nfapiHasDurableAuth(existing);
       if (input.save_defaults) this.saveDefaults(options);
       this.saveLink(source, {
         accountId: Number(existing.id), status: "imported", shortLived, action: "skipped", options,
@@ -1067,7 +1599,7 @@ export class NfapiService {
     this.saveLink(source, {
       accountId: Number(existing?.id || 0),
       status: "pending",
-      shortLived: existing ? !nfapiHasRefreshToken(existing) : false,
+      shortLived: existing ? !nfapiHasDurableAuth(existing) : false,
       action: existing ? "oauth_reauthorization_pending" : "oauth_authorization_pending",
       options,
     });
@@ -1135,10 +1667,11 @@ export class NfapiService {
         targetId = Number(currentExisting.id);
         const existingTarget = await client.getAccount(targetId);
         if (!existingTarget) throw errorWithStatus("SUB2 兼容服务目标账号已不存在", 404);
-        await client.applyOAuthCredentials(targetId, {
+        const applied = await client.applyOAuthCredentials(targetId, {
           type: "oauth",
           credentials: oauthCredentialsForUpdate(existingTarget, token),
         });
+        validateOAuthTarget(applied);
         action = "updated_credentials";
       } else {
         const createPayload = {
@@ -1171,7 +1704,7 @@ export class NfapiService {
         await this.applyAllSettings(client, targetId, source, payload.name, options, { longLived: token.longLived });
       }
       const shortLived = action === "skipped"
-        ? !nfapiHasRefreshToken(currentExisting)
+        ? !nfapiHasDurableAuth(currentExisting)
         : !token.longLived;
       this.saveLink(source, {
         accountId: targetId, status: "imported", shortLived, action, options,

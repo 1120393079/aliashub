@@ -54,7 +54,12 @@ export function createAuth({ username = "admin", password = "", secret = "", sec
   return {
     enabled,
     status(req, res) {
-      res.json({ authenticated: validSession(req), authEnabled: enabled, ...(enabled ? { username } : {}) });
+      const authenticated = validSession(req);
+      res.json({ authenticated, authEnabled: enabled, ...(authenticated && enabled ? { username } : {}) });
+    },
+    check(req, res) {
+      if (validSession(req)) return res.status(204).end();
+      return res.status(401).end();
     },
     login(req, res) {
       if (!enabled) return res.json({ authenticated: true, authEnabled: false });

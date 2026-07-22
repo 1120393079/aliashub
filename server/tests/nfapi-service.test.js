@@ -11,9 +11,16 @@ function jwt(payload) {
   return `${encode({ alg: "none", typ: "JWT" })}.${encode(payload)}.signature`;
 }
 
-function identityJwt({ email, accountId, userId = `user-${accountId}`, subject = `auth0|${userId}` }) {
+function identityJwt({
+  email,
+  accountId,
+  userId = `user-${accountId}`,
+  subject = `auth0|${userId}`,
+  exp = Math.floor(Date.now() / 1000) + 3_600,
+}) {
   return jwt({
     sub: subject,
+    exp,
     "https://api.openai.com/profile": { email },
     "https://api.openai.com/auth": {
       chatgpt_account_id: accountId,
@@ -109,7 +116,16 @@ function callbackUrl(state = "expected-state", code = "authorization-code") {
   return `http://localhost:1455/auth/callback?${new URLSearchParams({ code, state })}`;
 }
 
-function createService({ db, accounts, nfapiClient, apiKey = "nfapi-secret", oauthSessionTtlMs, nowFn }) {
+function createService({
+  db,
+  accounts,
+  nfapiClient,
+  apiKey = "nfapi-secret",
+  oauthSessionTtlMs,
+  agentIdentityPendingTtlMs,
+  agentIdentityRegistrar,
+  nowFn,
+}) {
   const byId = new Map(accounts.map((account) => [Number(account.id), account]));
   const service = new NfapiService({
     db,
@@ -120,10 +136,64 @@ function createService({ db, accounts, nfapiClient, apiKey = "nfapi-secret", oau
     baseUrl: "https://nfapi.test",
     apiKey,
     oauthSessionTtlMs,
+    agentIdentityPendingTtlMs,
+    agentIdentityRegistrar,
     nowFn,
   });
   service.client = () => nfapiClient;
   return service;
+}
+
+function registeredAgentIdentity({ email, accountId, userId, runtimeId, privateKey }) {
+  return {
+    authJson: {
+      auth_mode: "agentIdentity",
+      agent_identity: {
+        agent_runtime_id: runtimeId,
+        agent_private_key: privateKey,
+        account_id: accountId,
+        chatgpt_user_id: userId,
+        email,
+        plan_type: "free",
+        chatgpt_account_is_fedramp: false,
+      },
+    },
+    runtimeId,
+    secrets: [privateKey, runtimeId],
+  };
+}
+
+function nfapiAgentAccount({ id, email, accountId, userId, runtimeId, credentialStatus = {} }) {
+  return {
+    id,
+    expires_at: null,
+    auto_pause_on_expired: false,
+    credentials: {
+      auth_mode: "agentIdentity",
+      agent_runtime_id: runtimeId,
+      email,
+      chatgpt_account_id: accountId,
+      chatgpt_user_id: userId,
+    },
+    credentials_status: {
+      has_agent_private_key: true,
+      has_access_token: false,
+      has_refresh_token: false,
+      has_id_token: false,
+      ...credentialStatus,
+    },
+  };
+}
+
+function agentImportResult(action, accountId) {
+  return {
+    total: 1,
+    created: action === "created" ? 1 : 0,
+    updated: action === "updated" ? 1 : 0,
+    skipped: action === "skipped" ? 1 : 0,
+    failed: 0,
+    items: [{ index: 1, action, account_id: accountId }],
+  };
 }
 
 test("SUB2 compatible service is disabled by default without making requests", async (t) => {
@@ -270,6 +340,60 @@ test("uses a validated AliasHub link to disambiguate duplicates and rejects a mi
     () => service.findExisting([{ ...second, credentials: { ...second.credentials, email: "other@example.com" } }], source, 12),
     /已绑定的 SUB2 兼容服务账号身份不匹配/,
   );
+});
+
+test("Agent Identity rejects importer ambiguity despite an AliasHub link before registration or mutation", async (t) => {
+  const db = testDatabase(t);
+  const id = 70;
+  const email = "agent-duplicate@example.com";
+  const accountId = "workspace-agent-duplicate";
+  const userId = `user-${accountId}`;
+  const local = registrationAccount({ id, email, accountId });
+  addRegisteredSource(db, { id, email });
+  const now = nowIso();
+  db.prepare(`
+    INSERT INTO registered_account_nfapi_links
+      (external_account_id, email, nfapi_base_url, nfapi_account_id, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, 'imported', ?, ?)
+  `).run(String(id), email, "https://nfapi.test", 9712, now, now);
+  const duplicate = (accountIdValue) => ({
+    id: accountIdValue,
+    credentials: {
+      email,
+      chatgpt_account_id: accountId,
+      chatgpt_user_id: userId,
+    },
+  });
+  let registrations = 0;
+  let imports = 0;
+  let mutations = 0;
+  const service = createService({
+    db,
+    accounts: [local],
+    nfapiClient: {
+      async listOpenAiOauthAccounts() { return [duplicate(9711), duplicate(9712)]; },
+      async importCodexSession() { imports += 1; throw new Error("must not import"); },
+      async getAccount() { mutations += 1; throw new Error("must not read a target"); },
+      async updateAccount() { mutations += 1; },
+      async bulkUpdateAccounts() { mutations += 1; },
+    },
+    agentIdentityRegistrar: async () => {
+      registrations += 1;
+      throw new Error("must not register");
+    },
+  });
+
+  await assert.rejects(
+    () => service.importAgentIdentity({ id }),
+    (error) => error.status === 409 && /多个会被 Agent Identity 导入器匹配/.test(error.message),
+  );
+
+  assert.equal(registrations, 0);
+  assert.equal(imports, 0);
+  assert.equal(mutations, 0);
+  assert.equal(service.pendingAgentIdentities.size, 0);
+  const link = db.prepare("SELECT * FROM registered_account_nfapi_links WHERE external_account_id = ?").get(String(id));
+  assert.equal(link.nfapi_account_id, 9712);
 });
 
 test("start rejects inconsistent Frcibly top-level, credential, and JWT identities before contacting NFapi", async (t) => {
@@ -688,6 +812,68 @@ test("existing accounts are reauthorized through OAuth before incremental settin
   assert.equal(result.nfapi_account_id, 902);
 });
 
+test("OAuth fallback strips Agent Identity state and verifies the cleaned target", async (t) => {
+  const db = testDatabase(t);
+  const id = 631;
+  const email = "agent-to-oauth@example.com";
+  const accountId = "workspace-agent-to-oauth";
+  const local = registrationAccount({ id, email, accountId });
+  addRegisteredSource(db, { id, email });
+  const existing = {
+    id: 9631,
+    credentials: {
+      auth_mode: "agentIdentity",
+      openai_auth_mode: "personal_access_token",
+      agent_runtime_id: "runtime-old-private",
+      agent_private_key: "agent-private-key-old",
+      task_id: "task-old-private",
+      email,
+      chatgpt_account_id: accountId,
+      chatgpt_user_id: `user-${accountId}`,
+      custom_routing_key: "keep-routing",
+    },
+    credentials_status: { has_agent_private_key: true },
+  };
+  const token = oauthTokenInfo({ email, accountId, refreshToken: "oauth-refresh-new" });
+  let appliedPayload = null;
+  const client = {
+    async listOpenAiOauthAccounts() { return [existing]; },
+    async generateOpenAiOAuthUrl() { return { auth_url: oauthAuthUrl(), session_id: "agent-fallback-upstream" }; },
+    async exchangeOpenAiOAuthCode() { return token; },
+    async getAccount() { return existing; },
+    async applyOAuthCredentials(_targetId, payload) {
+      appliedPayload = payload;
+      return {
+        id: existing.id,
+        credentials: { ...payload.credentials },
+        credentials_status: {
+          has_access_token: true,
+          has_refresh_token: true,
+          has_id_token: true,
+        },
+      };
+    },
+    async updateAccount() { return { id: existing.id }; },
+    async bulkUpdateAccounts() { return { updated: 1, failed: 0 }; },
+  };
+  const service = createService({ db, accounts: [local], nfapiClient: client });
+
+  const started = await service.startOAuthImport({ id });
+  const completed = await service.completeOAuthImport(started.oauth_session_id, callbackUrl());
+
+  assert.equal(completed.action, "updated_credentials");
+  assert.equal(completed.nfapi_account_id, existing.id);
+  assert.equal(appliedPayload.credentials.custom_routing_key, "keep-routing");
+  assert.equal(appliedPayload.credentials.refresh_token, "oauth-refresh-new");
+  for (const key of ["auth_mode", "openai_auth_mode", "agent_runtime_id", "agent_private_key", "task_id"]) {
+    assert.equal(Object.hasOwn(appliedPayload.credentials, key), false);
+  }
+  for (const secret of ["runtime-old-private", "agent-private-key-old", "task-old-private"]) {
+    assert.equal(JSON.stringify(appliedPayload).includes(secret), false);
+    assert.equal(JSON.stringify(completed).includes(secret), false);
+  }
+});
+
 test("pending starts resume unchanged, processing starts reject, and callbacks remain strict", async (t) => {
   const db = testDatabase(t);
   const id = 64;
@@ -1057,4 +1243,755 @@ test("start rejects untrusted NFapi authorization URLs without persisting a sess
   });
   await assert.rejects(() => service.startOAuthImport({ ids: [id] }), /不符合预期/);
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM nfapi_oauth_import_sessions").get().count, 0);
+});
+
+test("Agent Identity import is concurrent-safe, token-free, long-lived, and returns only the public contract", async (t) => {
+  const db = testDatabase(t);
+  const id = 201;
+  const email = "agent-success@example.com";
+  const accountId = "workspace-agent-success";
+  const userId = `user-${accountId}`;
+  const runtimeId = "runtime-agent-success-private";
+  const privateKey = "pkcs8-agent-success-private";
+  const local = registrationAccount({ id, email, accountId });
+  const accessToken = local.credentials.find((item) => item.key === "access_token").value;
+  const refreshToken = "source-refresh-token-private";
+  const idToken = "source-id-token-private";
+  const clientId = "source-client-id-private";
+  local.credentials.push(
+    { key: "refresh_token", value: refreshToken },
+    { key: "id_token", value: idToken },
+    { key: "client_id", value: clientId },
+  );
+  addRegisteredSource(db, { id, email, customName: "Agent account" });
+
+  let releaseRegistration;
+  const registrationGate = new Promise((resolve) => { releaseRegistration = resolve; });
+  let registrations = 0;
+  let lists = 0;
+  const imports = [];
+  let updatePayload;
+  let bulkPayload;
+  const client = {
+    async listOpenAiOauthAccounts() { lists += 1; return []; },
+    async importCodexSession(payload, idempotencyKey) {
+      imports.push({ payload, idempotencyKey });
+      return agentImportResult("created", 9201);
+    },
+    async getAccount(idValue) {
+      assert.equal(idValue, 9201);
+      return nfapiAgentAccount({ id: idValue, email, accountId, userId, runtimeId });
+    },
+    async updateAccount(idValue, payload) {
+      assert.equal(idValue, 9201);
+      updatePayload = payload;
+      return { id: idValue };
+    },
+    async bulkUpdateAccounts(payload) {
+      bulkPayload = payload;
+      return { updated: 1, failed: 0 };
+    },
+  };
+  const service = createService({
+    db,
+    accounts: [local],
+    nfapiClient: client,
+    agentIdentityRegistrar: async (input) => {
+      registrations += 1;
+      assert.equal(input.accessToken, accessToken);
+      assert.equal(input.accountId, accountId);
+      assert.equal(input.userId, userId);
+      assert.equal(input.agentVersion, "0.144.0");
+      await registrationGate;
+      return registeredAgentIdentity({ email, accountId, userId, runtimeId, privateKey });
+    },
+  });
+  const future = Math.floor(Date.now() / 1_000) + 86_400;
+  const input = {
+    id,
+    options: {
+      expires_at: future,
+      auto_pause_on_expired: true,
+      concurrency: 23,
+      group_ids: [27],
+    },
+    save_defaults: true,
+  };
+
+  const first = service.importAgentIdentity(input);
+  const second = service.importAgentIdentity(input);
+  assert.equal(first, second);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(registrations, 1);
+  releaseRegistration();
+  const result = await first;
+
+  assert.equal(lists, 1);
+  assert.equal(imports.length, 1);
+  assert.match(imports[0].idempotencyKey, /^aliashub-agent-[a-f0-9]{64}$/);
+  assert.equal(imports[0].payload.expires_at, 0);
+  assert.equal(imports[0].payload.auto_pause_on_expired, false);
+  assert.equal(imports[0].payload.extra.access_token_sha256, null);
+  assert.equal(imports[0].payload.extra.session_token_present, null);
+  assert.equal(imports[0].payload.extra.session_expires_at, null);
+  assert.equal(imports[0].payload.extra.auth_provider, null);
+  const authJson = JSON.parse(imports[0].payload.content);
+  assert.deepEqual(authJson, registeredAgentIdentity({
+    email, accountId, userId, runtimeId, privateKey,
+  }).authJson);
+  for (const oauthSecret of [accessToken, refreshToken, idToken, clientId]) {
+    assert.equal(JSON.stringify(imports[0].payload).includes(oauthSecret), false);
+  }
+  assert.equal(Object.hasOwn(authJson, "tokens"), false);
+  assert.equal(updatePayload.expires_at, 0);
+  assert.equal(updatePayload.auto_pause_on_expired, false);
+  assert.equal(Object.hasOwn(updatePayload, "credentials"), false);
+  assert.equal(JSON.stringify(bulkPayload).includes(privateKey), false);
+  assert.equal(JSON.stringify(bulkPayload).includes(runtimeId), false);
+  assert.deepEqual(Object.keys(result).sort(), ["action", "auth_mode", "nfapi_account_id", "short_lived"]);
+  assert.deepEqual(result, {
+    auth_mode: "agentIdentity",
+    action: "created",
+    nfapi_account_id: 9201,
+    short_lived: false,
+  });
+
+  const link = db.prepare("SELECT * FROM registered_account_nfapi_links WHERE external_account_id = ?")
+    .get(String(id));
+  assert.equal(link.status, "imported");
+  assert.equal(link.short_lived, 0);
+  assert.equal(link.last_action, "agent_identity_created");
+  for (const secret of [accessToken, refreshToken, idToken, clientId, privateKey, runtimeId]) {
+    assert.equal(JSON.stringify(result).includes(secret), false);
+    assert.equal(JSON.stringify(link).includes(secret), false);
+    assert.equal(JSON.stringify(updatePayload).includes(secret), false);
+    assert.equal(JSON.stringify(bulkPayload).includes(secret), false);
+  }
+  const savedDefaults = service.storedDefaults();
+  assert.equal(savedDefaults.expires_at, future);
+  assert.equal(savedDefaults.auto_pause_on_expired, true);
+  assert.equal(service.pendingAgentIdentities.size, 0);
+});
+
+test("Agent Identity rejects expired, missing-exp, and conflicting JWT identities before any upstream call", async (t) => {
+  const db = testDatabase(t);
+  const now = Math.floor(Date.now() / 1_000);
+  const cases = [{
+    id: 202,
+    email: "agent-expired@example.com",
+    accountId: "workspace-agent-expired",
+    token(email, accountId) {
+      return identityJwt({ email, accountId, exp: now - 1 });
+    },
+    message: /已过期或即将过期/,
+  }, {
+    id: 203,
+    email: "agent-missing-exp@example.com",
+    accountId: "workspace-agent-missing-exp",
+    token(email, accountId) {
+      return jwt({
+        sub: `auth0|user-${accountId}`,
+        "https://api.openai.com/profile": { email },
+        "https://api.openai.com/auth": {
+          chatgpt_account_id: accountId,
+          chatgpt_user_id: `user-${accountId}`,
+        },
+      });
+    },
+    message: /缺少有效 exp/,
+  }, {
+    id: 204,
+    email: "agent-conflict@example.com",
+    accountId: "workspace-agent-conflict",
+    token(_email, accountId) {
+      return identityJwt({ email: "other-agent@example.com", accountId });
+    },
+    message: /身份字段不一致/,
+  }];
+  const accounts = cases.map((item) => {
+    const account = registrationAccount(item);
+    account.credentials.find((credential) => credential.key === "access_token").value = item.token(item.email, item.accountId);
+    addRegisteredSource(db, item);
+    return account;
+  });
+  let nfapiCalls = 0;
+  let registrations = 0;
+  const service = createService({
+    db,
+    accounts,
+    nfapiClient: {
+      async listOpenAiOauthAccounts() { nfapiCalls += 1; return []; },
+      async importCodexSession() { nfapiCalls += 1; return {}; },
+    },
+    agentIdentityRegistrar: async () => {
+      registrations += 1;
+      throw new Error("must not register");
+    },
+  });
+
+  for (const invalidOptions of [null, [], new Date()]) {
+    await assert.rejects(
+      () => service.importAgentIdentity({ id: cases[0].id, options: invalidOptions }),
+      (error) => error.status === 400 && /设置格式无效/.test(error.message),
+    );
+  }
+  for (const item of cases) {
+    await assert.rejects(
+      () => service.importAgentIdentity({ id: item.id }),
+      (error) => error.status === 409 && item.message.test(error.message),
+    );
+  }
+  assert.equal(registrations, 0);
+  assert.equal(nfapiCalls, 0);
+});
+
+test("Agent Identity confirmed business failures reuse identity but rotate the idempotency key", async (t) => {
+  const db = testDatabase(t);
+  const id = 205;
+  const email = "agent-retry@example.com";
+  const accountId = "workspace-agent-retry";
+  const userId = `user-${accountId}`;
+  const runtimeId = "runtime-agent-retry-private";
+  const privateKey = "pkcs8-agent-retry-private";
+  const local = registrationAccount({ id, email, accountId });
+  const accessToken = local.credentials.find((item) => item.key === "access_token").value;
+  addRegisteredSource(db, { id, email });
+  let registrations = 0;
+  const imports = [];
+  const client = {
+    async listOpenAiOauthAccounts() { return []; },
+    async importCodexSession(payload, idempotencyKey) {
+      imports.push({ payload, idempotencyKey });
+      if (imports.length === 1) {
+        return {
+          total: 1,
+          created: 0,
+          updated: 0,
+          skipped: 0,
+          failed: 1,
+          items: [{ index: 1, action: "failed", message: `failed ${privateKey} ${runtimeId} ${accessToken}` }],
+          errors: [{ index: 1, message: `failed ${privateKey} ${runtimeId} ${accessToken}` }],
+        };
+      }
+      return agentImportResult("created", 9205);
+    },
+    async getAccount(idValue) {
+      return nfapiAgentAccount({ id: idValue, email, accountId, userId, runtimeId });
+    },
+    async updateAccount() { return { id: 9205 }; },
+    async bulkUpdateAccounts() { return { updated: 1, failed: 0 }; },
+  };
+  const service = createService({
+    db,
+    accounts: [local],
+    nfapiClient: client,
+    agentIdentityRegistrar: async () => {
+      registrations += 1;
+      return registeredAgentIdentity({ email, accountId, userId, runtimeId, privateKey });
+    },
+  });
+
+  let firstError;
+  try {
+    await service.importAgentIdentity({
+      id,
+      options: {
+        expires_at: Math.floor(Date.now() / 1_000) - 3_600,
+        auto_pause_on_expired: true,
+        concurrency: 10,
+      },
+    });
+    assert.fail("expected the first business result to fail");
+  } catch (error) {
+    firstError = error;
+  }
+  assert.equal(firstError.status, 502);
+  assert.match(firstError.message, /内存中保留/);
+  for (const secret of [privateKey, runtimeId, accessToken]) {
+    assert.equal(firstError.message.includes(secret), false);
+  }
+  const failedLink = db.prepare("SELECT * FROM registered_account_nfapi_links WHERE external_account_id = ?")
+    .get(String(id));
+  assert.equal(failedLink.status, "failed");
+  for (const secret of [privateKey, runtimeId, accessToken]) {
+    assert.equal(JSON.stringify(failedLink).includes(secret), false);
+  }
+  assert.equal(service.pendingAgentIdentities.size, 1);
+
+  const result = await service.importAgentIdentity({
+    id,
+    options: { concurrency: 10 },
+  });
+
+  assert.equal(registrations, 1);
+  assert.equal(imports.length, 2);
+  assert.notEqual(imports[0].idempotencyKey, imports[1].idempotencyKey);
+  assert.equal(imports[0].payload.expires_at, 0);
+  assert.equal(imports[0].payload.auto_pause_on_expired, false);
+  assert.equal(imports[0].payload.concurrency, 10);
+  assert.equal(imports[1].payload.concurrency, 10);
+  const firstIdentity = JSON.parse(imports[0].payload.content).agent_identity;
+  const secondIdentity = JSON.parse(imports[1].payload.content).agent_identity;
+  assert.equal(firstIdentity.agent_runtime_id, runtimeId);
+  assert.equal(secondIdentity.agent_runtime_id, runtimeId);
+  assert.equal(firstIdentity.agent_private_key, privateKey);
+  assert.equal(secondIdentity.agent_private_key, privateKey);
+  assert.deepEqual(result, {
+    auth_mode: "agentIdentity",
+    action: "created",
+    nfapi_account_id: 9205,
+    short_lived: false,
+  });
+  assert.equal(service.pendingAgentIdentities.size, 0);
+});
+
+test("Agent Identity replays the same payload and key when the committed response is lost", async (t) => {
+  const db = testDatabase(t);
+  const id = 2051;
+  const email = "agent-lost-response@example.com";
+  const accountId = "workspace-agent-lost-response";
+  const userId = `user-${accountId}`;
+  const runtimeId = "runtime-agent-lost-response-private";
+  const privateKey = "pkcs8-agent-lost-response-private";
+  const local = registrationAccount({ id, email, accountId });
+  addRegisteredSource(db, { id, email });
+  let registrations = 0;
+  let lists = 0;
+  const imports = [];
+  const committed = new Map();
+  const client = {
+    async listOpenAiOauthAccounts() { lists += 1; return []; },
+    async importCodexSession(payload, idempotencyKey) {
+      imports.push({ payload: structuredClone(payload), idempotencyKey });
+      if (!committed.has(idempotencyKey)) {
+        committed.set(idempotencyKey, agentImportResult("created", 9251));
+        throw new TypeError("socket closed after commit");
+      }
+      return committed.get(idempotencyKey);
+    },
+    async getAccount(targetId) {
+      return nfapiAgentAccount({ id: targetId, email, accountId, userId, runtimeId });
+    },
+    async updateAccount() { return { id: 9251 }; },
+    async bulkUpdateAccounts() { return { updated: 1, failed: 0 }; },
+  };
+  const service = createService({
+    db,
+    accounts: [local],
+    nfapiClient: client,
+    agentIdentityRegistrar: async () => {
+      registrations += 1;
+      return registeredAgentIdentity({ email, accountId, userId, runtimeId, privateKey });
+    },
+  });
+  const input = { id, options: { concurrency: 14, group_ids: [27] } };
+
+  await assert.rejects(
+    () => service.importAgentIdentity(input),
+    (error) => error.status === 502 && /内存中保留/.test(error.message),
+  );
+  assert.equal(service.pendingAgentIdentities.get(id).importOperation.state, "unknown");
+  await assert.rejects(
+    () => service.importAgentIdentity({ id, options: { concurrency: 15, group_ids: [27] } }),
+    (error) => error.status === 409 && /使用相同设置重试/.test(error.message),
+  );
+  assert.equal(imports.length, 1);
+
+  const result = await service.importAgentIdentity(input);
+
+  assert.equal(registrations, 1);
+  assert.equal(lists, 2);
+  assert.equal(imports.length, 2);
+  assert.equal(imports[0].idempotencyKey, imports[1].idempotencyKey);
+  assert.deepEqual(imports[0].payload, imports[1].payload);
+  assert.deepEqual(result, {
+    auth_mode: "agentIdentity",
+    action: "created",
+    nfapi_account_id: 9251,
+    short_lived: false,
+  });
+  assert.equal(service.pendingAgentIdentities.size, 0);
+});
+
+test("Agent Identity unknown retries recheck importer ambiguity before replay", async (t) => {
+  const db = testDatabase(t);
+  const id = 2054;
+  const email = "agent-replay-duplicate@example.com";
+  const accountId = "workspace-agent-replay-duplicate";
+  const userId = `user-${accountId}`;
+  const runtimeId = "runtime-agent-replay-duplicate-private";
+  const local = registrationAccount({ id, email, accountId });
+  addRegisteredSource(db, { id, email });
+  let lists = 0;
+  let imports = 0;
+  const duplicate = (targetId, storedUserId = userId) => ({
+    id: targetId,
+    credentials: {
+      email,
+      chatgpt_account_id: accountId,
+      ...(storedUserId ? { chatgpt_user_id: storedUserId } : {}),
+    },
+  });
+  const service = createService({
+    db,
+    accounts: [local],
+    nfapiClient: {
+      async listOpenAiOauthAccounts() {
+        lists += 1;
+        return lists === 1 ? [] : [duplicate(9254), duplicate(9255, "")];
+      },
+      async importCodexSession() {
+        imports += 1;
+        throw new TypeError("connection reset");
+      },
+    },
+    agentIdentityRegistrar: async () => registeredAgentIdentity({
+      email,
+      accountId,
+      userId,
+      runtimeId,
+      privateKey: "pkcs8-agent-replay-duplicate-private",
+    }),
+  });
+
+  await assert.rejects(() => service.importAgentIdentity({ id }), /connection reset/);
+  await assert.rejects(
+    () => service.importAgentIdentity({ id }),
+    (error) => error.status === 409 && /多个会被 Agent Identity 导入器匹配/.test(error.message),
+  );
+
+  assert.equal(lists, 2);
+  assert.equal(imports, 1);
+  assert.equal(service.pendingAgentIdentities.get(id).importOperation.state, "unknown");
+});
+
+test("Agent Identity resumes target settings without another import after a confirmed import", async (t) => {
+  const db = testDatabase(t);
+  const id = 2052;
+  const email = "agent-settings-retry@example.com";
+  const accountId = "workspace-agent-settings-retry";
+  const userId = `user-${accountId}`;
+  const runtimeId = "runtime-agent-settings-retry-private";
+  const privateKey = "pkcs8-agent-settings-retry-private";
+  const local = registrationAccount({ id, email, accountId });
+  addRegisteredSource(db, { id, email });
+  let registrations = 0;
+  let lists = 0;
+  let imports = 0;
+  let updates = 0;
+  let bulkUpdates = 0;
+  const client = {
+    async listOpenAiOauthAccounts() { lists += 1; return []; },
+    async importCodexSession() {
+      imports += 1;
+      if (imports > 1) throw new Error("must not import twice");
+      return agentImportResult("created", 9252);
+    },
+    async getAccount(targetId) {
+      return nfapiAgentAccount({ id: targetId, email, accountId, userId, runtimeId });
+    },
+    async updateAccount() { updates += 1; return { id: 9252 }; },
+    async bulkUpdateAccounts() {
+      bulkUpdates += 1;
+      return bulkUpdates === 1
+        ? { updated: 0, failed: 1, results: [{ success: false, error: "settings write failed" }] }
+        : { updated: 1, failed: 0 };
+    },
+  };
+  const service = createService({
+    db,
+    accounts: [local],
+    nfapiClient: client,
+    agentIdentityRegistrar: async () => {
+      registrations += 1;
+      return registeredAgentIdentity({ email, accountId, userId, runtimeId, privateKey });
+    },
+  });
+
+  await assert.rejects(
+    () => service.importAgentIdentity({ id, options: { concurrency: 17 } }),
+    (error) => error.status === 502 && /settings write failed/.test(error.message),
+  );
+  assert.equal(service.pendingAgentIdentities.get(id).importOperation.state, "imported");
+  local.credentials.find((credential) => credential.key === "access_token").value = identityJwt({
+    email,
+    accountId,
+    userId,
+    exp: Math.floor(Date.now() / 1_000) - 60,
+  });
+
+  const result = await service.importAgentIdentity({ id, options: { concurrency: 18 } });
+
+  assert.equal(registrations, 1);
+  assert.equal(lists, 1);
+  assert.equal(imports, 1);
+  assert.equal(updates, 2);
+  assert.equal(bulkUpdates, 2);
+  assert.deepEqual(result, {
+    auth_mode: "agentIdentity",
+    action: "created",
+    nfapi_account_id: 9252,
+    short_lived: false,
+  });
+  assert.equal(service.pendingAgentIdentities.size, 0);
+});
+
+test("Agent Identity transient target verification failures keep the confirmed import result", async (t) => {
+  const db = testDatabase(t);
+  const id = 2053;
+  const email = "agent-target-retry@example.com";
+  const accountId = "workspace-agent-target-retry";
+  const userId = `user-${accountId}`;
+  const runtimeId = "runtime-agent-target-retry-private";
+  const local = registrationAccount({ id, email, accountId });
+  addRegisteredSource(db, { id, email });
+  let imports = 0;
+  let targetReads = 0;
+  const client = {
+    async listOpenAiOauthAccounts() { return []; },
+    async importCodexSession() { imports += 1; return agentImportResult("created", 9253); },
+    async getAccount(targetId) {
+      targetReads += 1;
+      const account = nfapiAgentAccount({ id: targetId, email, accountId, userId, runtimeId });
+      if (targetReads === 1) account.credentials_status = {};
+      return account;
+    },
+    async updateAccount() { return { id: 9253 }; },
+    async bulkUpdateAccounts() { return { updated: 1, failed: 0 }; },
+  };
+  const service = createService({
+    db,
+    accounts: [local],
+    nfapiClient: client,
+    agentIdentityRegistrar: async () => registeredAgentIdentity({
+      email, accountId, userId, runtimeId, privateKey: "pkcs8-agent-target-retry-private",
+    }),
+  });
+
+  await assert.rejects(
+    () => service.importAgentIdentity({ id }),
+    (error) => error.status === 502 && /未保存签名密钥/.test(error.message),
+  );
+  assert.equal(service.pendingAgentIdentities.get(id).importOperation.state, "imported");
+
+  const result = await service.importAgentIdentity({ id });
+
+  assert.equal(imports, 1);
+  assert.equal(targetReads, 2);
+  assert.equal(result.nfapi_account_id, 9253);
+  assert.equal(service.pendingAgentIdentities.size, 0);
+});
+
+test("Agent Identity remediation is pinned to the original target and rotates only its import key", async (t) => {
+  const db = testDatabase(t);
+  const id = 2055;
+  const email = "agent-remediation-target@example.com";
+  const accountId = "workspace-agent-remediation-target";
+  const userId = `user-${accountId}`;
+  const runtimeId = "runtime-agent-remediation-target-private";
+  const local = registrationAccount({ id, email, accountId });
+  addRegisteredSource(db, { id, email });
+  let listedAccounts = [];
+  let targetReads = 0;
+  const imports = [];
+  const client = {
+    async listOpenAiOauthAccounts() { return listedAccounts; },
+    async importCodexSession(payload, idempotencyKey) {
+      imports.push({ payload, idempotencyKey });
+      if (imports.length === 1) return agentImportResult("created", 9255);
+      if (imports.length === 2) {
+        return {
+          total: 1,
+          created: 0,
+          updated: 0,
+          skipped: 0,
+          failed: 1,
+          items: [{ index: 1, action: "failed", message: "cleanup failed" }],
+          errors: [{ index: 1, message: "cleanup failed" }],
+        };
+      }
+      return agentImportResult("updated", 9255);
+    },
+    async getAccount(targetId) {
+      targetReads += 1;
+      return nfapiAgentAccount({
+        id: targetId,
+        email,
+        accountId,
+        userId,
+        runtimeId,
+        credentialStatus: targetReads === 1 ? { has_access_token: true } : {},
+      });
+    },
+    async updateAccount() { return { id: 9255 }; },
+    async bulkUpdateAccounts() { return { updated: 1, failed: 0 }; },
+  };
+  const service = createService({
+    db,
+    accounts: [local],
+    nfapiClient: client,
+    agentIdentityRegistrar: async () => registeredAgentIdentity({
+      email,
+      accountId,
+      userId,
+      runtimeId,
+      privateKey: "pkcs8-agent-remediation-target-private",
+    }),
+  });
+
+  await assert.rejects(() => service.importAgentIdentity({ id }), /残留 OAuth Token/);
+  const pending = service.pendingAgentIdentities.get(id);
+  assert.equal(pending.importOperation.state, "remediation_required");
+  assert.equal(pending.importOperation.result.accountId, 9255);
+
+  listedAccounts = [nfapiAgentAccount({ id: 9255, email, accountId, userId, runtimeId })];
+  await assert.rejects(() => service.importAgentIdentity({ id }), /cleanup failed/);
+  assert.equal(imports.length, 2);
+  assert.equal(pending.importOperation.state, "failed_confirmed");
+  assert.equal(pending.remediationTargetId, 9255);
+
+  listedAccounts = [nfapiAgentAccount({ id: 9256, email, accountId, userId, runtimeId })];
+  await assert.rejects(
+    () => service.importAgentIdentity({ id }),
+    (error) => error.status === 409 && /修复目标已变化/.test(error.message),
+  );
+  assert.equal(imports.length, 2);
+
+  listedAccounts = [nfapiAgentAccount({ id: 9255, email, accountId, userId, runtimeId })];
+  const result = await service.importAgentIdentity({ id });
+
+  assert.equal(imports.length, 3);
+  assert.notEqual(imports[0].idempotencyKey, imports[1].idempotencyKey);
+  assert.notEqual(imports[1].idempotencyKey, imports[2].idempotencyKey);
+  assert.equal(JSON.parse(imports[0].payload.content).agent_identity.agent_runtime_id, runtimeId);
+  assert.equal(JSON.parse(imports[1].payload.content).agent_identity.agent_runtime_id, runtimeId);
+  assert.equal(JSON.parse(imports[2].payload.content).agent_identity.agent_runtime_id, runtimeId);
+  assert.deepEqual(result, {
+    auth_mode: "agentIdentity",
+    action: "updated",
+    nfapi_account_id: 9255,
+    short_lived: false,
+  });
+});
+
+test("Agent Identity keeps pending material when NFapi reports OAuth residue and actively expires it", async (t) => {
+  const db = testDatabase(t);
+  const id = 206;
+  const email = "agent-residue@example.com";
+  const accountId = "workspace-agent-residue";
+  const userId = `user-${accountId}`;
+  const runtimeId = "runtime-agent-residue-private";
+  const privateKey = "pkcs8-agent-residue-private";
+  const local = registrationAccount({ id, email, accountId });
+  const accessToken = local.credentials.find((item) => item.key === "access_token").value;
+  addRegisteredSource(db, { id, email });
+  let mutationsAfterImport = 0;
+  const service = createService({
+    db,
+    accounts: [local],
+    nfapiClient: {
+      async listOpenAiOauthAccounts() { return []; },
+      async importCodexSession() { return agentImportResult("created", 9206); },
+      async getAccount(idValue) {
+        return nfapiAgentAccount({
+          id: idValue,
+          email,
+          accountId,
+          userId,
+          runtimeId,
+          credentialStatus: { has_access_token: true },
+        });
+      },
+      async updateAccount() { mutationsAfterImport += 1; },
+      async bulkUpdateAccounts() { mutationsAfterImport += 1; },
+    },
+    agentIdentityRegistrar: async () => registeredAgentIdentity({
+      email, accountId, userId, runtimeId, privateKey,
+    }),
+  });
+  service.agentIdentityPendingTtlMs = 20;
+
+  await assert.rejects(
+    () => service.importAgentIdentity({ id }),
+    (error) => {
+      assert.equal(error.status, 502);
+      assert.match(error.message, /残留 OAuth Token/);
+      for (const secret of [accessToken, privateKey, runtimeId]) {
+        assert.equal(error.message.includes(secret), false);
+      }
+      return true;
+    },
+  );
+  assert.equal(mutationsAfterImport, 0);
+  assert.equal(service.pendingAgentIdentities.size, 1);
+  assert.equal(service.pendingAgentIdentities.get(id).importOperation.state, "remediation_required");
+  assert.equal(service.pendingAgentIdentities.get(id).expiryTimer.hasRef(), false);
+  const failedLink = db.prepare("SELECT * FROM registered_account_nfapi_links WHERE external_account_id = ?")
+    .get(String(id));
+  for (const secret of [accessToken, privateKey, runtimeId]) {
+    assert.equal(JSON.stringify(failedLink).includes(secret), false);
+  }
+
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(service.pendingAgentIdentities.size, 0);
+});
+
+test("Agent Identity skip rejects OAuth accounts and only accepts an already durable Agent Identity", async (t) => {
+  const db = testDatabase(t);
+  const oauthId = 207;
+  const agentId = 208;
+  const oauthEmail = "agent-skip-oauth@example.com";
+  const agentEmail = "agent-skip-durable@example.com";
+  const oauthAccountId = "workspace-agent-skip-oauth";
+  const agentAccountId = "workspace-agent-skip-durable";
+  const oauthLocal = registrationAccount({ id: oauthId, email: oauthEmail, accountId: oauthAccountId });
+  const agentLocal = registrationAccount({ id: agentId, email: agentEmail, accountId: agentAccountId });
+  addRegisteredSource(db, { id: oauthId, email: oauthEmail });
+  addRegisteredSource(db, { id: agentId, email: agentEmail });
+  let registrations = 0;
+  let imports = 0;
+  const oauthExisting = {
+    id: 9307,
+    credentials: {
+      auth_mode: "oauth",
+      email: oauthEmail,
+      chatgpt_account_id: oauthAccountId,
+      chatgpt_user_id: `user-${oauthAccountId}`,
+    },
+    credentials_status: { has_refresh_token: true },
+  };
+  const durableExisting = nfapiAgentAccount({
+    id: 9308,
+    email: agentEmail,
+    accountId: agentAccountId,
+    userId: `user-${agentAccountId}`,
+    runtimeId: "existing-runtime",
+  });
+  const service = createService({
+    db,
+    accounts: [oauthLocal, agentLocal],
+    nfapiClient: {
+      async listOpenAiOauthAccounts() { return [oauthExisting, durableExisting]; },
+      async importCodexSession() { imports += 1; return {}; },
+    },
+    agentIdentityRegistrar: async () => {
+      registrations += 1;
+      throw new Error("must not register while skipping");
+    },
+  });
+
+  await assert.rejects(
+    () => service.importAgentIdentity({ id: oauthId, options: { update_existing: false } }),
+    (error) => error.status === 409 && /开启“更新已有账号”/.test(error.message),
+  );
+  const skipped = await service.importAgentIdentity({ id: agentId, options: { update_existing: false } });
+
+  assert.deepEqual(skipped, {
+    auth_mode: "agentIdentity",
+    action: "skipped",
+    nfapi_account_id: 9308,
+    short_lived: false,
+  });
+  assert.equal(registrations, 0);
+  assert.equal(imports, 0);
 });

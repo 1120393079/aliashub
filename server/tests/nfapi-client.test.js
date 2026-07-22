@@ -33,7 +33,7 @@ test("NFapi client sends the API key only as a header and unwraps response envel
   assert.equal(JSON.stringify(groups).includes(secret), false);
 });
 
-test("NFapi client uses the native OpenAI OAuth endpoints and never exposes a direct session import", async () => {
+test("NFapi client uses the native OpenAI OAuth endpoints", async () => {
   const calls = [];
   const client = new NfapiClient({
     baseUrl: "https://nfapi.test",
@@ -48,12 +48,56 @@ test("NFapi client uses the native OpenAI OAuth endpoints and never exposes a di
   await client.generateOpenAiOAuthUrl({ proxy_id: 9 });
   await client.exchangeOpenAiOAuthCode({ session_id: "upstream", code: "code", state: "state", proxy_id: 9 });
 
-  assert.equal(client.importCodexSession, undefined);
   assert.equal(calls[0].url, "https://nfapi.test/api/v1/admin/openai/generate-auth-url");
   assert.deepEqual(JSON.parse(calls[0].options.body), { proxy_id: 9 });
   assert.equal(calls[1].url, "https://nfapi.test/api/v1/admin/openai/exchange-code");
   assert.deepEqual(JSON.parse(calls[1].options.body), { session_id: "upstream", code: "code", state: "state", proxy_id: 9 });
   assert.equal(Object.hasOwn(JSON.parse(calls[1].options.body), "redirect_uri"), false);
+});
+
+test("NFapi client imports Agent Identity auth.json with a stable idempotency key", async () => {
+  const calls = [];
+  const client = new NfapiClient({
+    baseUrl: "https://nfapi.test",
+    apiKey: "secret",
+    fetchFn: async (url, options) => {
+      calls.push({ url, options });
+      return jsonResponse(200, { data: {
+        total: 1, created: 1, updated: 0, skipped: 0, failed: 0,
+        items: [{ index: 1, action: "created", account_id: 902 }],
+      } });
+    },
+  });
+  const payload = { content: JSON.stringify({
+    auth_mode: "agentIdentity",
+    agent_identity: { agent_runtime_id: "runtime", agent_private_key: "private" },
+  }) };
+
+  const result = await client.importCodexSession(payload, "aliashub-agent-stable-key");
+
+  assert.equal(result.items[0].account_id, 902);
+  assert.equal(calls[0].url, "https://nfapi.test/api/v1/admin/accounts/import/codex-session");
+  assert.equal(calls[0].options.method, "POST");
+  assert.equal(calls[0].options.headers["Idempotency-Key"], "aliashub-agent-stable-key");
+  assert.deepEqual(JSON.parse(calls[0].options.body), payload);
+  assert.throws(
+    () => client.importCodexSession(payload, ""),
+    (error) => error.status === 500 && /幂等键/.test(error.message),
+  );
+});
+
+test("NFapi client gives Agent Identity imports a 120 second request timeout", async () => {
+  const client = new NfapiClient({ baseUrl: "https://nfapi.test", apiKey: "secret" });
+  let request;
+  client.request = async (path, options) => {
+    request = { path, options };
+    return {};
+  };
+
+  await client.importCodexSession({ content: "{}" }, "stable-agent-key");
+
+  assert.equal(request.path, "/api/v1/admin/accounts/import/codex-session");
+  assert.equal(request.options.timeoutMs, 120_000);
 });
 
 test("NFapi client creates OAuth accounts with an explicit idempotency key", async () => {
@@ -119,6 +163,31 @@ test("NFapi client keeps paginating when the server caps the requested page size
   assert.deepEqual(pages, [1, 2]);
 });
 
+test("NFapi client fails closed when the account list exceeds its pagination safety bound", async () => {
+  let calls = 0;
+  const client = new NfapiClient({
+    baseUrl: "https://nfapi.test",
+    apiKey: "secret",
+    fetchFn: async (url) => {
+      calls += 1;
+      const page = Number(new URL(url).searchParams.get("page"));
+      return jsonResponse(200, { data: {
+        items: [{ id: page }],
+        total: 101,
+        page,
+        page_size: 1,
+        pages: 101,
+      } });
+    },
+  });
+
+  await assert.rejects(
+    () => client.listOpenAiOauthAccounts(),
+    (error) => error.status === 502 && /分页超过安全上限/.test(error.message),
+  );
+  assert.equal(calls, 100);
+});
+
 test("NFapi client normalizes upstream failures without exposing its API key", async () => {
   const secret = "never-return-this-key";
   const client = new NfapiClient({
@@ -163,6 +232,38 @@ test("NFapi client redacts request tokens and proxy credentials echoed by upstre
       assert.equal(error.message.includes(refreshToken), false);
       assert.equal(error.message.includes("proxy-user"), false);
       assert.equal(error.message.includes("proxy-pass"), false);
+      return true;
+    },
+  );
+});
+
+test("NFapi client redacts Agent Identity keys and assertions echoed by upstream", async () => {
+  const privateKey = "private-key-pkcs8-sensitive-value";
+  const runtimeId = "runtime-sensitive-value";
+  const taskId = "task-sensitive-value";
+  const assertion = "assertion-sensitive-value";
+  const client = new NfapiClient({
+    baseUrl: "https://nfapi.test",
+    apiKey: "admin-secret",
+    fetchFn: async () => jsonResponse(400, {
+      message: `agent_private_key=${privateKey} agent_runtime_id=${runtimeId} task_id=${taskId} AgentAssertion ${assertion}`,
+    }),
+  });
+
+  await assert.rejects(
+    () => client.importCodexSession({ content: JSON.stringify({
+      auth_mode: "agentIdentity",
+      agent_identity: {
+        agent_private_key: privateKey,
+        agent_runtime_id: runtimeId,
+        task_id: taskId,
+      },
+    }) }, "agent-key"),
+    (error) => {
+      for (const secret of [privateKey, runtimeId, taskId, assertion]) {
+        assert.equal(error.message.includes(secret), false);
+      }
+      assert.match(error.message, /AgentAssertion \[REDACTED\]/);
       return true;
     },
   );

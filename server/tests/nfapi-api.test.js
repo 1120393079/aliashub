@@ -308,3 +308,92 @@ test("NFapi admin routes keep secrets server-side and complete native OAuth acco
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("Agent Identity API route forwards one path account and returns the exact public contract", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "aliashub-agent-api-test-"));
+  const db = createDatabase({ filename: path.join(directory, "test.db"), seedDemo: false });
+  const calls = [];
+  const runtime = createTestApp({
+    db,
+    graph: { async scanInbox() { return { stage: "completed", messages: [], items: [] }; } },
+    registrationClient: {},
+    nfapi: {
+      async importAgentIdentity(input) {
+        calls.push(input);
+        if (input.options === null) {
+          throw Object.assign(new Error("NFapi Agent Identity 导入设置格式无效"), { status: 400 });
+        }
+        return {
+          auth_mode: "agentIdentity",
+          action: "created",
+          nfapi_account_id: 4401,
+          short_lived: false,
+        };
+      },
+    },
+    publicBaseUrl: "https://alias.test/alias-hub",
+  });
+
+  try {
+    const imported = await jsonRequest(
+      runtime.app,
+      "/api/registration/accounts/401/nfapi-agent-identity/import",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          options: { concurrency: 19 },
+          save_defaults: true,
+          ids: [999],
+        }),
+      },
+    );
+
+    assert.equal(imported.response.status, 200);
+    assert.deepEqual(calls, [{
+      id: "401",
+      options: { concurrency: 19 },
+      save_defaults: true,
+    }]);
+    assert.deepEqual(imported.body, {
+      auth_mode: "agentIdentity",
+      action: "created",
+      nfapi_account_id: 4401,
+      short_lived: false,
+    });
+    assert.deepEqual(Object.keys(imported.body).sort(), ["action", "auth_mode", "nfapi_account_id", "short_lived"]);
+
+    const quickImported = await jsonRequest(
+      runtime.app,
+      "/api/registration/accounts/402/nfapi-agent-identity/import",
+      {
+        method: "POST",
+        body: JSON.stringify({ options: { update_existing: false }, save_defaults: false }),
+      },
+    );
+    assert.equal(quickImported.response.status, 200);
+    assert.deepEqual(calls[1], {
+      id: "402",
+      options: { update_existing: false },
+      save_defaults: false,
+    });
+
+    const invalidOptions = await jsonRequest(
+      runtime.app,
+      "/api/registration/accounts/401/nfapi-agent-identity/import",
+      { method: "POST", body: JSON.stringify({ options: null }) },
+    );
+    assert.equal(invalidOptions.response.status, 400);
+    assert.equal(calls[2].options, null);
+
+    const legacy = await jsonRequest(runtime.app, "/api/registration/accounts/import-nfapi", {
+      method: "POST",
+      body: JSON.stringify({ ids: [401] }),
+    });
+    assert.equal(legacy.response.status, 410);
+    assert.match(legacy.body.error, /Agent Identity 或 OAuth/);
+  } finally {
+    await new Promise((resolve) => setImmediate(resolve));
+    runtime.db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

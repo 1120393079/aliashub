@@ -15,7 +15,7 @@ const pages = {
   overview: { label: "总览", subtitle: "源头邮箱与任务状态", icon: LayoutDashboard },
   sources: { label: "源头邮箱", subtitle: "Microsoft 与 Google 邮箱", icon: Mail },
   factory: { label: "别名工厂", subtitle: "官方别名与 Plus 分裂地址", icon: WandSparkles },
-  registration: { label: "注册", subtitle: "邮箱注册，不接入手机号", icon: UserPlus },
+  registration: { label: "gpt注册", subtitle: "邮箱注册，不接入手机号", icon: UserPlus },
   inbox: { label: "邮件中心", subtitle: "集中接收所有绑定邮箱的邮件", icon: Inbox },
   codes: { label: "验证码中心", subtitle: "集中查看所有源头号的验证码", icon: KeyRound },
   addresses: { label: "地址仓库", subtitle: "全部基础地址和分裂地址", icon: BookOpen },
