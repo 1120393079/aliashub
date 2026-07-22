@@ -749,6 +749,7 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .modal-body { min-height: 0; padding: 18px; overflow-y: auto; }
 .modal-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 18px; border-top: 1px solid var(--line); background: var(--surface-2); }
 .nfapi-import-form { display: grid; gap: 18px; }
+.nfapi-import-form.is-importing { opacity: 0.76; }
 .nfapi-import-connection { min-height: 58px; display: flex; align-items: center; gap: 11px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-2); }
 .nfapi-import-connection > svg { flex: 0 0 auto; }
 .nfapi-import-connection.connected > svg { color: var(--green); }

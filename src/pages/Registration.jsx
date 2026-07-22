@@ -650,6 +650,7 @@ export default function RegistrationPage({ refreshKey }) {
   const [nfapiMailboxLoading, setNfapiMailboxLoading] = useState(false);
   const [nfapiMailboxError, setNfapiMailboxError] = useState("");
   const [nfapiMailboxUpdatedAt, setNfapiMailboxUpdatedAt] = useState("");
+  const nfapiOptionsRequest = useRef(0);
   const nfapiMailboxRequest = useRef(0);
   const nfapiMailboxBusy = useRef(false);
   const [passwordSetupTarget, setPasswordSetupTarget] = useState(null);
@@ -1171,6 +1172,7 @@ export default function RegistrationPage({ refreshKey }) {
     if (targets.length !== requestedIds.length) {
       toast(`已跳过 ${requestedIds.length - targets.length} 个不存在的注册账号`, "error");
     }
+    const requestId = ++nfapiOptionsRequest.current;
     setNfapiImportIds(targets.map((item) => item.id));
     setNfapiAccountSnapshot(targets.length === 1 ? targets[0] : null);
     setNfapiOptions(null);
@@ -1184,18 +1186,21 @@ export default function RegistrationPage({ refreshKey }) {
     setLoadingNfapiOptions(true);
     try {
       const result = await api("/api/nfapi/options");
+      if (requestId !== nfapiOptionsRequest.current) return;
       setNfapiOptions(result);
       setNfapiForm(importFormFromDefaults(result.defaults));
     } catch (error) {
+      if (requestId !== nfapiOptionsRequest.current) return;
       setNfapiOptions({ connection: { connected: false }, groups: [], proxies: [], error: error.message });
       toast(error.message, "error");
     } finally {
-      setLoadingNfapiOptions(false);
+      if (requestId === nfapiOptionsRequest.current) setLoadingNfapiOptions(false);
     }
   };
 
   const closeNfapiImporter = () => {
     if (importingNfapi || restartingNfapiOAuth) return;
+    nfapiOptionsRequest.current += 1;
     setNfapiImportIds([]);
     setNfapiOptions(null);
     setNfapiImportResult(null);
@@ -1799,14 +1804,14 @@ export default function RegistrationPage({ refreshKey }) {
         size="xl"
         footer={<><Button disabled={importingNfapi || restartingNfapiOAuth} onClick={closeNfapiImporter}>关闭</Button><Button variant="primary" icon={nfapiOAuthSession ? ShieldCheck : nfapiImportMode === "agent_identity" ? Fingerprint : Database} loading={importingNfapi} disabled={importingNfapi || nfapiSubmitDisabled} onClick={submitNfapiImport}>{nfapiOAuthSession ? "提交回调到 NFapi" : isBatchNfapiImport ? `批量生成 Agent Identity 并导入（${nfapiBatchActionableCount}）` : nfapiImportMode === "agent_identity" ? "生成 Agent Identity 并导入" : "生成 OAuth 授权链接"}</Button></>}
       >
-        {loadingNfapiOptions ? <LoadingBlock rows={9} /> : nfapiOptions && <div className="nfapi-import-form">
+        {loadingNfapiOptions ? <LoadingBlock rows={9} /> : nfapiOptions && <div className={`nfapi-import-form${importingNfapi ? " is-importing" : ""}`} inert={importingNfapi ? "" : undefined}>
           <div className={`nfapi-import-connection ${nfapiConnected ? "connected" : "failed"}`}><Cable size={18} /><span><b>{nfapiConnected ? "NFapi 已连接" : "NFapi 当前不可用"}</b><small>{nfapiOptions.connection?.base_url || nfapiOptions.connection?.url || nfapiOptions.error || "请先到系统设置配置地址与管理员 API Key"}</small></span><StatusBadge status={nfapiConnected ? "active" : "failed"}>{nfapiConnected ? "可以导入" : "请检查连接"}</StatusBadge></div>
           {nfapiOptions.error && <div className="inline-alert error"><AlertTriangle size={15} /><span>{nfapiOptions.error}</span></div>}
           {isBatchNfapiImport ? <>
             <div className="inline-alert"><Fingerprint size={15} /><span>已选择 {nfapiBatchPlan.total} 个账号，其中 {nfapiBatchActionableCount} 个可直接导入。批量导入将使用同一套配置，并按顺序执行。</span></div>
             {nfapiBatchPlan.blocked.length > 0 && <div className="inline-alert error"><AlertTriangle size={15} /><span>{nfapiBatchPlan.blocked.slice(0, 3).map((item) => `${item.item?.email || `账号 #${item.id}`}：${item.reason}`).join("；")}{nfapiBatchPlan.blocked.length > 3 ? `；另有 ${nfapiBatchPlan.blocked.length - 3} 个需处理` : ""}</span></div>}
           </> : !nfapiSelectedAccount ? <div className="inline-alert error"><AlertTriangle size={15} /><span>NFapi 目标账号已不存在，请关闭弹窗并刷新账号列表后重新选择。</span></div> : nfapiImportMode === "oauth" && !nfapiSelectedAccount.password_available && <div className="inline-alert"><AlertTriangle size={15} /><span>本地尚未保存该账号密码，仍可继续配置并发起 OAuth；登录时可使用原邮箱验证码，或使用账号已有密码。</span></div>}
-          {nfapiBatchProgress && <div className="nfapi-batch-progress" role="status" aria-live="polite"><LoaderCircle className="spin" size={16} /><div><b>正在批量导入 {nfapiBatchProgress.current}/{nfapiBatchProgress.total}</b><small>新增 {nfapiBatchProgress.created} · 更新 {nfapiBatchProgress.updated} · 已存在 {nfapiBatchProgress.skipped} · 失败 {nfapiBatchProgress.failed}</small></div><i aria-hidden="true" style={{ width: `${Math.round((nfapiBatchProgress.current / Math.max(1, nfapiBatchProgress.total)) * 100)}%` }} /></div>}
+          {nfapiBatchProgress && <div className="nfapi-batch-progress" role="status" aria-live="polite"><LoaderCircle className="spin" size={16} /><div><b>正在批量导入 {nfapiBatchProgress.current}/{nfapiBatchProgress.total}</b><small>配置已锁定 · 新增 {nfapiBatchProgress.created} · 更新 {nfapiBatchProgress.updated} · 已存在 {nfapiBatchProgress.skipped} · 失败 {nfapiBatchProgress.failed}</small></div><i aria-hidden="true" style={{ width: `${Math.round((nfapiBatchProgress.current / Math.max(1, nfapiBatchProgress.total)) * 100)}%` }} /></div>}
           {!nfapiOAuthSession && !nfapiImportResult && !nfapiBatchResult && <>
             <section className="nfapi-import-section">
               <header><Fingerprint size={17} /><div><h3>授权方式</h3><p>{isBatchNfapiImport ? "批量导入统一使用 Agent Identity；OAuth 需逐个账号授权。" : "默认使用 Agent Identity，也可切换到 OpenAI OAuth"}</p></div></header>
@@ -1814,6 +1819,7 @@ export default function RegistrationPage({ refreshKey }) {
                 value={nfapiImportMode}
                 onChange={selectNfapiImportMode}
                 ariaLabel="NFapi 账号授权方式"
+                disabled={importingNfapi}
                 items={isBatchNfapiImport
                   ? [{ value: "agent_identity", label: "Agent Identity（推荐）", icon: Fingerprint }]
                   : [

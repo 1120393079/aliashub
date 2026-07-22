@@ -134,11 +134,11 @@ export function Pagination({ page, pages, onChange, disabled = false }) {
   );
 }
 
-export function Segmented({ value, onChange, items, ariaLabel }) {
+export function Segmented({ value, onChange, items, ariaLabel, disabled = false }) {
   return (
     <div className="segmented" role="tablist" aria-label={ariaLabel}>
       {items.map((item) => (
-        <button key={item.value} type="button" className={value === item.value ? "active" : ""} onClick={() => onChange(item.value)} role="tab" aria-selected={value === item.value}>
+        <button key={item.value} type="button" className={value === item.value ? "active" : ""} disabled={disabled || item.disabled} onClick={() => onChange(item.value)} role="tab" aria-selected={value === item.value}>
           {item.icon && <item.icon size={15} />}
           <span>{item.label}</span>
           {item.count !== undefined && <b>{item.count}</b>}
