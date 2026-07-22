@@ -31,7 +31,7 @@ export function planAgentIdentityBulk(accounts = [], selectedIds = []) {
       continue;
     }
     if (!item.access_token_available) {
-      plan.blocked.push({ id, item, reason: "账号没有可用 AT，请使用单账号导入设置" });
+      plan.blocked.push({ id, item, reason: "账号没有可用 AT，无法使用 Agent Identity 导入" });
       continue;
     }
     plan.actionable.push(item);
