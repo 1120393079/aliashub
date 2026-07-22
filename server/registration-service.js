@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { isIP } from "node:net";
 import { generateSplits, persistInboxScanResult } from "./account-service.js";
+import { isIcloudImportedStrategy } from "./address-generator.js";
 import {
   getSetting,
   listRegisteredAccountStatusChecks,
@@ -1500,16 +1501,24 @@ export class RegistrationService {
     const baseJobs = this.db.prepare(`
       SELECT registration_jobs.email, registration_jobs.status, registration_jobs.stage, registration_jobs.message
       FROM registration_jobs
-      JOIN addresses split_address ON split_address.id = registration_jobs.address_id
-      WHERE split_address.parent_address_id = ?
+      JOIN addresses job_address ON job_address.id = registration_jobs.address_id
+      WHERE job_address.parent_address_id = ? OR job_address.id = ?
       ORDER BY registration_jobs.created_at DESC, registration_jobs.id DESC
     `);
-    const accounts = this.db.prepare("SELECT * FROM source_accounts WHERE status = 'connected' AND provider IN ('microsoft', 'google') ORDER BY updated_at DESC").all().map((account) => ({
-      id: account.id,
-      email: account.email,
-      display_name: account.display_name,
-      bases: this.db.prepare("SELECT id, address, kind, label FROM addresses WHERE account_id = ? AND kind IN ('primary', 'official') AND status = 'active' ORDER BY kind = 'primary' DESC, created_at").all(account.id).map((base) => {
-        const jobs = baseJobs.all(base.id);
+    const accounts = this.db.prepare("SELECT * FROM source_accounts WHERE status = 'connected' AND provider IN ('microsoft', 'google', 'icloud') ORDER BY updated_at DESC").all().map((account) => {
+      const direct = account.provider === "icloud";
+      const bases = this.db.prepare("SELECT id, address, kind, label, strategy FROM addresses WHERE account_id = ? AND kind IN ('primary', 'official') AND status = 'active' ORDER BY kind = 'primary' DESC, created_at")
+        .all(account.id)
+        .filter((base) => !direct || base.kind === "primary" || isIcloudImportedStrategy(base.strategy));
+      return {
+        id: account.id,
+        email: account.email,
+        display_name: account.display_name,
+        provider: account.provider,
+        registration_mode: direct ? "direct" : "split",
+        max_registration_count: direct ? 1 : 20,
+        bases: bases.map((base) => {
+        const jobs = baseJobs.all(base.id, base.id);
         const latest = jobs[0];
         const conflicts = new Set();
         for (const job of jobs) {
@@ -1517,19 +1526,31 @@ export class RegistrationService {
           if (registrationFailureReason(job) === "user_already_exists") conflicts.add(String(job.email || "").toLowerCase());
         }
         const conflictCount = conflicts.size;
-        const registrationState = conflictCount >= 2 ? "likely_exhausted" : (conflictCount === 1 ? "warning" : "available");
+        const activeDirectJob = direct && jobs.some((job) => RELEASABLE_JOB_STATUSES.has(String(job.status || "")));
+        const completedDirectJob = direct && jobs.some((job) => job.status === "completed");
+        const registrationState = activeDirectJob ? "in_progress"
+          : completedDirectJob ? "used"
+            : conflictCount >= 2 ? "likely_exhausted" : (conflictCount === 1 ? "warning" : "available");
         return {
           ...base,
           registration_state: registrationState,
+          registration_disabled: activeDirectJob || completedDirectJob,
           already_exists_count: conflictCount,
           registration_success_count: jobs.filter((job) => job.status === "completed").length,
           last_registration_status: latest?.status || "",
-          registration_hint: registrationState === "likely_exhausted"
+          registration_hint: activeDirectJob
+            ? "这个 iCloud 地址已有进行中的注册任务，请等待任务结束。"
+            : completedDirectJob
+              ? "这个 iCloud 地址已经用于成功注册；请导入新的隐藏邮箱反代地址继续注册。"
+              : direct
+                ? "iCloud 地址会直接用于注册，不会生成 +tag 分裂地址。"
+                : registrationState === "likely_exhausted"
             ? "这个基础地址已有多次邮箱占用冲突，疑似不再适合继续分裂注册，建议更换基础地址。"
             : (registrationState === "warning" ? "这个基础地址最近出现邮箱占用冲突，再次失败时请更换基础地址。" : ""),
         };
       }),
-    }));
+      };
+    });
     const proxies = this.getProxyPool();
     return {
       accounts,
@@ -1574,22 +1595,49 @@ export class RegistrationService {
     const account = this.db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(Number(input.accountId));
     if (!account) throw Object.assign(new Error("源头邮箱不存在"), { status: 404 });
     if (account.status !== "connected") throw Object.assign(new Error("请先完成这个源头邮箱的连接验证"), { status: 409 });
-    if (!["microsoft", "google"].includes(account.provider)) {
-      throw Object.assign(new Error("这个邮箱提供商不支持 Plus 分裂注册地址"), { status: 409 });
+    if (!["microsoft", "google", "icloud"].includes(account.provider)) {
+      throw Object.assign(new Error("这个邮箱提供商不支持注册地址"), { status: 409 });
     }
     const base = this.db.prepare("SELECT * FROM addresses WHERE id = ? AND account_id = ? AND kind IN ('primary', 'official') AND status = 'active'").get(Number(input.baseAddressId), account.id);
     if (!base) throw Object.assign(new Error("请选择可用的基础地址"), { status: 400 });
+    const directIcloud = account.provider === "icloud";
+    if (directIcloud && base.kind === "official" && !isIcloudImportedStrategy(base.strategy)) {
+      throw Object.assign(new Error("请选择已导入的 iCloud 邮箱别名或隐藏邮箱反代地址"), { status: 400 });
+    }
+    if (directIcloud && count !== 1) {
+      throw Object.assign(new Error("iCloud 别名和隐藏邮箱反代地址每次只能提交 1 个注册任务"), { status: 400 });
+    }
+    if (directIcloud && customSuffix) {
+      throw Object.assign(new Error("iCloud 地址不支持 Plus 分裂后缀，请直接选择已导入的别名或隐藏邮箱反代地址"), { status: 400 });
+    }
     const proxies = resolveJobProxies(input, this.getProxyPool());
-    const addresses = generateSplits(this.db, account, {
-      baseAddressIds: [base.id],
-      countPerBase: count,
-      prefix: "gpt",
-      mode: "random",
-      randomLength: 10,
-      customSuffix,
-      label: "GPT 注册",
-      purpose: "ChatGPT 注册",
-    });
+    let addresses;
+    if (directIcloud) {
+      const existing = this.db.prepare(`
+        SELECT status FROM registration_jobs
+        WHERE address_id = ?
+          AND status IN ('queued', 'pending', 'claimed', 'running', 'cancel_requested', 'completed')
+        ORDER BY created_at DESC, id DESC LIMIT 1
+      `).get(base.id);
+      if (existing) {
+        const message = existing.status === "completed"
+          ? "这个 iCloud 地址已经用于成功注册，请导入新的隐藏邮箱反代地址"
+          : "这个 iCloud 地址已有进行中的注册任务";
+        throw Object.assign(new Error(message), { status: 409 });
+      }
+      addresses = [base];
+    } else {
+      addresses = generateSplits(this.db, account, {
+        baseAddressIds: [base.id],
+        countPerBase: count,
+        prefix: "gpt",
+        mode: "random",
+        randomLength: 10,
+        customSuffix,
+        label: "GPT 注册",
+        purpose: "ChatGPT 注册",
+      });
+    }
     const jobs = [];
     const usedProxySessions = new Set();
     for (let index = 0; index < addresses.length; index += 1) {
@@ -1617,6 +1665,7 @@ export class RegistrationService {
           extra: {
             identity_provider: "mailbox",
             mail_provider: "outlook_email_api",
+            mail_source_provider: account.provider,
             outlook_email_api_url: this.mailboxBaseUrl,
             outlook_email_api_key: this.connectorKey,
             outlook_email_fixed_email: address.address,

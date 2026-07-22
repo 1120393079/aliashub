@@ -40,8 +40,10 @@ export const MAIL_PROVIDERS = {
     reconnectLabel: "更新密码",
     supportsOfficialAliases: false,
     supportsPlusAliases: false,
-    capabilityTitle: "只读收件箱已连接",
-    capabilityDescription: "支持收取邮件和验证码；暂不生成 Plus 分裂地址",
+    supportsImportedAliases: true,
+    supportsDirectRegistration: true,
+    capabilityTitle: "别名与隐藏邮箱反代",
+    capabilityDescription: "导入 Apple 已创建的别名或隐藏邮箱反代，直接用于注册和收取验证码",
   },
 };
 
@@ -61,6 +63,16 @@ export function accountSupportsOfficialAliases(account) {
 export function accountSupportsPlusAliases(account) {
   if (account?.supports_plus_aliases !== undefined && account?.supports_plus_aliases !== null) return Boolean(account.supports_plus_aliases);
   return providerMeta(account?.provider).supportsPlusAliases;
+}
+
+export function accountSupportsImportedAliases(account) {
+  if (account?.supports_imported_aliases !== undefined && account?.supports_imported_aliases !== null) return Boolean(account.supports_imported_aliases);
+  return Boolean(providerMeta(account?.provider).supportsImportedAliases);
+}
+
+export function accountSupportsDirectRegistration(account) {
+  if (account?.supports_direct_registration !== undefined && account?.supports_direct_registration !== null) return Boolean(account.supports_direct_registration);
+  return Boolean(providerMeta(account?.provider).supportsDirectRegistration);
 }
 
 export function accountOptionLabel(account) {

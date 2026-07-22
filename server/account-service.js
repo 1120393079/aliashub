@@ -1,4 +1,12 @@
-import { normalizeTag, splitAddress } from "./address-generator.js";
+import {
+  ICLOUD_HIDE_MY_EMAIL_STRATEGY,
+  ICLOUD_MAIL_ALIAS_STRATEGY,
+  isIcloudPrivateRelay,
+  isIcloudImportedStrategy,
+  normalizeIcloudAliasEmail,
+  normalizeTag,
+  splitAddress,
+} from "./address-generator.js";
 import { audit, nowIso } from "./db.js";
 
 export function parseJson(value, fallback = {}) {
@@ -43,7 +51,76 @@ export function publicAccount(db, row) {
     auth_mode: provider === "icloud" ? "app_password" : "oauth",
     supports_official_aliases: provider === "microsoft",
     supports_plus_aliases: ["microsoft", "google"].includes(provider),
+    supports_imported_aliases: provider === "icloud",
+    supports_direct_registration: provider === "icloud",
   };
+}
+
+export function importIcloudAliases(db, account, values = []) {
+  if (account?.provider !== "icloud") {
+    throw Object.assign(new Error("这个源头邮箱不是 iCloud 账号"), { status: 409, code: "ICLOUD_ACCOUNT_REQUIRED" });
+  }
+  const raw = Array.isArray(values) ? values : [];
+  if (raw.length > 500) throw Object.assign(new Error("单次最多导入 500 个 iCloud 别名或隐藏邮箱反代地址"), { status: 400 });
+  const invalid = raw.map((value) => String(value || "").trim()).filter((value) => value && !normalizeIcloudAliasEmail(value));
+  if (invalid.length) {
+    throw Object.assign(new Error(`不支持的 iCloud 别名或隐藏邮箱反代地址：${invalid[0]}`), { status: 400 });
+  }
+  const aliases = [...new Set(raw.map(normalizeIcloudAliasEmail).filter(Boolean))]
+    .filter((address) => address !== account.email.toLowerCase());
+  if (!aliases.length) {
+    throw Object.assign(new Error("请至少填写一个 iCloud 别名或隐藏邮箱反代地址"), { status: 400 });
+  }
+  const duplicate = db.prepare(`
+    SELECT source_accounts.email AS source_email
+    FROM addresses
+    JOIN source_accounts ON source_accounts.id = addresses.account_id
+    WHERE addresses.address = ? COLLATE NOCASE AND addresses.account_id != ?
+    LIMIT 1
+  `);
+  const assigned = aliases.map((address) => ({ address, row: duplicate.get(address, account.id) })).find((item) => item.row);
+  if (assigned) {
+    throw Object.assign(
+      new Error(`${assigned.address} 已属于源头邮箱 ${assigned.row.source_email}，不能重复导入`),
+      { status: 409, code: "ICLOUD_ALIAS_ALREADY_ASSIGNED" },
+    );
+  }
+  const now = nowIso();
+  const insert = db.prepare(`
+    INSERT INTO addresses (
+      account_id, address, kind, status, strategy, label, purpose, remote_confirmed, created_at, updated_at
+    ) VALUES (?, ?, 'official', 'active', ?, ?, 'iCloud 手工导入', 0, ?, ?)
+    ON CONFLICT(account_id, address) DO UPDATE SET
+      kind = CASE WHEN addresses.kind = 'primary' THEN 'primary' ELSE 'official' END,
+      status = 'active', strategy = excluded.strategy, label = excluded.label,
+      purpose = excluded.purpose, updated_at = excluded.updated_at
+  `);
+  db.transaction(() => {
+    aliases.forEach((address) => {
+      const relay = isIcloudPrivateRelay(address);
+      insert.run(
+        account.id,
+        address,
+        relay ? ICLOUD_HIDE_MY_EMAIL_STRATEGY : ICLOUD_MAIL_ALIAS_STRATEGY,
+        relay ? "iCloud 隐藏邮箱反代" : "iCloud 邮箱别名",
+        now,
+        now,
+      );
+    });
+    audit(
+      db,
+      account.id,
+      "alias",
+      "导入 iCloud 别名和隐藏邮箱反代",
+      `本次导入 ${aliases.length} 个地址`,
+      { count: aliases.length },
+    );
+  })();
+  return db.prepare(`
+    SELECT * FROM addresses
+    WHERE account_id = ? AND kind IN ('primary', 'official')
+    ORDER BY kind = 'primary' DESC, created_at
+  `).all(account.id);
 }
 
 export function syncOfficialAddresses(db, account, aliases) {
@@ -221,13 +298,14 @@ export function persistInboxScanResult(db, account, result = {}) {
       received_at = excluded.received_at,
       updated_at = excluded.updated_at
   `);
-  const addresses = db.prepare("SELECT id, address FROM addresses WHERE account_id = ?").all(account.id);
+  const addresses = db.prepare("SELECT id, address, strategy FROM addresses WHERE account_id = ?").all(account.id);
   const addressByValue = new Map(addresses.map((item) => [item.address.toLowerCase(), item]));
   const findAddress = (item) => {
     const recipients = [item.recipient, ...(Array.isArray(item.recipients) ? item.recipients : [])]
       .map((value) => String(value || "").toLowerCase())
       .filter(Boolean);
-    return recipients.map((value) => addressByValue.get(value)).find(Boolean) || null;
+    const matches = recipients.map((value) => addressByValue.get(value)).filter(Boolean);
+    return matches.find((address) => isIcloudImportedStrategy(address.strategy)) || matches[0] || null;
   };
   let addedCodes = 0;
   let addedMessages = 0;

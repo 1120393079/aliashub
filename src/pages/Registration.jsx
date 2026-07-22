@@ -323,6 +323,8 @@ function preferredBase(account) {
 }
 
 function baseOptionLabel(item) {
+  if (item.registration_state === "in_progress") return `${item.address}（注册进行中）`;
+  if (item.registration_state === "used") return `${item.address}（已用于注册）`;
   if (item.registration_state === "likely_exhausted") return `${item.address}（疑似已占用）`;
   if (item.registration_state === "warning") return `${item.address}（有占用冲突）`;
   if (item.registration_success_count) return `${item.address}（已成功 ${item.registration_success_count}）`;
@@ -643,7 +645,15 @@ export default function RegistrationPage({ refreshKey }) {
       const validBase = account?.bases.some((item) => String(item.id) === current.baseAddressId);
       const proxyMatch = current.proxySelection?.match(/^proxy:(\d+)$/);
       const proxySelection = proxyMatch && Number(proxyMatch[1]) >= data.proxies.length ? "auto" : (current.proxySelection || "auto");
-      return { ...current, accountId, baseAddressId: validBase ? current.baseAddressId : String(preferredBase(account)?.id || ""), proxySelection };
+      const direct = account?.registration_mode === "direct";
+      return {
+        ...current,
+        accountId,
+        baseAddressId: validBase ? current.baseAddressId : String(preferredBase(account)?.id || ""),
+        count: direct ? 1 : current.count,
+        suffix: direct ? "" : current.suffix,
+        proxySelection,
+      };
     });
     setProxyInspectIndex((current) => current !== "" && Number(current) < data.proxies.length ? current : (data.proxies.length ? "0" : ""));
   }, []);
@@ -817,7 +827,14 @@ export default function RegistrationPage({ refreshKey }) {
 
   const changeAccount = (accountId) => {
     const account = options.accounts.find((item) => String(item.id) === accountId);
-    setForm({ ...form, accountId, baseAddressId: String(preferredBase(account)?.id || "") });
+    const direct = account?.registration_mode === "direct";
+    setForm((current) => ({
+      ...current,
+      accountId,
+      baseAddressId: String(preferredBase(account)?.id || ""),
+      count: direct ? 1 : current.count,
+      suffix: direct ? "" : current.suffix,
+    }));
   };
 
   const start = async () => {
@@ -1538,6 +1555,7 @@ export default function RegistrationPage({ refreshKey }) {
   const isAgentIdentityResult = nfapiImportResult?.auth_mode === "agentIdentity"
     || nfapiImportMode === "agent_identity";
   const passwordSetupRunning = Boolean(passwordSetupTask && !passwordSetupTask.terminal);
+  const isDirectRegistration = selectedAccount?.registration_mode === "direct";
   const deleteCount = deleteTarget?.ids?.length || 0;
   const deleteTitle = deletingAccounts
     ? (deleteCount > 1 ? `删除选中的 ${deleteCount} 个注册账号？` : "删除这个注册账号？")
@@ -1564,19 +1582,19 @@ export default function RegistrationPage({ refreshKey }) {
       {view === "tasks" && <>
         <section className="registration-control-grid">
           <article className="panel registration-launch-panel">
-            <header className="panel-header"><div><h2>创建邮箱注册任务</h2><p>自动生成独立分裂邮箱，并使用全新随机指纹环境</p></div><Fingerprint size={20} /></header>
+            <header className="panel-header"><div><h2>创建邮箱注册任务</h2><p>{isDirectRegistration ? "直接使用已导入的 iCloud 别名或隐藏邮箱反代，不生成 +tag 分裂地址" : "自动生成独立分裂邮箱，并使用全新随机指纹环境"}</p></div><Fingerprint size={20} /></header>
             <div className="registration-launch-form">
               <div className="form-grid two">
                 <FormField label="源头邮箱"><select value={form.accountId} onChange={(event) => changeAccount(event.target.value)}><option value="">请选择</option>{options.accounts.map((item) => <option key={item.id} value={item.id}>{item.email}</option>)}</select></FormField>
-                <FormField label="基础地址"><select value={form.baseAddressId} onChange={(event) => setForm({ ...form, baseAddressId: event.target.value })}><option value="">请选择</option>{selectedAccount?.bases.map((item) => <option key={item.id} value={item.id}>{baseOptionLabel(item)}</option>)}</select></FormField>
+                <FormField label={isDirectRegistration ? "iCloud 别名 / 隐藏邮箱反代" : "基础地址"}><select value={form.baseAddressId} onChange={(event) => setForm({ ...form, baseAddressId: event.target.value })}><option value="">请选择</option>{selectedAccount?.bases.map((item) => <option key={item.id} value={item.id} disabled={Boolean(item.registration_disabled)}>{baseOptionLabel(item)}</option>)}</select></FormField>
               </div>
               {selectedBase?.registration_hint && <div className="inline-alert warning"><AlertTriangle size={16} /><span>{selectedBase.registration_hint}</span></div>}
               <div className="form-grid two">
-                <FormField label="注册数量" hint={form.suffix.trim() ? "批量注册会自动追加 -01、-02 编号" : "留空后缀时，每个账号生成随机分裂邮箱"}><input type="number" min="1" max="20" value={form.count} onChange={(event) => setForm({ ...form, count: Number(event.target.value) })} /></FormField>
+                <FormField label="注册数量" hint={isDirectRegistration ? "iCloud 地址直接注册，固定为 1 个任务" : form.suffix.trim() ? "批量注册会自动追加 -01、-02 编号" : "留空后缀时，每个账号生成随机分裂邮箱"}><input type="number" min="1" max="20" value={isDirectRegistration ? 1 : form.count} disabled={isDirectRegistration} onChange={(event) => setForm({ ...form, count: Number(event.target.value) })} /></FormField>
                 <FormField label="浏览器模式"><select value={form.browserMode} onChange={(event) => setForm({ ...form, browserMode: event.target.value })}><option value="headed">内嵌指纹浏览器</option><option value="headless" disabled={!form.autoContinuePostSignup}>后台指纹浏览器</option></select></FormField>
               </div>
               <div className="form-grid two">
-                <FormField label="邮箱分裂后缀" hint="例如 campaign；不填写则随机生成"><input maxLength={24} value={form.suffix} onChange={(event) => setForm({ ...form, suffix: event.target.value })} placeholder="留空自动随机" /></FormField>
+                {!isDirectRegistration && <FormField label="邮箱分裂后缀" hint="例如 campaign；不填写则随机生成"><input maxLength={24} value={form.suffix} onChange={(event) => setForm({ ...form, suffix: event.target.value })} placeholder="留空自动随机" /></FormField>}
                 <FormField label="注册代理" hint="可固定使用某个已保存代理，也可自动轮换或直连"><select value={form.proxySelection} onChange={(event) => setForm({ ...form, proxySelection: event.target.value })}><option value="auto">自动轮换代理池（{options.proxies.length}）</option>{options.maskedProxies.map((item, index) => <option key={`${item}-${index}`} value={`proxy:${index}`}>固定使用：{proxySelectLabel(item, options.proxyMetadata?.[index])}</option>)}<option value="direct">直连（不使用代理）</option></select></FormField>
               </div>
               <div className="fresh-browser-note"><Fingerprint size={17} /><span><b>仅邮箱验证，每次全新地域指纹</b><small>清空 Cookie · 随机 OS/屏幕/Canvas/WebGL/设备参数 · 语言、时区和地理位置匹配实际出口 IP；官方强制要求手机号时任务停止</small></span></div>
@@ -1585,7 +1603,7 @@ export default function RegistrationPage({ refreshKey }) {
                 <label className="registration-password-option"><input type="checkbox" checked={form.setPasswordAfterRegistration} onChange={(event) => setForm({ ...form, setPasswordAfterRegistration: event.target.checked, ...(event.target.checked ? {} : { password: "" }) })} /><span><b>注册后设置密码</b><small>未勾选时，仅在官网注册流程强制要求密码时设置；勾选后会进入 ChatGPT 安全设置并再次读取邮箱验证码。</small></span></label>
               </div>
               <FormField label="指定密码（可选）" hint="填写后使用此密码；留空时由注册服务随机生成。长度 12-128 个字符，不能包含首尾空白。"><input type="password" autoComplete="new-password" minLength={12} maxLength={128} disabled={!form.setPasswordAfterRegistration} value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} placeholder={form.setPasswordAfterRegistration ? "留空自动生成随机密码" : "请先勾选注册后设置密码"} /></FormField>
-              <Button variant="primary" size="lg" icon={Play} loading={starting} disabled={!form.accountId || !form.baseAddressId || !options.service?.ok} onClick={start}>开始注册</Button>
+              <Button variant="primary" size="lg" icon={Play} loading={starting} disabled={!form.accountId || !form.baseAddressId || !options.service?.ok || Boolean(selectedBase?.registration_disabled)} onClick={start}>{isDirectRegistration ? "使用此 iCloud 地址注册" : "开始注册"}</Button>
             </div>
           </article>
 

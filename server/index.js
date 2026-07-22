@@ -3,9 +3,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import "dotenv/config";
 import express from "express";
-import { deleteSplitAddresses, generateSplits, JobRunner, parseJson, publicAccount, syncOfficialAddresses } from "./account-service.js";
+import { deleteSplitAddresses, generateSplits, importIcloudAliases, JobRunner, parseJson, publicAccount, syncOfficialAddresses } from "./account-service.js";
 import { createAuth } from "./auth.js";
-import { microsoftDomains, normalizeMicrosoftEmail } from "./address-generator.js";
+import { isIcloudImportedStrategy, microsoftDomains, normalizeIcloudAliasEmail, normalizeMicrosoftEmail } from "./address-generator.js";
 import { audit, createDatabase, createSourceAccount, getSettings, nowIso, setSetting } from "./db.js";
 import { ExtensionService } from "./extension-service.js";
 import { GoogleGmailClient } from "./google-gmail.js";
@@ -51,6 +51,7 @@ function addressQuery(db, { accountId, kind, q, page = 1, limit = 50 } = {}) {
   const total = db.prepare(`SELECT COUNT(*) AS count FROM addresses JOIN source_accounts ON source_accounts.id = addresses.account_id WHERE ${where}`).get(...params).count;
   const items = db.prepare(`
     SELECT addresses.*, source_accounts.email AS source_email, source_accounts.display_name AS source_name,
+      source_accounts.provider AS source_provider,
       parent.address AS parent_address
     FROM addresses
     JOIN source_accounts ON source_accounts.id = addresses.account_id
@@ -594,9 +595,9 @@ export function createApp(options = {}) {
       items,
       supportedDomains: microsoftDomains,
       providers: {
-        microsoft: { authMode: "oauth", supportsOfficialAliases: true, supportsPlusAliases: true },
-        google: { authMode: "oauth", supportsOfficialAliases: false, supportsPlusAliases: true },
-        icloud: { authMode: "app_password", supportsOfficialAliases: false, supportsPlusAliases: false },
+        microsoft: { authMode: "oauth", supportsOfficialAliases: true, supportsPlusAliases: true, supportsImportedAliases: false, supportsDirectRegistration: false },
+        google: { authMode: "oauth", supportsOfficialAliases: false, supportsPlusAliases: true, supportsImportedAliases: false, supportsDirectRegistration: false },
+        icloud: { authMode: "app_password", supportsOfficialAliases: false, supportsPlusAliases: false, supportsImportedAliases: true, supportsDirectRegistration: true },
       },
     });
   });
@@ -681,6 +682,26 @@ export function createApp(options = {}) {
       }
       const items = syncOfficialAddresses(db, account, aliases);
       res.json({ items, account: publicAccount(db, db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(account.id)) });
+    } catch (error) { next(error); }
+  });
+
+  app.post("/api/accounts/:id/icloud-aliases/import", (req, res, next) => {
+    try {
+      const account = db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(Number(req.params.id));
+      if (!account) throw Object.assign(new Error("源头邮箱不存在"), { status: 404 });
+      if (account.provider !== "icloud") {
+        throw Object.assign(new Error("这个源头邮箱不是 iCloud 账号"), { status: 409, code: "ICLOUD_ACCOUNT_REQUIRED" });
+      }
+      const input = Array.isArray(req.body?.aliases) ? req.body.aliases : [];
+      const invalid = input.map((value) => String(value || "").trim()).filter((value) => value && !normalizeIcloudAliasEmail(value));
+      if (invalid.length) {
+        throw Object.assign(new Error(`仅支持 @icloud.com、@me.com、@mac.com 或 @privaterelay.appleid.com 地址：${invalid[0]}`), { status: 400 });
+      }
+      const items = importIcloudAliases(db, account, input);
+      res.json({
+        items,
+        account: publicAccount(db, db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(account.id)),
+      });
     } catch (error) { next(error); }
   });
 
@@ -801,11 +822,27 @@ export function createApp(options = {}) {
 
   app.delete("/api/addresses/:id", (req, res, next) => {
     try {
-      const item = db.prepare("SELECT * FROM addresses WHERE id = ?").get(Number(req.params.id));
+      const item = db.prepare(`
+        SELECT addresses.*, source_accounts.provider AS source_provider
+        FROM addresses JOIN source_accounts ON source_accounts.id = addresses.account_id
+        WHERE addresses.id = ?
+      `).get(Number(req.params.id));
       if (!item) return res.status(204).end();
-      if (item.kind !== "split") throw Object.assign(new Error("源头号和官方别名需要在微软官网删除"), { status: 409 });
+      const importedIcloudAddress = item.source_provider === "icloud"
+        && item.kind === "official"
+        && isIcloudImportedStrategy(item.strategy);
+      if (item.kind !== "split" && !importedIcloudAddress) {
+        throw Object.assign(new Error("源头号和官方别名需要在对应邮箱官网删除"), { status: 409 });
+      }
       db.prepare("DELETE FROM addresses WHERE id = ?").run(item.id);
-      audit(db, item.account_id, "split", "删除分裂地址", item.address, {});
+      audit(
+        db,
+        item.account_id,
+        importedIcloudAddress ? "alias" : "split",
+        importedIcloudAddress ? "移除本地 iCloud 别名映射" : "删除分裂地址",
+        item.address,
+        {},
+      );
       res.status(204).end();
     } catch (error) { next(error); }
   });

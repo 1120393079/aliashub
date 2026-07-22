@@ -40,6 +40,13 @@ const MICROSOFT_DOMAINS = new Set([
   "msn.com",
 ]);
 const ICLOUD_DOMAINS = new Set(["icloud.com", "me.com", "mac.com"]);
+const ICLOUD_PRIVATE_RELAY_DOMAIN = "privaterelay.appleid.com";
+export const ICLOUD_MAIL_ALIAS_STRATEGY = "icloud_mail_alias";
+export const ICLOUD_HIDE_MY_EMAIL_STRATEGY = "icloud_hide_my_email";
+export const ICLOUD_IMPORTED_ADDRESS_STRATEGIES = new Set([
+  ICLOUD_MAIL_ALIAS_STRATEGY,
+  ICLOUD_HIDE_MY_EMAIL_STRATEGY,
+]);
 const ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789";
 const WORDS = ["amber", "atlas", "bamboo", "bright", "cedar", "clear", "comet", "harbor", "maple", "pixel", "river", "signal", "studio", "vault"];
 const CODE_CONTEXT_SOURCE = [
@@ -69,6 +76,22 @@ export function normalizeGoogleEmail(value) {
 export function normalizeIcloudEmail(value) {
   const email = normalizeEmail(value);
   return email && ICLOUD_DOMAINS.has(email.split("@")[1]) ? email : "";
+}
+
+export function normalizeIcloudAliasEmail(value) {
+  const email = normalizeEmail(value);
+  if (!email) return "";
+  const domain = email.split("@")[1];
+  return ICLOUD_DOMAINS.has(domain) || domain === ICLOUD_PRIVATE_RELAY_DOMAIN ? email : "";
+}
+
+export function isIcloudPrivateRelay(value) {
+  const email = normalizeIcloudAliasEmail(value);
+  return Boolean(email && email.endsWith(`@${ICLOUD_PRIVATE_RELAY_DOMAIN}`));
+}
+
+export function isIcloudImportedStrategy(value) {
+  return ICLOUD_IMPORTED_ADDRESS_STRATEGIES.has(String(value || ""));
 }
 
 export function normalizeMicrosoftEmail(value) {
@@ -143,3 +166,4 @@ export function codeFromText(value) {
 
 export const microsoftDomains = [...MICROSOFT_DOMAINS];
 export const icloudDomains = [...ICLOUD_DOMAINS];
+export const icloudPrivateRelayDomain = ICLOUD_PRIVATE_RELAY_DOMAIN;
