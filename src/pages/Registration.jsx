@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Ban, Cable, Check, CircleStop, ClipboardCopy, Copy, Database, ExternalLink, Eye, EyeOff, Fingerprint, Globe2, KeyRound, ListChecks, LoaderCircle, Mail, Monitor, Network, Pencil, Play, RefreshCw, Save, ScrollText, Server, ShieldCheck, SlidersHorizontal, Trash2, UserPlus } from "lucide-react";
 import { api } from "../api.js";
+import { planAgentIdentityBulk, runAgentIdentityBulk } from "../agent-identity-bulk.js";
 import { Button, ConfirmDialog, EmptyState, FormField, IconButton, LoadingBlock, Modal, Pagination, Segmented, StatusBadge, useToast } from "../components.jsx";
 import { copyText, formatDate, relativeTime } from "../utils.js";
 
@@ -520,17 +521,17 @@ function JobCommands({ job, onLogs, onCancel, onRelease, onDelete }) {
   return <div className="row-actions"><button className="registration-row-command" title="查看日志" onClick={() => onLogs(job)}><ScrollText size={15} /></button>{cancellable && <button className="registration-row-command danger" title="请求取消任务" onClick={() => onCancel(job.id)}><Ban size={15} /></button>}{releasable && <button className="registration-row-command warning" title="强制释放任务" onClick={() => onRelease(job)}><CircleStop size={15} /></button>}{deletableStatuses.has(job.status) && <button className="registration-row-command danger" title="删除注册记录" onClick={() => onDelete(job)}><Trash2 size={15} /></button>}</div>;
 }
 
-function AccountCommands({ item, checking, onRefresh, onPassword, onNfapi, onEdit, onCopy, onDelete }) {
+function AccountCommands({ item, checking, busy = false, onRefresh, onPassword, onNfapi, onEdit, onCopy, onDelete }) {
   const passwordTitle = item.password_available
     ? "密码已配置"
     : item.password_setup_reason || "使用原邮箱设置密码";
   return <div className="registration-account-actions" aria-label={`${item.email} 的账号操作`}>
-    <button className="registration-row-command" disabled={checking} aria-label="检测状态和套餐" title="检测状态和套餐" onClick={() => onRefresh([item.id])}><RefreshCw size={15} /></button>
-    <button className="registration-row-command" disabled={item.password_available || !item.password_setup_available} aria-label={passwordTitle} title={passwordTitle} onClick={() => onPassword(item)}><ShieldCheck size={15} /></button>
-    <button className="registration-row-command" aria-label="添加或更新 NFapi" title="添加或更新 NFapi" onClick={() => onNfapi([item.id])}><Database size={15} /></button>
-    <button className="registration-row-command" aria-label="编辑名称和分组" title="编辑名称和分组" onClick={() => onEdit(item)}><Pencil size={15} /></button>
+    <button className="registration-row-command" disabled={busy || checking} aria-label="检测状态和套餐" title="检测状态和套餐" onClick={() => onRefresh([item.id])}><RefreshCw size={15} /></button>
+    <button className="registration-row-command" disabled={busy || item.password_available || !item.password_setup_available} aria-label={passwordTitle} title={passwordTitle} onClick={() => onPassword(item)}><ShieldCheck size={15} /></button>
+    <button className="registration-row-command" disabled={busy} aria-label="添加或更新 NFapi" title="添加或更新 NFapi" onClick={() => onNfapi([item.id])}><Database size={15} /></button>
+    <button className="registration-row-command" disabled={busy} aria-label="编辑名称和分组" title="编辑名称和分组" onClick={() => onEdit(item)}><Pencil size={15} /></button>
     <button className="registration-row-command" aria-label={item.password_available ? "复制账号和密码" : "复制邮箱"} title={item.password_available ? "复制账号和密码" : "复制邮箱"} onClick={() => onCopy(item)}><ClipboardCopy size={15} /></button>
-    <button className="registration-row-command danger" aria-label="删除本地账号" title="删除本地账号" onClick={() => onDelete(item)}><Trash2 size={15} /></button>
+    <button className="registration-row-command danger" disabled={busy} aria-label="删除本地账号" title="删除本地账号" onClick={() => onDelete(item)}><Trash2 size={15} /></button>
   </div>;
 }
 
@@ -605,6 +606,8 @@ export default function RegistrationPage({ refreshKey }) {
   const [loadingNfapiOptions, setLoadingNfapiOptions] = useState(false);
   const [importingNfapi, setImportingNfapi] = useState(false);
   const [quickImportingNfapi, setQuickImportingNfapi] = useState(false);
+  const [quickImportProgress, setQuickImportProgress] = useState(null);
+  const quickImportBusy = useRef(false);
   const [restartingNfapiOAuth, setRestartingNfapiOAuth] = useState(false);
   const [nfapiImportResult, setNfapiImportResult] = useState(null);
   const [nfapiAccountSnapshot, setNfapiAccountSnapshot] = useState(null);
@@ -923,18 +926,27 @@ export default function RegistrationPage({ refreshKey }) {
 
   const toggleJob = (id) => setSelectedJobIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
   const toggleAllJobs = () => setSelectedJobIds(allJobsSelected ? [] : deletableJobIds);
-  const toggleAccount = (id) => setSelectedAccountIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
-  const toggleAllAccounts = () => setSelectedAccountIds(allAccountsSelected ? [] : accountIds);
+  const toggleAccount = (id) => {
+    if (quickImportBusy.current) return;
+    setSelectedAccountIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+  };
+  const toggleAllAccounts = () => {
+    if (quickImportBusy.current) return;
+    setSelectedAccountIds(allAccountsSelected ? [] : accountIds);
+  };
   const changeAccountGroupFilter = (value) => {
+    if (quickImportBusy.current) return;
     setAccountGroupFilter(value);
     setAccountPage(1);
     setSelectedAccountIds([]);
   };
   const changeAccountPage = (value) => {
+    if (quickImportBusy.current) return;
     setAccountPage(Math.min(Math.max(1, Number(value) || 1), accountPages));
     setSelectedAccountIds([]);
   };
   const changeAccountPageSize = (value) => {
+    if (quickImportBusy.current) return;
     const size = Number(value);
     if (!accountPageSizes.includes(size)) return;
     setAccountPageSize(size);
@@ -1218,34 +1230,58 @@ export default function RegistrationPage({ refreshKey }) {
   };
 
   const quickImportAgentIdentity = async (ids) => {
-    if (quickImportingNfapi) return;
-    if (ids.length !== 1) {
-      toast("请先勾选一个账号", "error");
+    if (quickImportBusy.current) return;
+    const plan = planAgentIdentityBulk(accounts?.items || [], ids);
+    if (!plan.total) {
+      toast("请先勾选要添加的账号", "error");
       return;
     }
-    const target = accounts?.items.find((item) => String(item.id) === String(ids[0]));
-    if (!target?.id || !target.email) {
-      toast("选择的注册账号已不存在，请刷新后重试", "error");
-      return;
-    }
-    if (!target.access_token_available) {
-      toast("当前账号没有可用 AT，请打开导入设置并使用 OAuth", "error");
-      return;
-    }
-
+    const retainedIds = new Set(plan.blocked.map((item) => String(item.id)));
+    const processedIds = new Set(plan.ids);
+    const preprocessed = plan.blocked.length;
+    const withPresetResults = (progress) => ({
+      ...progress,
+      total: plan.total,
+      current: preprocessed + progress.current,
+      failed: progress.failed + plan.blocked.length,
+    });
+    const initialProgress = {
+      current: 0,
+      total: plan.actionable.length,
+      created: 0,
+      updated: 0,
+      skipped: 0,
+      failed: 0,
+    };
+    quickImportBusy.current = true;
     setQuickImportingNfapi(true);
+    setQuickImportProgress(withPresetResults(initialProgress));
     try {
-      const result = await api(`/api/registration/accounts/${target.id}/nfapi-agent-identity/import`, {
-        method: "POST",
-        body: { options: { update_existing: false }, save_defaults: false },
+      const result = await runAgentIdentityBulk(plan.actionable, {
+        importAccount: (target) => api(`/api/registration/accounts/${target.id}/nfapi-agent-identity/import`, {
+          method: "POST",
+          body: { options: { update_existing: false }, save_defaults: false },
+        }),
+        onProgress: (progress) => setQuickImportProgress(withPresetResults(progress)),
       });
-      toast(agentIdentityResultMessage(result));
-      setSelectedAccountIds((current) => current.filter((id) => String(id) !== String(target.id)));
+      result.failedIds.forEach((id) => retainedIds.add(String(id)));
+      setSelectedAccountIds((current) => current.filter((id) => (
+        !processedIds.has(String(id)) || retainedIds.has(String(id))
+      )));
       await loadAccounts();
-    } catch (error) {
-      toast(error.message, "error");
+      const succeeded = result.created + result.updated;
+      const skipped = result.skipped;
+      const failed = result.failed + plan.blocked.length;
+      const details = [`成功 ${succeeded}`, `已存在 ${skipped}`, `需处理 ${failed}`].join("，");
+      const firstFailure = result.errors[0]?.message || plan.blocked[0]?.reason || "";
+      toast(
+        `批量添加完成：${details}${failed && firstFailure ? `；${firstFailure}` : ""}${failed ? "。失败项已保留选择，可打开导入设置处理" : ""}`,
+        failed ? "error" : "success",
+      );
     } finally {
+      quickImportBusy.current = false;
       setQuickImportingNfapi(false);
+      setQuickImportProgress(null);
     }
   };
 
@@ -1583,13 +1619,13 @@ export default function RegistrationPage({ refreshKey }) {
       </>}
 
       {view === "accounts" && <section className="table-panel registration-account-panel">
-        <header className="panel-header"><div><h2>已注册账号</h2><p>账号、凭据、状态与 NFapi 集中管理</p></div><Button size="sm" icon={RefreshCw} disabled={!accounts.items.length} title="重新加载账号列表，不触发状态检测" onClick={loadAccounts}>刷新列表</Button></header>
+        <header className="panel-header"><div><h2>已注册账号</h2><p>账号、凭据、状态与 NFapi 集中管理</p></div><Button size="sm" icon={RefreshCw} disabled={!accounts.items.length || quickImportingNfapi} title="重新加载账号列表，不触发状态检测" onClick={loadAccounts}>刷新列表</Button></header>
         {accounts.items.length ? <>
           {accountsError && <div className="inline-alert error"><AlertTriangle size={15} /><span>{accountsError}；当前保留上一次成功加载的账号列表。</span></div>}
           <div className="registration-account-toolbar">
             <div className="registration-account-filters">
-              <label className="registration-select-page"><input type="checkbox" checked={allAccountsSelected} disabled={!accountIds.length} onChange={toggleAllAccounts} /><span>全选本页</span></label>
-              <select className="compact-select registration-group-filter" aria-label="按账号分组筛选" value={accountGroupFilter} onChange={(event) => changeAccountGroupFilter(event.target.value)}>
+              <label className="registration-select-page"><input type="checkbox" checked={allAccountsSelected} disabled={!accountIds.length || quickImportingNfapi} onChange={toggleAllAccounts} /><span>全选本页</span></label>
+              <select className="compact-select registration-group-filter" aria-label="按账号分组筛选" value={accountGroupFilter} disabled={quickImportingNfapi} onChange={(event) => changeAccountGroupFilter(event.target.value)}>
                 <option value="all">全部分组（{accounts.items.length}）</option>
                 <option value="ungrouped">未分组（{ungroupedAccountCount}）</option>
                 {accountGroups.map((group) => <option key={group.name} value={`group:${group.name}`}>{group.name}（{group.count}）{group.automaticCount === group.count ? " · 自动" : group.automaticCount ? ` · 自动 ${group.automaticCount}` : ""}</option>)}
@@ -1597,40 +1633,46 @@ export default function RegistrationPage({ refreshKey }) {
               <span className="registration-selection-count">已选 <b>{selectedAccountIds.length}</b> 个</span>
             </div>
             <div className="registration-account-bulk-actions">
-              <Button className="nfapi-quick-import" size="sm" variant="primary" icon={Fingerprint} loading={quickImportingNfapi} disabled={selectedAccountIds.length !== 1 || importingNfapi || checkingAccountSignals} title={selectedAccountIds.length > 1 ? "一键导入每次处理一个账号" : "使用已保存的默认设置生成 Agent Identity 并导入 NFapi"} onClick={() => quickImportAgentIdentity(selectedAccountIds)}>一键 Agent Identity</Button>
+              <Button className="nfapi-quick-import" size="sm" variant="primary" icon={Fingerprint} loading={quickImportingNfapi} disabled={!selectedAccountIds.length || importingNfapi || checkingAccountSignals || quickImportingNfapi} title="为所选账号逐个生成 Agent Identity 并添加到 NFapi" onClick={() => quickImportAgentIdentity(selectedAccountIds)}>{quickImportProgress ? `正在添加 ${quickImportProgress.current}/${quickImportProgress.total}` : "一键添加所选"}</Button>
               <Button size="sm" icon={ListChecks} loading={checkingAccountSignals} disabled={!visibleAccountItems.length || quickImportingNfapi} title={selectedAccountIds.length ? "重新检测所选账号的当前状态和订阅类型" : "检测当前分组内全部账号的状态和订阅类型"} onClick={refreshSelectedAccountSignals}>{selectedAccountIds.length ? "检测所选" : "检测当前筛选"}</Button>
               <Button size="sm" icon={SlidersHorizontal} disabled={selectedAccountIds.length !== 1 || quickImportingNfapi} title={selectedAccountIds.length > 1 ? "导入设置每次只能处理一个账号" : "打开 OAuth 和高级导入设置"} onClick={() => openNfapiImporter(selectedAccountIds)}>导入设置</Button>
               <Button size="sm" icon={KeyRound} loading={copyingSelectedTokens} disabled={!selectedAccountIds.length || quickImportingNfapi} onClick={copySelectedAccessTokens}>复制 AT</Button>
               <Button size="sm" variant="danger" icon={Trash2} disabled={!selectedAccountIds.length || quickImportingNfapi} onClick={() => setDeleteTarget({ kind: "accounts", ids: selectedAccountIds })}>删除</Button>
             </div>
+            {quickImportProgress && <div className="registration-account-import-progress" role="status" aria-live="polite">
+              <LoaderCircle className="spin" size={15} />
+              <strong>处理进度 {quickImportProgress.current}/{quickImportProgress.total}</strong>
+              <span>成功 {quickImportProgress.created + quickImportProgress.updated} · 已存在 {quickImportProgress.skipped} · 需处理 {quickImportProgress.failed}</span>
+              <div aria-hidden="true"><i style={{ width: `${Math.round((quickImportProgress.current / quickImportProgress.total) * 100)}%` }} /></div>
+            </div>}
           </div>
           {visibleAccountItems.length ? <>
-            <div className="data-table-wrap registration-account-table-wrap"><table className="data-table registration-accounts-table"><thead><tr><th className="select-column"><input type="checkbox" aria-label="选择本页全部注册账号" checked={allAccountsSelected} disabled={!accountIds.length} onChange={toggleAllAccounts} /></th><th>账号</th><th>凭据</th><th>身份 / 出口</th><th>状态 / 类型</th><th>NFapi</th><th>创建时间</th><th className="registration-actions-column" aria-label="操作" /></tr></thead><tbody>{pagedAccountItems.map((item) => {
+            <div className="data-table-wrap registration-account-table-wrap"><table className="data-table registration-accounts-table"><thead><tr><th className="select-column"><input type="checkbox" aria-label="选择本页全部注册账号" checked={allAccountsSelected} disabled={!accountIds.length || quickImportingNfapi} onChange={toggleAllAccounts} /></th><th>账号</th><th>凭据</th><th>身份 / 出口</th><th>状态 / 类型</th><th>NFapi</th><th>创建时间</th><th className="registration-actions-column" aria-label="操作" /></tr></thead><tbody>{pagedAccountItems.map((item) => {
               const checked = selectedAccountIds.includes(item.id);
               const nfapiState = nfapiAccountState(item);
               return <tr className={checked ? "selected-row" : ""} key={item.id}>
-                <td className="select-column"><input type="checkbox" aria-label={`选择 ${item.email}`} checked={checked} onChange={() => toggleAccount(item.id)} /></td>
+                <td className="select-column"><input type="checkbox" aria-label={`选择 ${item.email}`} checked={checked} disabled={quickImportingNfapi} onChange={() => toggleAccount(item.id)} /></td>
                 <td><div className="registration-account-primary"><button title="复制邮箱" onClick={() => copyText(item.email).then(() => toast("邮箱已复制"))}><b>{item.email}</b><Copy size={13} /></button><AccountNameGroup item={item} /></div></td>
                 <td><div className="registration-credential-stack"><div><span>密码</span><PasswordCell value={item.password} status={item.password_status} error={item.password_error} available={item.password_available} onCopy={() => copyText(item.password).then(() => toast("密码已复制"))} /></div><div><span>AT</span><AccessTokenCell available={item.access_token_available} loading={copyingTokenId === item.id} onCopy={() => copyAccessToken(item)} /></div></div></td>
                 <td><div className="registration-identity-network"><div className="registration-identity"><b>{item.display_name || "未记录姓名"}</b><small>{item.birth_date ? `${item.birth_date} · ${ageFromBirth(item.birth_date)} 岁` : "未记录年龄"}</small></div><div className="registration-exit-line"><Globe2 size={13} /><code>{item.exit_ip || "未记录出口"}</code></div></div></td>
                 <td><AccountSignalCell item={item} /></td>
                 <td><div className="registration-nfapi-status" title={nfapiState.error || nfapiState.accountId || nfapiState.label}><StatusBadge status={nfapiState.badge}>{nfapiState.label}</StatusBadge>{nfapiState.shortLived && <small>短期凭据</small>}{nfapiState.accountId && <code>#{nfapiState.accountId}</code>}{nfapiState.error && <small className="error">{nfapiState.error}</small>}</div></td>
                 <td><span className="muted-cell">{formatDate(item.created_at)}</span></td>
-                <td><AccountCommands item={item} checking={checkingAccountSignals} onRefresh={refreshAccountSignals} onPassword={openPasswordSetup} onNfapi={openNfapiImporter} onEdit={openAccountEditor} onCopy={copyRegisteredAccount} onDelete={(target) => setDeleteTarget({ kind: "account", ids: [target.id], item: target })} /></td>
+                <td><AccountCommands item={item} checking={checkingAccountSignals} busy={quickImportingNfapi} onRefresh={refreshAccountSignals} onPassword={openPasswordSetup} onNfapi={openNfapiImporter} onEdit={openAccountEditor} onCopy={copyRegisteredAccount} onDelete={(target) => setDeleteTarget({ kind: "account", ids: [target.id], item: target })} /></td>
               </tr>;
             })}</tbody></table></div>
             <div className="registration-mobile-list">{pagedAccountItems.map((item) => {
               const checked = selectedAccountIds.includes(item.id);
               const nfapiState = nfapiAccountState(item);
-              return <article className={checked ? "selected" : ""} key={item.id}><header><input type="checkbox" aria-label={`选择 ${item.email}`} checked={checked} onChange={() => toggleAccount(item.id)} /><AccountSignalCell item={item} compact /><time>{formatDate(item.created_at)}</time></header><AccountNameGroup item={item} mobile /><button onClick={() => copyText(item.email).then(() => toast("邮箱已复制"))}>{item.email}<Copy size={14} /></button><div className="registration-mobile-credentials"><PasswordCell value={item.password} status={item.password_status} error={item.password_error} available={item.password_available} onCopy={() => copyText(item.password).then(() => toast("密码已复制"))} /><AccessTokenCell available={item.access_token_available} loading={copyingTokenId === item.id} onCopy={() => copyAccessToken(item)} /></div><div className="registration-mobile-facts"><div className="registration-account-exit"><Globe2 size={14} /><span><small>出口 IP</small><b>{item.exit_ip || "未记录"}</b></span></div><div className="registration-account-exit"><Database size={14} /><span><small>NFapi</small><b>{nfapiState.label}{nfapiState.shortLived ? " · 短期凭据" : ""}</b></span></div></div>{nfapiState.error && <div className="inline-alert error"><AlertTriangle size={14} /><span>{nfapiState.error}</span></div>}<footer><span>{item.display_name || "未记录姓名"}</span><AccountCommands item={item} checking={checkingAccountSignals} onRefresh={refreshAccountSignals} onPassword={openPasswordSetup} onNfapi={openNfapiImporter} onEdit={openAccountEditor} onCopy={copyRegisteredAccount} onDelete={(target) => setDeleteTarget({ kind: "account", ids: [target.id], item: target })} /></footer></article>;
+              return <article className={checked ? "selected" : ""} key={item.id}><header><input type="checkbox" aria-label={`选择 ${item.email}`} checked={checked} disabled={quickImportingNfapi} onChange={() => toggleAccount(item.id)} /><AccountSignalCell item={item} compact /><time>{formatDate(item.created_at)}</time></header><AccountNameGroup item={item} mobile /><button onClick={() => copyText(item.email).then(() => toast("邮箱已复制"))}>{item.email}<Copy size={14} /></button><div className="registration-mobile-credentials"><PasswordCell value={item.password} status={item.password_status} error={item.password_error} available={item.password_available} onCopy={() => copyText(item.password).then(() => toast("密码已复制"))} /><AccessTokenCell available={item.access_token_available} loading={copyingTokenId === item.id} onCopy={() => copyAccessToken(item)} /></div><div className="registration-mobile-facts"><div className="registration-account-exit"><Globe2 size={14} /><span><small>出口 IP</small><b>{item.exit_ip || "未记录"}</b></span></div><div className="registration-account-exit"><Database size={14} /><span><small>NFapi</small><b>{nfapiState.label}{nfapiState.shortLived ? " · 短期凭据" : ""}</b></span></div></div>{nfapiState.error && <div className="inline-alert error"><AlertTriangle size={14} /><span>{nfapiState.error}</span></div>}<footer><span>{item.display_name || "未记录姓名"}</span><AccountCommands item={item} checking={checkingAccountSignals} busy={quickImportingNfapi} onRefresh={refreshAccountSignals} onPassword={openPasswordSetup} onNfapi={openNfapiImporter} onEdit={openAccountEditor} onCopy={copyRegisteredAccount} onDelete={(target) => setDeleteTarget({ kind: "account", ids: [target.id], item: target })} /></footer></article>;
             })}</div>
           </> : <EmptyState icon={KeyRound} title="这个分组还没有账号" action={<Button onClick={() => changeAccountGroupFilter("all")}>查看全部账号</Button>} />}
           <div className="table-footer registration-account-footer">
             <div className="registration-account-range"><strong>{accountRangeStart}–{accountRangeEnd}</strong><span>筛选后 {visibleAccountItems.length} 个 · 总计 {accounts.total} 个</span></div>
             <div className="registration-account-pagination">
-              <label><span>每页</span><select aria-label="每页显示账号数" value={accountPageSize} onChange={(event) => changeAccountPageSize(event.target.value)}>{accountPageSizes.map((size) => <option key={size} value={size}>{size} 条</option>)}</select></label>
-              <label><span>跳至</span><select aria-label="跳转账号页码" value={safeAccountPage} onChange={(event) => changeAccountPage(event.target.value)}>{Array.from({ length: accountPages }, (_, index) => <option key={index + 1} value={index + 1}>第 {index + 1} 页</option>)}</select></label>
-              <Pagination page={safeAccountPage} pages={accountPages} onChange={changeAccountPage} />
+              <label><span>每页</span><select aria-label="每页显示账号数" value={accountPageSize} disabled={quickImportingNfapi} onChange={(event) => changeAccountPageSize(event.target.value)}>{accountPageSizes.map((size) => <option key={size} value={size}>{size} 条</option>)}</select></label>
+              <label><span>跳至</span><select aria-label="跳转账号页码" value={safeAccountPage} disabled={quickImportingNfapi} onChange={(event) => changeAccountPage(event.target.value)}>{Array.from({ length: accountPages }, (_, index) => <option key={index + 1} value={index + 1}>第 {index + 1} 页</option>)}</select></label>
+              <Pagination page={safeAccountPage} pages={accountPages} disabled={quickImportingNfapi} onChange={changeAccountPage} />
             </div>
           </div>
         </> : <EmptyState icon={KeyRound} title={accountsError ? "注册账号暂时无法加载" : "还没有注册成功的账号"} description={accountsError || undefined} action={accountsError ? <Button icon={RefreshCw} onClick={loadAccounts}>重新加载</Button> : undefined} />}

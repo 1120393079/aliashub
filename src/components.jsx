@@ -42,9 +42,9 @@ export function ProviderMark({ provider, size = 34 }) {
   return provider === "google" ? <GoogleMark size={size} /> : <MicrosoftMark size={size} />;
 }
 
-export function Button({ children, variant = "secondary", size = "md", icon: Icon, loading = false, className = "", ...props }) {
+export function Button({ children, variant = "secondary", size = "md", icon: Icon, loading = false, disabled = false, className = "", ...props }) {
   return (
-    <button className={`button button-${variant} button-${size} ${className}`} disabled={loading || props.disabled} {...props}>
+    <button className={`button button-${variant} button-${size} ${className}`} {...props} disabled={loading || disabled}>
       {loading ? <LoaderCircle className="spin" size={16} /> : Icon ? <Icon size={16} /> : null}
       {children && <span>{children}</span>}
     </button>
@@ -117,13 +117,13 @@ export function Toggle({ checked, onChange, label }) {
   );
 }
 
-export function Pagination({ page, pages, onChange }) {
+export function Pagination({ page, pages, onChange, disabled = false }) {
   if (pages <= 1) return null;
   return (
     <div className="pagination">
-      <IconButton icon={ChevronLeft} label="上一页" disabled={page <= 1} onClick={() => onChange(page - 1)} />
+      <IconButton icon={ChevronLeft} label="上一页" disabled={disabled || page <= 1} onClick={() => onChange(page - 1)} />
       <span>{page} / {pages}</span>
-      <IconButton icon={ChevronRight} label="下一页" disabled={page >= pages} onClick={() => onChange(page + 1)} />
+      <IconButton icon={ChevronRight} label="下一页" disabled={disabled || page >= pages} onClick={() => onChange(page + 1)} />
     </div>
   );
 }

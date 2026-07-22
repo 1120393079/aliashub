@@ -184,6 +184,11 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .registration-account-filters, .registration-account-bulk-actions { min-width: 0; display: flex; align-items: center; gap: 8px; }
 .registration-account-filters { flex-wrap: wrap; }
 .registration-account-bulk-actions { justify-content: flex-end; }
+.registration-account-import-progress { grid-column: 1 / -1; min-width: 0; display: grid; grid-template-columns: auto auto minmax(0, 1fr); align-items: center; gap: 6px 9px; color: var(--text-soft); font-size: 10px; }
+.registration-account-import-progress strong { color: var(--text); white-space: nowrap; }
+.registration-account-import-progress > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.registration-account-import-progress > div { grid-column: 1 / -1; height: 3px; overflow: hidden; border-radius: 999px; background: var(--surface-3); }
+.registration-account-import-progress > div i { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--green); transition: width 0.18s ease; }
 .registration-select-page { display: inline-flex; align-items: center; gap: 7px; color: var(--text-soft); font-size: 10px; font-weight: 650; white-space: nowrap; }
 .registration-selection-count { color: var(--text-soft); font-size: 10px; white-space: nowrap; }
 .registration-selection-count b { color: var(--text); }
@@ -958,6 +963,8 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
   .registration-account-bulk-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .registration-account-bulk-actions .button { width: 100%; min-width: 0; padding-left: 7px; padding-right: 7px; }
   .registration-account-bulk-actions .nfapi-quick-import { grid-column: 1 / -1; }
+  .registration-account-import-progress { grid-template-columns: auto minmax(0, 1fr); }
+  .registration-account-import-progress > span { grid-column: 1 / -1; }
   .registration-account-footer { gap: 9px; padding: 10px; }
   .registration-account-range { align-items: flex-start; flex-direction: column; gap: 2px; }
   .registration-account-pagination { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
