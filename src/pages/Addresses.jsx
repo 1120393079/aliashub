@@ -63,7 +63,7 @@ export default function AddressesPage({ refreshKey, onDataChange, onNavigate, in
       ? "iCloud 邮箱别名"
       : kindText[item.kind];
   const canDeleteAddress = (item) => item.kind === "split" || isImportedIcloudAddress(item);
-  const kindItems = [{ value: "all", label: "全部" }, { value: "primary", label: "源头号" }, ...(supportsAddressAliases ? [{ value: "official", label: selectedAccount?.provider === "icloud" ? "iCloud 别名" : "官方别名" }] : []), { value: "split", label: "分裂地址" }];
+  const kindItems = [{ value: "all", label: "全部" }, { value: "primary", label: "源头号" }, ...(supportsAddressAliases ? [{ value: "official", label: selectedAccount?.provider === "icloud" ? "iCloud 邮箱别名" : "官方别名" }] : []), { value: "split", label: "分裂地址" }];
   useEffect(() => { if (!supportsAddressAliases && kind === "official") setKind("all"); }, [supportsAddressAliases, kind]);
   const copy = async (address) => { await copyText(address); toast("地址已复制"); };
   const remove = async (item) => {

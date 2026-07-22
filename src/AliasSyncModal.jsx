@@ -52,10 +52,10 @@ export default function AliasSyncModal({ account, onClose, onSynced }) {
     try {
       if (isIcloud) {
         if (popup) {
-          popup.location.href = "https://account.apple.com/";
+          popup.location.href = "https://www.icloud.com/mail/";
           popup.focus();
         } else {
-          setMessage("浏览器拦截了 Apple 账户窗口，请允许此网站打开弹窗");
+          setMessage("浏览器拦截了 iCloud Mail 窗口，请允许此网站打开弹窗");
         }
         return;
       }
@@ -73,7 +73,7 @@ export default function AliasSyncModal({ account, onClose, onSynced }) {
 
   const footer = <>
     <Button onClick={onClose}>取消</Button>
-    <Button icon={ExternalLink} loading={opening} onClick={openOfficial}>{isIcloud ? "打开 Apple 账户" : "微软官网创建"}</Button>
+    <Button icon={ExternalLink} loading={opening} onClick={openOfficial}>{isIcloud ? "打开 iCloud Mail" : "微软官网创建"}</Button>
     <Button variant="primary" icon={ListPlus} loading={loading} onClick={sync}>确认登记</Button>
   </>;
 
@@ -81,19 +81,19 @@ export default function AliasSyncModal({ account, onClose, onSynced }) {
     <Modal
       open={Boolean(account)}
       onClose={onClose}
-      title={isIcloud ? "导入 iCloud 别名" : "登记官网已有别名"}
+      title={isIcloud ? "导入 iCloud 邮箱别名 / 隐藏邮箱" : "登记官网已有别名"}
       description={account ? (isIcloud
-        ? `${account.email} · 仅导入已在 Apple 创建的 iCloud Mail 别名或 Hide My Email 地址`
+        ? `${account.email} · 从 iCloud Mail 导入已创建的邮箱别名或隐藏邮箱地址`
         : `${account.email} · 仅登记已在微软官网创建的别名`) : ""}
       size="md"
       footer={footer}
     >
       <div className="form-stack alias-sync-form">
         <label className="form-field">
-          <span className="field-label">{isIcloud ? "已创建的 iCloud 别名（每行一个）" : "官网已创建的别名（每行一个）"}</span>
+          <span className="field-label">{isIcloud ? "iCloud 邮箱别名或隐藏邮箱（每行一个）" : "官网已创建的别名（每行一个）"}</span>
           <textarea rows="6" value={aliases} onChange={(event) => setAliases(event.target.value)} placeholder={isIcloud ? "例如 name@icloud.com\nxxxx@privaterelay.appleid.com" : "例如 name@outlook.jp、name@outlook.de"} autoCapitalize="off" autoCorrect="off" spellCheck="false" autoFocus />
         </label>
-        <div className="provider-login-note"><AtSign size={22} /><span><b>{account?.email}</b><small>{isIcloud ? "支持普通邮箱别名和 Apple Hide My Email 别名；只保存本地映射，不会在 Apple 创建或删除别名" : "只登记到 AliasHub，不会在微软官网创建或删除别名"}</small></span></div>
+        <div className="provider-login-note"><AtSign size={22} /><span><b>{account?.email}</b><small>{isIcloud ? "支持普通邮箱别名和隐藏邮箱；只保存本地映射，不会在 iCloud Mail 创建或删除地址" : "只登记到 AliasHub，不会在微软官网创建或删除别名"}</small></span></div>
         {message && <div className="inline-alert danger"><AlertCircle size={17} /><span>{message}</span></div>}
       </div>
     </Modal>
