@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
-import { AlertCircle, Check, ChevronLeft, ChevronRight, LoaderCircle, X } from "lucide-react";
+import { AlertCircle, Check, ChevronLeft, ChevronRight, Cloud, LoaderCircle, X } from "lucide-react";
 
 const ToastContext = createContext(() => {});
 
@@ -38,8 +38,14 @@ export function GoogleMark({ size = 34 }) {
   return <span className="provider-mark google-mark" style={{ "--mark-size": `${size}px` }} aria-hidden="true"><b>G</b></span>;
 }
 
+export function ICloudMark({ size = 34 }) {
+  return <span className="provider-mark icloud-mark" style={{ "--mark-size": `${size}px` }} aria-hidden="true"><Cloud size={Math.max(12, Number(size) * 0.62)} /></span>;
+}
+
 export function ProviderMark({ provider, size = 34 }) {
-  return provider === "google" ? <GoogleMark size={size} /> : <MicrosoftMark size={size} />;
+  if (provider === "google") return <GoogleMark size={size} />;
+  if (provider === "icloud") return <ICloudMark size={size} />;
+  return <MicrosoftMark size={size} />;
 }
 
 export function Button({ children, variant = "secondary", size = "md", icon: Icon, loading = false, disabled = false, className = "", ...props }) {

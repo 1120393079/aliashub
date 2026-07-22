@@ -9,6 +9,7 @@ import { microsoftDomains, normalizeMicrosoftEmail } from "./address-generator.j
 import { audit, createDatabase, createSourceAccount, getSettings, nowIso, setSetting } from "./db.js";
 import { ExtensionService } from "./extension-service.js";
 import { GoogleGmailClient } from "./google-gmail.js";
+import { ICloudImapClient, icloudImapConfiguration } from "./icloud-imap.js";
 import { MicrosoftGraphClient } from "./microsoft-graph.js";
 import { NfapiService } from "./nfapi-service.js";
 import { RegistrationClient } from "./registration-client.js";
@@ -28,7 +29,7 @@ function publicJob(row) {
 
 function requireMicrosoftAccount(account) {
   if (account?.provider !== "microsoft") {
-    throw Object.assign(new Error("Google 账号不支持 Microsoft 官方别名功能"), {
+    throw Object.assign(new Error("这个邮箱提供商不支持 Microsoft 官方别名功能"), {
       status: 409,
       code: "OFFICIAL_ALIASES_UNSUPPORTED",
     });
@@ -289,10 +290,17 @@ export function createApp(options = {}) {
     clientSecret: options.googleClientSecret,
     redirectUri: options.googleRedirectUri,
   });
+  const icloud = options.icloud || new ICloudImapClient({
+    db,
+    encryptionKey: options.dataEncryptionKey || process.env.DATA_ENCRYPTION_KEY,
+    imapFactory: options.icloudImapFactory,
+    parseMessage: options.icloudParseMessage,
+  });
   const inbox = options.inbox || {
     scanInbox(account) {
       if (account.provider === "google") return gmail.scanInbox(account);
       if (account.provider === "microsoft") return graph.scanInbox(account);
+      if (account.provider === "icloud") return icloud.scanInbox(account);
       throw Object.assign(new Error(`不支持的邮箱提供商：${account.provider}`), {
         status: 409,
         code: "UNSUPPORTED_MAIL_PROVIDER",
@@ -516,6 +524,22 @@ export function createApp(options = {}) {
     catch (error) { next(error); }
   });
 
+  app.post("/api/icloud/connect", async (req, res, next) => {
+    try {
+      if (["host", "port", "server", "secure"].some((key) => Object.hasOwn(req.body || {}, key))) {
+        throw Object.assign(new Error("iCloud IMAP 服务地址由系统固定配置，不能自定义"), { status: 400 });
+      }
+      const reconnecting = Boolean(req.body?.accountId);
+      const result = await icloud.connectAccount({
+        accountId: req.body?.accountId,
+        email: req.body?.email,
+        displayName: req.body?.displayName,
+        appSpecificPassword: req.body?.appSpecificPassword,
+      });
+      res.status(reconnecting ? 200 : 201).json(result);
+    } catch (error) { next(error); }
+  });
+
   app.get("/api/overview", (_req, res) => {
     const accounts = db.prepare(`
       SELECT COUNT(*) AS total,
@@ -570,8 +594,9 @@ export function createApp(options = {}) {
       items,
       supportedDomains: microsoftDomains,
       providers: {
-        microsoft: { supportsOfficialAliases: true, supportsPlusAliases: true },
-        google: { supportsOfficialAliases: false, supportsPlusAliases: true },
+        microsoft: { authMode: "oauth", supportsOfficialAliases: true, supportsPlusAliases: true },
+        google: { authMode: "oauth", supportsOfficialAliases: false, supportsPlusAliases: true },
+        icloud: { authMode: "app_password", supportsOfficialAliases: false, supportsPlusAliases: false },
       },
     });
   });
@@ -691,6 +716,9 @@ export function createApp(options = {}) {
     try {
       const account = db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(Number(req.params.id));
       if (!account) throw Object.assign(new Error("源头邮箱不存在"), { status: 404 });
+      if (!publicAccount(db, account).supports_plus_aliases) {
+        throw Object.assign(new Error("这个邮箱提供商不支持 Plus 分裂地址"), { status: 409 });
+      }
       const items = generateSplits(db, account, req.body || {});
       res.status(201).json({ items, count: items.length });
     } catch (error) { next(error); }
@@ -699,7 +727,7 @@ export function createApp(options = {}) {
   const queueInboxScan = (accountId) => {
     const account = db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(Number(accountId));
     if (!account) throw Object.assign(new Error("源头邮箱不存在"), { status: 404 });
-    if (account.status !== "connected") throw Object.assign(new Error("请先完成这个源头邮箱的 OAuth 授权"), { status: 409 });
+    if (account.status !== "connected") throw Object.assign(new Error("请先完成这个源头邮箱的连接验证"), { status: 409 });
     const existing = db.prepare("SELECT * FROM automation_jobs WHERE account_id = ? AND type = 'inbox_scan' AND status IN ('queued', 'running') ORDER BY created_at DESC LIMIT 1").get(account.id);
     if (existing) return { existing: publicJob(existing), job: null };
     return { existing: null, job: jobs.createJob(account.id, "inbox_scan", {}, 0) };
@@ -1133,6 +1161,7 @@ export function createApp(options = {}) {
       supported_domains: microsoftDomains,
       microsoft_oauth_mode: "authorization_code_pkce",
       microsoft_oauth_client: "Mailspring · Microsoft Graph Mail.Read",
+      icloud_imap: icloudImapConfiguration,
       extension_download: "/api/extension/download",
     });
   });
@@ -1159,7 +1188,7 @@ export function createApp(options = {}) {
     if (status >= 500) console.error(error);
     res.status(status).json({ error: status >= 500 ? "服务器处理请求失败" : error.message });
   });
-  return { app, db, graph, gmail, inbox, extension, jobs, registration, nfapi };
+  return { app, db, graph, gmail, icloud, inbox, extension, jobs, registration, nfapi };
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

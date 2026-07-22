@@ -7,6 +7,9 @@ export const MAIL_PROVIDERS = {
     shortDescription: "Outlook · Hotmail · Live · MSN",
     oauthBase: "/api/microsoft/oauth",
     popupName: "aliashub-microsoft-oauth",
+    authMode: "oauth",
+    connectionLabel: "OAuth 状态",
+    reconnectLabel: "重新授权",
     supportsOfficialAliases: true,
     supportsPlusAliases: true,
   },
@@ -18,13 +21,32 @@ export const MAIL_PROVIDERS = {
     shortDescription: "Gmail · Google Workspace",
     oauthBase: "/api/google/oauth",
     popupName: "aliashub-google-oauth",
+    authMode: "oauth",
+    connectionLabel: "OAuth 状态",
+    reconnectLabel: "重新授权",
     supportsOfficialAliases: false,
     supportsPlusAliases: true,
+    capabilityTitle: "支持 Plus 分裂地址",
+    capabilityDescription: "Google 不提供官方别名，本系统使用主地址生成 +tag 地址",
+  },
+  icloud: {
+    id: "icloud",
+    name: "iCloud",
+    accountLabel: "iCloud 邮箱",
+    description: "iCloud Mail、me.com 与 mac.com",
+    shortDescription: "iCloud Mail · me.com · mac.com",
+    authMode: "app_password",
+    connectionLabel: "IMAP 状态",
+    reconnectLabel: "更新密码",
+    supportsOfficialAliases: false,
+    supportsPlusAliases: false,
+    capabilityTitle: "只读收件箱已连接",
+    capabilityDescription: "支持收取邮件和验证码；暂不生成 Plus 分裂地址",
   },
 };
 
 export function normalizeProvider(value) {
-  return value === "google" ? "google" : "microsoft";
+  return Object.hasOwn(MAIL_PROVIDERS, value) ? value : "microsoft";
 }
 
 export function providerMeta(value) {

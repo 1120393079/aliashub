@@ -126,11 +126,12 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .sidebar-nav button b { display: grid; place-items: center; min-width: 20px; height: 20px; padding: 0 5px; border-radius: 10px; background: #d25852; color: white; font-size: 11px; }
 .sidebar-provider { display: flex; align-items: center; gap: 6px; margin: auto 11px 12px; padding: 11px 8px; border: 1px solid rgba(255,255,255,0.08); border-radius: 7px; background: rgba(255,255,255,0.03); }
 .sidebar-provider-copy { display: grid; min-width: 0; flex: 1; }
-.provider-mark-pair { position: relative; flex: 0 0 38px; width: 38px; height: 29px; }
-.provider-mark-pair .provider-mark { position: absolute; top: 2px; box-shadow: 0 0 0 2px #1f2522; }
-.provider-mark-pair .provider-mark:first-child { left: 0; }
-.provider-mark-pair .provider-mark:last-child { right: 0; top: 5px; }
-.sidebar-provider b { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.provider-mark-stack { position: relative; flex: 0 0 49px; width: 49px; height: 31px; }
+.provider-mark-stack .provider-mark { position: absolute; top: 3px; box-shadow: 0 0 0 2px #1f2522; }
+.provider-mark-stack .provider-mark:nth-child(1) { left: 0; }
+.provider-mark-stack .provider-mark:nth-child(2) { left: 12px; top: 5px; }
+.provider-mark-stack .provider-mark:nth-child(3) { left: 24px; top: 3px; }
+.sidebar-provider b { font-size: 10.5px; line-height: 1.25; }
 .sidebar-provider small { display: block; max-width: 100%; margin-top: 3px; color: #818b86; font-size: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .online-dot { flex: 0 0 7px; width: 7px; height: 7px; border-radius: 50%; background: #2fc28b; box-shadow: 0 0 0 3px rgba(47,194,139,0.12); }
 .sidebar-footer { height: 56px; display: flex; align-items: center; padding: 0 12px; border-top: 1px solid rgba(255,255,255,0.08); }
@@ -357,6 +358,8 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .microsoft-mark i:nth-child(4) { background: #ffb900; }
 .google-mark { display: grid; place-items: center; padding: 2px; background: #fff; }
 .google-mark b { color: #4285f4; font: 750 calc(var(--mark-size) * 0.58)/1 Arial, sans-serif; }
+.icloud-mark { display: grid; place-items: center; background: linear-gradient(145deg, #f8fcff, #dceeff); color: #2189e8; }
+.icloud-mark svg { fill: currentColor; stroke-width: 1.6; }
 
 .context-bar { min-height: 50px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px 8px 14px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
 .context-copy { display: flex; align-items: center; gap: 8px; color: var(--text-soft); font-size: 13px; }
@@ -492,6 +495,10 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .oauth-start-panel > p, .oauth-callback-step > p { max-width: 360px; color: var(--text-soft); font-size: 11px; line-height: 1.55; }
 .oauth-start-panel .provider-login-note { width: min(380px, 100%); margin-top: 6px; text-align: left; }
 .oauth-start-panel .inline-alert { width: min(380px, 100%); margin: 4px 0 0; text-align: left; }
+.icloud-connect-form { width: min(440px, 100%); display: grid; gap: 10px; text-align: left; }
+.icloud-connect-form .provider-login-note { width: 100%; margin-top: 0; }
+.icloud-password-link { display: inline-flex; align-items: center; justify-content: center; gap: 6px; justify-self: start; color: var(--blue); font-size: 10px; font-weight: 650; text-decoration: none; }
+.icloud-password-link:hover { text-decoration: underline; }
 .challenge-icon { display: grid; place-items: center; width: 54px; height: 54px; border-radius: 50%; background: var(--blue-soft); color: var(--blue); }
 .challenge-icon.pulse { animation: soft-pulse 1.8s infinite; }
 .oauth-callback-field { width: min(440px, 100%); text-align: left; }

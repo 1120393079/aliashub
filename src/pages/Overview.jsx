@@ -1,6 +1,6 @@
 import { Activity, ArrowRight, AtSign, Clock3, KeyRound, Mail, Plus, ShieldCheck, Sparkles, WandSparkles } from "lucide-react";
 import { Button, EmptyState, LoadingBlock, ProviderMark, StatusBadge } from "../components.jsx";
-import { accountSupportsOfficialAliases, providerMeta } from "../providers.js";
+import { accountSupportsOfficialAliases, accountSupportsPlusAliases, providerMeta } from "../providers.js";
 import { accountStatus, jobStatus, relativeTime } from "../utils.js";
 
 const activityIcons = { account: Mail, alias: AtSign, split: WandSparkles, code: KeyRound };
@@ -26,12 +26,14 @@ export default function OverviewPage({ overview, onNavigate, onAddAccount }) {
           <header className="panel-header"><div><h2>源头邮箱</h2><p>最近连接和同步状态</p></div><Button size="sm" icon={ArrowRight} onClick={() => onNavigate("sources")}>全部账号</Button></header>
           {overview.recentAccounts.length ? <div className="source-summary-list">{overview.recentAccounts.map((account) => {
             const supportsOfficial = accountSupportsOfficialAliases(account);
+            const supportsPlus = accountSupportsPlusAliases(account);
             const meta = providerMeta(account.provider);
-            return <button key={account.id} className="source-summary-row" onClick={() => onNavigate("factory", { accountId: account.id, mode: supportsOfficial ? undefined : "split" })}>
+            const canGenerateAliases = supportsOfficial || supportsPlus;
+            return <button key={account.id} className="source-summary-row" onClick={() => onNavigate(canGenerateAliases ? "factory" : "inbox", { accountId: account.id, mode: supportsOfficial ? undefined : "split" })}>
               <ProviderMark provider={meta.id} size={34} />
               <span className="source-summary-copy"><b>{account.display_name || account.email.split("@")[0]}</b><small>{meta.name} · {account.email}</small></span>
-              <span className="source-alias-mini"><b>{supportsOfficial ? `${account.official_used}/${account.official_limit}` : "Plus"}</b><small>{supportsOfficial ? "基础地址" : "分裂可用"}</small></span>
-              <span className="source-alias-mini"><b>{account.split_count}</b><small>分裂</small></span>
+              <span className="source-alias-mini"><b>{supportsOfficial ? `${account.official_used}/${account.official_limit}` : supportsPlus ? "Plus" : "IMAP"}</b><small>{supportsOfficial ? "基础地址" : supportsPlus ? "分裂可用" : "收件扫描"}</small></span>
+              <span className="source-alias-mini"><b>{supportsPlus ? account.split_count : "-"}</b><small>{supportsPlus ? "分裂" : "只读"}</small></span>
               <StatusBadge status={account.status}>{accountStatus[account.status]}</StatusBadge>
             </button>;
           })}</div> : <EmptyState icon={Mail} title="还没有源头邮箱" action={<Button variant="primary" icon={Plus} onClick={onAddAccount}>添加第一个邮箱</Button>} />}

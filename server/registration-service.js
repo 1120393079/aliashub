@@ -1504,7 +1504,7 @@ export class RegistrationService {
       WHERE split_address.parent_address_id = ?
       ORDER BY registration_jobs.created_at DESC, registration_jobs.id DESC
     `);
-    const accounts = this.db.prepare("SELECT * FROM source_accounts WHERE status = 'connected' ORDER BY updated_at DESC").all().map((account) => ({
+    const accounts = this.db.prepare("SELECT * FROM source_accounts WHERE status = 'connected' AND provider IN ('microsoft', 'google') ORDER BY updated_at DESC").all().map((account) => ({
       id: account.id,
       email: account.email,
       display_name: account.display_name,
@@ -1573,7 +1573,10 @@ export class RegistrationService {
     const browserMode = autoContinuePostSignup ? requestedBrowserMode : "headed";
     const account = this.db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(Number(input.accountId));
     if (!account) throw Object.assign(new Error("源头邮箱不存在"), { status: 404 });
-    if (account.status !== "connected") throw Object.assign(new Error("请先完成这个源头邮箱的微软登录"), { status: 409 });
+    if (account.status !== "connected") throw Object.assign(new Error("请先完成这个源头邮箱的连接验证"), { status: 409 });
+    if (!["microsoft", "google"].includes(account.provider)) {
+      throw Object.assign(new Error("这个邮箱提供商不支持 Plus 分裂注册地址"), { status: 409 });
+    }
     const base = this.db.prepare("SELECT * FROM addresses WHERE id = ? AND account_id = ? AND kind IN ('primary', 'official') AND status = 'active'").get(Number(input.baseAddressId), account.id);
     if (!base) throw Object.assign(new Error("请选择可用的基础地址"), { status: 400 });
     const proxies = resolveJobProxies(input, this.getProxyPool());

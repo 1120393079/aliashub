@@ -1,13 +1,16 @@
 # AliasHub
 
 AliasHub is a self-hosted mailbox and account-operations hub for Microsoft
-Outlook and Google Gmail/Workspace accounts. It keeps mailbox OAuth tokens and
-service credentials on the installation that you control.
+Outlook, Google Gmail/Workspace, and Apple iCloud Mail accounts. It keeps
+mailbox OAuth tokens, encrypted iCloud credentials, and service credentials on
+the installation that you control.
 
 ## Features
 
-- Connect multiple Microsoft and Google source mailboxes with OAuth.
-- Encrypt refresh tokens at rest with AES-256-GCM.
+- Connect multiple Microsoft and Google source mailboxes with OAuth, plus
+  iCloud Mail with an Apple App-specific password.
+- Encrypt refresh tokens and iCloud App-specific passwords at rest with
+  AES-256-GCM.
 - Read inbox messages, extract verification codes, search mail, and export
   address inventories.
 - Manage Outlook official aliases and generate repeatable `+tag` addresses.
@@ -125,6 +128,21 @@ Google accounts support the authenticated primary Gmail or Workspace address as
 a base address for `+tag` generation. AliasHub does not create Google Workspace
 administrator aliases.
 
+### iCloud Mail
+
+iCloud Mail uses Apple's fixed IMAP endpoint at `imap.mail.me.com:993` with TLS.
+AliasHub accepts `@icloud.com`, `@me.com`, and `@mac.com` source addresses. In
+your Apple Account, enable two-factor authentication and generate an
+App-specific password, then enter that password in the iCloud connection form.
+Do not enter your normal Apple Account password.
+
+The App-specific password is sent only to the AliasHub backend, verified against
+the fixed Apple endpoint, encrypted with AES-256-GCM, and never returned to the
+browser. Set a unique server-side `DATA_ENCRYPTION_KEY` before connecting iCloud;
+AliasHub refuses to store iCloud credentials without it. iCloud integration is read-only and supports inbox messages and
+verification-code extraction. AliasHub does not generate iCloud aliases or
+`+tag` addresses.
+
 ## Optional SUB2-compatible service
 
 SUB2 integration is optional and disabled until an administrator configures it.
@@ -158,7 +176,8 @@ import disabled and use the OAuth flow instead.
 Runtime state belongs in `.env` and `data/`; both are excluded from Git. Full
 mode stores the worker database in `data/registration-worker/`. Back up `.env`
 and the complete `data/` directory together. Losing `DATA_ENCRYPTION_KEY` makes
-encrypted OAuth tokens and stored service credentials unreadable.
+encrypted OAuth tokens, iCloud App-specific passwords, and stored service
+credentials unreadable.
 
 Never commit:
 

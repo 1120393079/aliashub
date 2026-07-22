@@ -3,7 +3,7 @@ import { AlertCircle, AtSign, CheckCircle2, Copy, Download, ExternalLink, Gauge,
 import { api, appUrl } from "../api.js";
 import { Button, EmptyState, FormField, LoadingBlock, ProviderMark, Segmented, StatusBadge, useToast } from "../components.jsx";
 import AliasSyncModal from "../AliasSyncModal.jsx";
-import { accountSupportsOfficialAliases, providerMeta } from "../providers.js";
+import { accountSupportsOfficialAliases, accountSupportsPlusAliases, providerMeta } from "../providers.js";
 import { accountStatus, copyText, jobStatus, kindText, relativeTime } from "../utils.js";
 
 function BaseAddressRow({ item, selectable = false, selected = false, onToggle }) {
@@ -49,8 +49,9 @@ export default function FactoryPage({ refreshKey, onDataChange, onNavigate, acti
 
   const loadAccounts = async () => {
     const result = await api("/api/accounts");
-    setAccounts(result.items);
-    setAccountId((current) => current || String(result.items[0]?.id || ""));
+    const capableAccounts = result.items.filter((item) => accountSupportsOfficialAliases(item) || accountSupportsPlusAliases(item));
+    setAccounts(capableAccounts);
+    setAccountId((current) => capableAccounts.some((item) => String(item.id) === current) ? current : String(capableAccounts[0]?.id || ""));
   };
   const loadDetail = async (id = accountId) => {
     const requestId = ++detailRequest.current;
@@ -120,13 +121,14 @@ export default function FactoryPage({ refreshKey, onDataChange, onNavigate, acti
   const selectedAccount = accounts.find((item) => item.id === Number(accountId));
   const selectedProvider = providerMeta(selectedAccount?.provider);
   const supportsOfficial = accountSupportsOfficialAliases(selectedAccount);
-  const effectiveMode = supportsOfficial ? mode : "split";
+  const supportsPlus = accountSupportsPlusAliases(selectedAccount);
+  const effectiveMode = supportsOfficial ? mode : supportsPlus ? "split" : "";
   useEffect(() => {
-    if (!selectedAccount || supportsOfficial) return;
+    if (!selectedAccount || supportsOfficial || !supportsPlus) return;
     if (mode !== "split") setMode("split");
     setAliasSyncOpen(false);
     setJob(null);
-  }, [selectedAccount?.id, supportsOfficial, mode]);
+  }, [selectedAccount?.id, supportsOfficial, supportsPlus, mode]);
   const toggleBase = (id) => setSelectedBases((current) => { const next = new Set(current); next.has(id) ? next.delete(id) : next.add(id); return next; });
   const selectAll = () => setSelectedBases(new Set(detail?.baseAddresses.map((item) => item.id) || []));
   const clearAll = () => setSelectedBases(new Set());
@@ -196,13 +198,13 @@ export default function FactoryPage({ refreshKey, onDataChange, onNavigate, acti
   }, [detail, selectedBases, splitForm]);
 
   if (loading && !accounts.length) return <div className="page-stack"><LoadingBlock rows={8} /></div>;
-  if (!accounts.length) return <div className="page-stack"><EmptyState icon={Mail} title="先添加一个源头邮箱" description="别名工厂需要至少一个 Microsoft 或 Google 源头邮箱。" action={<Button variant="primary" onClick={() => onNavigate("sources")}>添加源头邮箱</Button>} /></div>;
+  if (!accounts.length || !selectedAccount || !effectiveMode) return <div className="page-stack"><EmptyState icon={Mail} title="先添加支持别名的源头邮箱" description="别名工厂支持 Microsoft 官方别名和 Google Plus 分裂；iCloud 可用于收取邮件和验证码。" action={<Button variant="primary" onClick={() => onNavigate("sources")}>添加源头邮箱</Button>} /></div>;
 
   return (
     <div className="page-stack factory-page">
       <div className="factory-account-bar">
         <div className="account-selector"><ProviderMark provider={selectedProvider.id} size={34} /><span><small>当前源头邮箱 · {selectedProvider.name}</small><select value={accountId} onChange={(event) => { setAccountId(event.target.value); setJob(null); setCreated([]); setSelectedBases(new Set()); selectionAccountId.current = ""; }}>{accounts.map((account) => <option key={account.id} value={account.id}>{providerMeta(account.provider).name} · {account.display_name ? `${account.display_name} · ` : ""}{account.email}</option>)}</select></span></div>
-        {selectedAccount && <div className="account-bar-stats">{supportsOfficial ? <span><b>{selectedAccount.official_used}/{selectedAccount.official_limit}</b> 基础地址</span> : <span><b>Plus</b> 分裂可用</span>}<span><b>{selectedAccount.split_count}</b> 分裂地址</span><StatusBadge status={selectedAccount.status}>{accountStatus[selectedAccount.status]}</StatusBadge></div>}
+        <div className="account-bar-stats">{supportsOfficial ? <span><b>{selectedAccount.official_used}/{selectedAccount.official_limit}</b> 基础地址</span> : <span><b>Plus</b> 分裂可用</span>}<span><b>{selectedAccount.split_count}</b> 分裂地址</span><StatusBadge status={selectedAccount.status}>{accountStatus[selectedAccount.status]}</StatusBadge></div>
       </div>
       <Segmented value={effectiveMode} onChange={setMode} ariaLabel="别名生成模式" items={supportsOfficial ? [{ value: "official", label: "官方别名", icon: AtSign }, { value: "split", label: "分裂地址", icon: WandSparkles }] : [{ value: "split", label: "Plus 分裂地址", icon: WandSparkles }]} />
 

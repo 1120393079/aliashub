@@ -133,11 +133,11 @@ export default function SettingsPage() {
         </section>
 
         <section id="security" className="settings-section">
-          <header><span><LockKeyhole size={19} /></span><div><h2>OAuth 安全</h2><p>Microsoft 授权、自有 Google OAuth 客户端及 Token 存储</p></div></header>
+          <header><span><LockKeyhole size={19} /></span><div><h2>邮箱连接安全</h2><p>Microsoft、Google OAuth 与 iCloud IMAP 凭据存储</p></div></header>
           <div className="security-list">
             <div><ShieldCheck size={17} /><span><b>Microsoft Authorization Code + PKCE</b><small>{form.microsoft_oauth_client}</small></span><StatusBadge status="active">已启用</StatusBadge></div>
-            <div><KeyRound size={17} /><span><b>Refresh Token</b><small>AES-256-GCM 加密后保存，账号密码不经过本站</small></span><StatusBadge status="active">已加密</StatusBadge></div>
-            <div><Database size={17} /><span><b>邮件读取权限</b><small>Microsoft Graph Mail.Read · Google Gmail readonly</small></span><StatusBadge status="active">只读</StatusBadge></div>
+            <div><KeyRound size={17} /><span><b>邮箱连接凭据</b><small>OAuth Refresh Token 与 iCloud App 专用密码均使用 AES-256-GCM 加密保存</small></span><StatusBadge status="active">已加密</StatusBadge></div>
+            <div><Database size={17} /><span><b>邮件读取权限</b><small>Microsoft Graph Mail.Read · Google Gmail readonly · iCloud IMAP readonly</small></span><StatusBadge status="active">只读</StatusBadge></div>
           </div>
           <div className="settings-form">
             <div className="oauth-config-status"><span><b>{form.google_oauth_configured ? "Google OAuth 客户端已配置" : "Google OAuth 客户端未配置"}</b><small>{form.google_oauth_configured ? "使用你自己的 Google OAuth Client ID 和 Client Secret" : "绑定 Gmail 或 Google Workspace 前，必须填写自己的 Client ID 和 Client Secret"}</small></span><StatusBadge status={form.google_oauth_configured ? "active" : "warning"}>{form.google_oauth_configured ? "可授权" : "必须配置"}</StatusBadge></div>
@@ -155,7 +155,7 @@ export default function SettingsPage() {
 
         <section id="runtime" className="settings-section">
           <header><span><Server size={19} /></span><div><h2>运行状态</h2><p>生产服务与支持范围</p></div></header>
-          <dl className="runtime-grid"><div><dt>API 服务</dt><dd><span className="live-dot" />{health?.status === "ok" ? "运行正常" : "未知"}</dd></div><div><dt>源头邮箱</dt><dd>{health?.accounts || 0} 个</dd></div><div><dt>邮箱提供商</dt><dd>Microsoft · Google</dd></div><div><dt>Microsoft 域名</dt><dd>{(form.supported_domains || []).join(" · ")}</dd></div><div><dt>服务地址</dt><dd>{form.public_base_url}</dd></div><div><dt>Google OAuth</dt><dd>{form.google_oauth_configured ? "自有客户端已配置" : "必须配置 Client ID + Secret"}</dd></div></dl>
+          <dl className="runtime-grid"><div><dt>API 服务</dt><dd><span className="live-dot" />{health?.status === "ok" ? "运行正常" : "未知"}</dd></div><div><dt>源头邮箱</dt><dd>{health?.accounts || 0} 个</dd></div><div><dt>邮箱提供商</dt><dd>Microsoft · Google · iCloud</dd></div><div><dt>Microsoft 域名</dt><dd>{(form.supported_domains || []).join(" · ")}</dd></div><div><dt>服务地址</dt><dd>{form.public_base_url}</dd></div><div><dt>Google OAuth</dt><dd>{form.google_oauth_configured ? "自有客户端已配置" : "必须配置 Client ID + Secret"}</dd></div><div><dt>iCloud IMAP</dt><dd>{form.icloud_imap?.host || "imap.mail.me.com"}:{form.icloud_imap?.port || 993} · TLS</dd></div></dl>
           <a className="official-doc-link" href="https://support.microsoft.com/en-us/outlook/add-or-remove-an-email-alias-in-outlook-com" target="_blank" rel="noreferrer"><ExternalLink size={15} />Microsoft 官方别名规则</a>
         </section>
       </div>

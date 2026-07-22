@@ -39,6 +39,7 @@ const MICROSOFT_DOMAINS = new Set([
   "live.com",
   "msn.com",
 ]);
+const ICLOUD_DOMAINS = new Set(["icloud.com", "me.com", "mac.com"]);
 const ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789";
 const WORDS = ["amber", "atlas", "bamboo", "bright", "cedar", "clear", "comet", "harbor", "maple", "pixel", "river", "signal", "studio", "vault"];
 const CODE_CONTEXT_SOURCE = [
@@ -63,6 +64,11 @@ export function normalizeEmail(value) {
 
 export function normalizeGoogleEmail(value) {
   return normalizeEmail(value);
+}
+
+export function normalizeIcloudEmail(value) {
+  const email = normalizeEmail(value);
+  return email && ICLOUD_DOMAINS.has(email.split("@")[1]) ? email : "";
 }
 
 export function normalizeMicrosoftEmail(value) {
@@ -136,3 +142,4 @@ export function codeFromText(value) {
 }
 
 export const microsoftDomains = [...MICROSOFT_DOMAINS];
+export const icloudDomains = [...ICLOUD_DOMAINS];

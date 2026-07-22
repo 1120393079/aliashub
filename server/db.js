@@ -166,6 +166,13 @@ const schema = `
     token_updated_at TEXT NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS icloud_credentials (
+    account_id INTEGER PRIMARY KEY REFERENCES source_accounts(id) ON DELETE CASCADE,
+    username TEXT NOT NULL,
+    app_password_encrypted TEXT NOT NULL,
+    credential_updated_at TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS oauth_code_sessions (
     id TEXT PRIMARY KEY,
     expected_account_id INTEGER REFERENCES source_accounts(id) ON DELETE SET NULL,
@@ -401,7 +408,7 @@ export function createSourceAccount(db, {
   email,
   displayName = "",
   provider = "microsoft",
-  officialLimit = provider === "google" ? 1 : 10,
+  officialLimit = provider === "microsoft" ? 10 : 1,
 } = {}) {
   const now = nowIso();
   const recoveryEmail = getSetting(db, "default_recovery_email", "");

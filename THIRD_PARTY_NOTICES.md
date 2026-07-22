@@ -20,6 +20,14 @@ The upstream FrciblyK12 README also credits the plugin architecture of
 baseline rather than directly from that earlier repository; the upstream credit
 is preserved in `registration-worker/README.md`.
 
+## iCloud Mail parsing dependencies
+
+AliasHub uses [ImapFlow](https://imapflow.com/) under the MIT License to connect
+to iCloud Mail over IMAP, and [PostalMime](https://postal-mime.postalsys.com/)
+under the MIT No Attribution License (MIT-0) to parse bounded RFC 822 message
+content. Their source and license information are available from the linked
+projects and installed package metadata.
+
 ## AliasHub license
 
 AliasHub's original project code and this combined source distribution are

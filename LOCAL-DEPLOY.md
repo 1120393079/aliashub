@@ -19,6 +19,11 @@ Native alternative:
 - Python 3, `make`, and a C++ compiler when a prebuilt `better-sqlite3` binary is
   unavailable
 
+To connect iCloud Mail, the AliasHub process or container also needs outbound
+TCP access to `imap.mail.me.com:993`. The IMAP hostname, port, TLS requirement,
+and certificate verification are fixed in the backend and cannot be overridden
+from the browser.
+
 ## Core Docker Compose
 
 ```bash
@@ -136,8 +141,10 @@ service name must be supplied explicitly. Docker Compose users do not need it.
 - Demo data: disabled
 
 Keep `.env` and `data/` together in every backup. Changing or losing
-`DATA_ENCRYPTION_KEY` makes previously encrypted OAuth tokens and service
-credentials unreadable. Store backups outside the web root and encrypt them.
+`DATA_ENCRYPTION_KEY` makes previously encrypted OAuth tokens, iCloud
+App-specific passwords, and service credentials unreadable. Store backups
+outside the web root and encrypt them. Set `DATA_ENCRYPTION_KEY` before adding
+iCloud Mail; AliasHub refuses iCloud credential storage when it is unset.
 
 To use a different local port before the first start:
 

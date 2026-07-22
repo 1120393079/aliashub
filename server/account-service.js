@@ -21,11 +21,14 @@ export function publicAccount(db, row) {
     FROM addresses WHERE account_id = ?
   `).get(row.id);
   const officialUsed = (counts.primary_count || 0) + (counts.official_count || 0);
-  const oauthConnected = provider === "google"
+  const credentialConnected = provider === "google"
     ? Boolean(db.prepare("SELECT 1 FROM google_tokens WHERE account_id = ?").get(row.id))
     : provider === "microsoft"
       ? Boolean(db.prepare("SELECT 1 FROM microsoft_tokens WHERE account_id = ?").get(row.id))
-      : false;
+      : provider === "icloud"
+        ? Boolean(db.prepare("SELECT 1 FROM icloud_credentials WHERE account_id = ?").get(row.id))
+        : false;
+  const oauthConnected = provider !== "icloud" && credentialConnected;
   return {
     ...row,
     provider,
@@ -35,6 +38,9 @@ export function publicAccount(db, row) {
     split_count: counts.split_count || 0,
     address_count: counts.address_count || 0,
     oauth_connected: oauthConnected,
+    credential_connected: credentialConnected,
+    connection_connected: credentialConnected,
+    auth_mode: provider === "icloud" ? "app_password" : "oauth",
     supports_official_aliases: provider === "microsoft",
     supports_plus_aliases: ["microsoft", "google"].includes(provider),
   };
@@ -331,7 +337,9 @@ export class JobRunner {
     if (!account) return this.updateJob(job.id, { status: "failed", message: "源头邮箱不存在", finished_at: nowIso() });
     this.updateJob(job.id, {
       status: "running",
-      message: account.provider === "google" ? "正在读取 Gmail 收件箱" : "正在读取 Outlook 收件箱",
+      message: account.provider === "google"
+        ? "正在读取 Gmail 收件箱"
+        : account.provider === "icloud" ? "正在读取 iCloud Mail 收件箱" : "正在读取 Outlook 收件箱",
       started_at: nowIso(),
     });
     try {
