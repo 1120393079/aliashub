@@ -117,6 +117,11 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .sidebar-nav button:hover { color: #f2f6f4; background: rgba(255,255,255,0.05); }
 .sidebar-nav button.active { color: #ffffff; background: #29312d; }
 .sidebar-nav button.active::before { content: ""; position: absolute; left: 0; width: 3px; height: 19px; border-radius: 0 3px 3px 0; background: #33c58f; }
+.sidebar-nav button.featured { margin-top: 3px; border: 1px solid rgba(51,197,143,0.42); background: linear-gradient(90deg, rgba(51,197,143,0.17), rgba(51,197,143,0.07)); color: #dffbef; font-weight: 720; box-shadow: inset 0 0 0 1px rgba(51,197,143,0.05); }
+.sidebar-nav button.featured:hover { border-color: rgba(82,216,164,0.62); background: linear-gradient(90deg, rgba(51,197,143,0.24), rgba(51,197,143,0.1)); }
+.sidebar-nav button.featured.active { border-color: rgba(82,216,164,0.74); background: linear-gradient(90deg, rgba(51,197,143,0.32), rgba(51,197,143,0.14)); }
+.sidebar-nav button.featured svg { color: #52d8a4; filter: drop-shadow(0 0 5px rgba(51,197,143,0.28)); }
+.sidebar-nav button.featured::after { content: ""; flex: 0 0 6px; width: 6px; height: 6px; border-radius: 50%; background: #52d8a4; box-shadow: 0 0 0 3px rgba(51,197,143,0.12); }
 .sidebar-nav button span { flex: 1; }
 .sidebar-nav button b { display: grid; place-items: center; min-width: 20px; height: 20px; padding: 0 5px; border-radius: 10px; background: #d25852; color: white; font-size: 11px; }
 .sidebar-provider { display: flex; align-items: center; gap: 6px; margin: auto 11px 12px; padding: 11px 8px; border: 1px solid rgba(255,255,255,0.08); border-radius: 7px; background: rgba(255,255,255,0.03); }
@@ -1082,6 +1087,7 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
   .mobile-bottom-nav { position: fixed; inset: auto 0 0; z-index: 25; height: 65px; display: grid; grid-template-columns: repeat(5, 1fr); border-top: 1px solid var(--line); background: color-mix(in srgb, var(--surface) 96%, transparent); backdrop-filter: blur(12px); padding-bottom: env(safe-area-inset-bottom); }
   .mobile-bottom-nav button { display: grid; place-content: center; justify-items: center; gap: 3px; border: 0; background: transparent; color: var(--text-faint); font-size: 8px; }
   .mobile-bottom-nav button.active { color: var(--green); }
+  .mobile-bottom-nav button.featured { color: var(--green); font-weight: 750; }
   .toast-stack { right: 10px; bottom: 76px; width: calc(100vw - 20px); }
 }
 

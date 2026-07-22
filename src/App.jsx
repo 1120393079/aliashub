@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Bell, BookOpen, Inbox, KeyRound, LayoutDashboard, LogOut, Mail, Menu, Moon, Plus, Settings, Sun, UserPlus, WandSparkles, X } from "lucide-react";
+import { Bell, BookOpen, Bot, Inbox, KeyRound, LayoutDashboard, LogOut, Mail, Menu, Moon, Plus, Settings, Sun, WandSparkles, X } from "lucide-react";
 import { api } from "./api.js";
 import { Button, IconButton, LoadingBlock, ProviderMark, useToast } from "./components.jsx";
 import OverviewPage from "./pages/Overview.jsx";
@@ -15,12 +15,14 @@ const pages = {
   overview: { label: "总览", subtitle: "源头邮箱与任务状态", icon: LayoutDashboard },
   sources: { label: "源头邮箱", subtitle: "Microsoft 与 Google 邮箱", icon: Mail },
   factory: { label: "别名工厂", subtitle: "官方别名与 Plus 分裂地址", icon: WandSparkles },
-  registration: { label: "gpt注册", subtitle: "邮箱注册，不接入手机号", icon: UserPlus },
   inbox: { label: "邮件中心", subtitle: "集中接收所有绑定邮箱的邮件", icon: Inbox },
   codes: { label: "验证码中心", subtitle: "集中查看所有源头号的验证码", icon: KeyRound },
   addresses: { label: "地址仓库", subtitle: "全部基础地址和分裂地址", icon: BookOpen },
+  registration: { label: "ChatGPT", subtitle: "自动注册与账号集中管理", icon: Bot, featured: true },
   settings: { label: "系统设置", subtitle: "服务与数据配置", icon: Settings },
 };
+
+const mobilePageKeys = ["overview", "sources", "inbox", "addresses", "registration"];
 
 function LoginPage({ onAuthenticated }) {
   const [form, setForm] = useState({ username: "admin", password: "" });
@@ -123,7 +125,8 @@ export default function App() {
           {Object.entries(pages).map(([key, item]) => {
             const Icon = item.icon;
             const badge = key === "codes" ? unusedCodes : key === "sources" ? actionRequired : 0;
-            return <button key={key} className={page === key ? "active" : ""} onClick={() => navigate(key)}><Icon size={18} /><span>{item.label}</span>{badge > 0 && <b>{badge}</b>}</button>;
+            const className = [page === key ? "active" : "", item.featured ? "featured" : ""].filter(Boolean).join(" ");
+            return <button key={key} className={className} onClick={() => navigate(key)}><Icon size={18} /><span>{item.label}</span>{badge > 0 && <b>{badge}</b>}</button>;
           })}
         </nav>
         <div className="sidebar-provider"><span className="provider-mark-pair"><ProviderMark provider="microsoft" size={25} /><ProviderMark provider="google" size={25} /></span><span className="sidebar-provider-copy"><b>Microsoft + Google</b><small>Outlook · Gmail · Workspace</small></span><i className="online-dot" /></div>
@@ -146,7 +149,7 @@ export default function App() {
         </div>
       </main>
       <nav className="mobile-bottom-nav">
-        {Object.entries(pages).slice(0, 5).map(([key, item]) => { const Icon = item.icon; return <button key={key} className={page === key ? "active" : ""} onClick={() => navigate(key)}><Icon size={19} /><span>{item.label}</span></button>; })}
+        {mobilePageKeys.map((key) => { const item = pages[key]; const Icon = item.icon; const className = [page === key ? "active" : "", item.featured ? "featured" : ""].filter(Boolean).join(" "); return <button key={key} className={className} onClick={() => navigate(key)}><Icon size={19} /><span>{item.label}</span></button>; })}
       </nav>
     </div>
   );
