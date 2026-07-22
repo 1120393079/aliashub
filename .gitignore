@@ -2,6 +2,7 @@ node_modules/
 dist/
 audit/
 release/
+deploy-backups/
 .env
 .env.*
 !.env.example
@@ -13,6 +14,7 @@ data/registration-worker/
 *.db*
 *.sqlite*
 *.sqlite3*
+*.pgcustom
 *.pem
 *.p12
 *.pfx
@@ -29,6 +31,12 @@ user-data/
 *.bak*
 *.backup*
 coverage/
+screenshots/
+runtime-screenshots/
+playwright-report/
+test-results/
+artifacts/
+captures/
 .DS_Store
 .idea/
 .vscode/

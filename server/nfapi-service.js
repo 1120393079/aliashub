@@ -659,7 +659,40 @@ function durableAgentIdentityStatus(account, source) {
     && account?.auto_pause_on_expired === false;
 }
 
-function validateAgentIdentityTarget(account, source, runtimeId) {
+const AGENT_IDENTITY_OAUTH_TOKEN_KEYS = ["access_token", "refresh_token", "id_token"];
+const AGENT_IDENTITY_OAUTH_METADATA_KEYS = [
+  "client_id",
+  "expires_at",
+  "expires_in",
+  "scope",
+  "token_type",
+  "openai_auth_mode",
+];
+
+function agentIdentityHasOAuthResidue(account) {
+  const credentials = account?.credentials && typeof account.credentials === "object" && !Array.isArray(account.credentials)
+    ? account.credentials : {};
+  const status = account?.credentials_status || {};
+  return status.has_access_token === true
+    || status.has_refresh_token === true
+    || status.has_id_token === true
+    || AGENT_IDENTITY_OAUTH_METADATA_KEYS.some((key) => Object.hasOwn(credentials, key));
+}
+
+function agentIdentityOAuthCleanupCredentials(account) {
+  const current = account?.credentials && typeof account.credentials === "object" && !Array.isArray(account.credentials)
+    ? account.credentials : {};
+  const credentials = { ...current };
+  for (const key of AGENT_IDENTITY_OAUTH_METADATA_KEYS) delete credentials[key];
+  for (const key of AGENT_IDENTITY_OAUTH_TOKEN_KEYS) credentials[key] = null;
+  credentials.auth_mode = "agentIdentity";
+  return credentials;
+}
+
+function validateAgentIdentityTarget(account, source, runtimeId, {
+  requireLongLived = true,
+  allowOAuthResidue = false,
+} = {}) {
   const invalidTarget = (message, status = 502, { remediationRequired = false } = {}) => {
     const error = errorWithStatus(message, status);
     if (remediationRequired) {
@@ -683,15 +716,16 @@ function validateAgentIdentityTarget(account, source, runtimeId) {
   if (!status || status.has_agent_private_key !== true) {
     throw invalidTarget("NFapi Agent Identity 目标账号未保存签名密钥");
   }
-  if (status.has_access_token === true || status.has_refresh_token === true || status.has_id_token === true) {
+  if (!allowOAuthResidue
+    && (status.has_access_token === true || status.has_refresh_token === true || status.has_id_token === true)) {
     throw invalidTarget("NFapi Agent Identity 目标账号仍残留 OAuth Token", 502, { remediationRequired: true });
   }
-  if (["client_id", "expires_at", "expires_in", "scope", "token_type", "openai_auth_mode"]
-    .some((key) => Object.hasOwn(credentials, key))) {
+  if (!allowOAuthResidue && AGENT_IDENTITY_OAUTH_METADATA_KEYS.some((key) => Object.hasOwn(credentials, key))) {
     throw invalidTarget("NFapi Agent Identity 目标账号仍残留 OAuth 元数据", 502, { remediationRequired: true });
   }
-  if (![undefined, null, 0].includes(account?.expires_at)
-    || account?.auto_pause_on_expired !== false) {
+  if (requireLongLived
+    && (![undefined, null, 0].includes(account?.expires_at)
+      || account?.auto_pause_on_expired !== false)) {
     throw invalidTarget("NFapi Agent Identity 目标账号未设置为长期有效");
   }
 }
@@ -1390,7 +1424,13 @@ export class NfapiService {
 
       const target = await client.getAccount(targetId);
       try {
-        validateAgentIdentityTarget(target, source, pending.runtimeId);
+        // Some SUB2-compatible services protect sensitive OAuth keys during
+        // ordinary credential merges. Clear residue only on the verified,
+        // just-imported target before applying its normal AliasHub settings.
+        validateAgentIdentityTarget(target, source, pending.runtimeId, {
+          requireLongLived: false,
+          allowOAuthResidue: true,
+        });
       } catch (error) {
         if (error?.agentTargetRemediationRequired === true) {
           pending.remediationTargetId = targetId;
@@ -1398,7 +1438,16 @@ export class NfapiService {
         }
         throw error;
       }
+      if (agentIdentityHasOAuthResidue(target)) {
+        await client.updateAccount(targetId, {
+          credentials: agentIdentityOAuthCleanupCredentials(target),
+        });
+      }
+      const tokenFreeTarget = await client.getAccount(targetId);
+      validateAgentIdentityTarget(tokenFreeTarget, source, pending.runtimeId, { requireLongLived: false });
       await this.applyAllSettings(client, targetId, source, name, options, { longLived: true });
+      const configuredTarget = await client.getAccount(targetId);
+      validateAgentIdentityTarget(configuredTarget, source, pending.runtimeId);
       if (input.save_defaults) this.saveDefaults(requestedOptions);
       this.saveLink(source, {
         accountId: targetId,

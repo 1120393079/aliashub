@@ -146,6 +146,13 @@ product name is not used as a compatibility check. Without this configuration,
 mailbox, alias, verification-code, and registration features remain available;
 only SUB2 import is unavailable.
 
+Agent Identity import additionally requires the compatible Codex-session import
+endpoint and credential-merge behavior: explicit `null` OAuth token fields must
+clear those tokens, omitted protected Agent Identity keys must remain stored,
+and the account response must expose credential-status flags for final
+verification. Implementations without that contract should keep Agent Identity
+import disabled and use the OAuth flow instead.
+
 ## Data and secrets
 
 Runtime state belongs in `.env` and `data/`; both are excluded from Git. Full
