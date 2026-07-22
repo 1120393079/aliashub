@@ -18,7 +18,7 @@ const pages = {
   inbox: { label: "邮件中心", subtitle: "集中接收所有绑定邮箱的邮件", icon: Inbox },
   codes: { label: "验证码中心", subtitle: "集中查看所有源头号的验证码", icon: KeyRound },
   addresses: { label: "地址仓库", subtitle: "全部基础地址和分裂地址", icon: BookOpen },
-  registration: { label: "ChatGPT", subtitle: "自动注册与账号集中管理", icon: Bot, featured: true },
+  registration: { label: "ChatGPT注册", subtitle: "自动注册与账号集中管理", icon: Bot, featured: true },
   settings: { label: "系统设置", subtitle: "服务与数据配置", icon: Settings },
 };
 
