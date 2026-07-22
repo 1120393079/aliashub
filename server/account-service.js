@@ -61,15 +61,15 @@ export function importIcloudAliases(db, account, values = []) {
     throw Object.assign(new Error("这个源头邮箱不是 iCloud 账号"), { status: 409, code: "ICLOUD_ACCOUNT_REQUIRED" });
   }
   const raw = Array.isArray(values) ? values : [];
-  if (raw.length > 500) throw Object.assign(new Error("单次最多导入 500 个 iCloud 别名或隐藏邮箱反代地址"), { status: 400 });
+  if (raw.length > 500) throw Object.assign(new Error("单次最多导入 500 个 iCloud 别名"), { status: 400 });
   const invalid = raw.map((value) => String(value || "").trim()).filter((value) => value && !normalizeIcloudAliasEmail(value));
   if (invalid.length) {
-    throw Object.assign(new Error(`不支持的 iCloud 别名或隐藏邮箱反代地址：${invalid[0]}`), { status: 400 });
+    throw Object.assign(new Error(`不支持的 iCloud 别名：${invalid[0]}`), { status: 400 });
   }
   const aliases = [...new Set(raw.map(normalizeIcloudAliasEmail).filter(Boolean))]
     .filter((address) => address !== account.email.toLowerCase());
   if (!aliases.length) {
-    throw Object.assign(new Error("请至少填写一个 iCloud 别名或隐藏邮箱反代地址"), { status: 400 });
+    throw Object.assign(new Error("请至少填写一个 iCloud 别名"), { status: 400 });
   }
   const duplicate = db.prepare(`
     SELECT source_accounts.email AS source_email
@@ -102,7 +102,7 @@ export function importIcloudAliases(db, account, values = []) {
         account.id,
         address,
         relay ? ICLOUD_HIDE_MY_EMAIL_STRATEGY : ICLOUD_MAIL_ALIAS_STRATEGY,
-        relay ? "iCloud 隐藏邮箱反代" : "iCloud 邮箱别名",
+        relay ? "iCloud 隐藏邮箱别名" : "iCloud 邮箱别名",
         now,
         now,
       );
@@ -111,7 +111,7 @@ export function importIcloudAliases(db, account, values = []) {
       db,
       account.id,
       "alias",
-      "导入 iCloud 别名和隐藏邮箱反代",
+      "导入 iCloud 别名",
       `本次导入 ${aliases.length} 个地址`,
       { count: aliases.length },
     );

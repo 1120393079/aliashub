@@ -42,8 +42,8 @@ export const MAIL_PROVIDERS = {
     supportsPlusAliases: false,
     supportsImportedAliases: true,
     supportsDirectRegistration: true,
-    capabilityTitle: "别名与隐藏邮箱反代",
-    capabilityDescription: "导入 Apple 已创建的别名或隐藏邮箱反代，直接用于注册和收取验证码",
+    capabilityTitle: "iCloud 别名",
+    capabilityDescription: "导入 Apple 已创建的 iCloud 别名，直接用于注册和收取验证码",
   },
 };
 

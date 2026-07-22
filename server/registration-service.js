@@ -1541,7 +1541,7 @@ export class RegistrationService {
           registration_hint: activeDirectJob
             ? "这个 iCloud 地址已有进行中的注册任务，请等待任务结束。"
             : completedDirectJob
-              ? "这个 iCloud 地址已经用于成功注册；请导入新的隐藏邮箱反代地址继续注册。"
+              ? "这个 iCloud 别名已经用于成功注册；请导入新的别名继续注册。"
               : direct
                 ? "iCloud 地址会直接用于注册，不会生成 +tag 分裂地址。"
                 : registrationState === "likely_exhausted"
@@ -1602,13 +1602,13 @@ export class RegistrationService {
     if (!base) throw Object.assign(new Error("请选择可用的基础地址"), { status: 400 });
     const directIcloud = account.provider === "icloud";
     if (directIcloud && base.kind === "official" && !isIcloudImportedStrategy(base.strategy)) {
-      throw Object.assign(new Error("请选择已导入的 iCloud 邮箱别名或隐藏邮箱反代地址"), { status: 400 });
+      throw Object.assign(new Error("请选择已导入的 iCloud 别名"), { status: 400 });
     }
     if (directIcloud && count !== 1) {
-      throw Object.assign(new Error("iCloud 别名和隐藏邮箱反代地址每次只能提交 1 个注册任务"), { status: 400 });
+      throw Object.assign(new Error("iCloud 别名每次只能提交 1 个注册任务"), { status: 400 });
     }
     if (directIcloud && customSuffix) {
-      throw Object.assign(new Error("iCloud 地址不支持 Plus 分裂后缀，请直接选择已导入的别名或隐藏邮箱反代地址"), { status: 400 });
+      throw Object.assign(new Error("iCloud 别名不支持 Plus 分裂后缀，请直接选择已导入的别名"), { status: 400 });
     }
     const proxies = resolveJobProxies(input, this.getProxyPool());
     let addresses;
@@ -1621,8 +1621,8 @@ export class RegistrationService {
       `).get(base.id);
       if (existing) {
         const message = existing.status === "completed"
-          ? "这个 iCloud 地址已经用于成功注册，请导入新的隐藏邮箱反代地址"
-          : "这个 iCloud 地址已有进行中的注册任务";
+          ? "这个 iCloud 别名已经用于成功注册，请导入新的别名"
+          : "这个 iCloud 别名已有进行中的注册任务";
         throw Object.assign(new Error(message), { status: 409 });
       }
       addresses = [base];

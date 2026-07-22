@@ -33,7 +33,7 @@ export default function AliasSyncModal({ account, onClose, onSynced }) {
         body: { aliases: aliases.split(/[\s,;]+/).map((value) => value.trim()).filter(Boolean) },
       });
       toast(isIcloud
-        ? `登记完成，当前共 ${result.account.official_aliases} 个 iCloud 别名或隐藏邮箱反代`
+        ? `登记完成，当前共 ${result.account.official_aliases} 个 iCloud 别名`
         : `登记完成，当前共 ${result.account.official_aliases} 个官方别名`);
       await onSynced?.(result);
       onClose();
@@ -81,7 +81,7 @@ export default function AliasSyncModal({ account, onClose, onSynced }) {
     <Modal
       open={Boolean(account)}
       onClose={onClose}
-      title={isIcloud ? "导入 iCloud 别名 / 隐藏邮箱反代" : "登记官网已有别名"}
+      title={isIcloud ? "导入 iCloud 别名" : "登记官网已有别名"}
       description={account ? (isIcloud
         ? `${account.email} · 仅导入已在 Apple 创建的 iCloud Mail 别名或 Hide My Email 地址`
         : `${account.email} · 仅登记已在微软官网创建的别名`) : ""}
@@ -90,10 +90,10 @@ export default function AliasSyncModal({ account, onClose, onSynced }) {
     >
       <div className="form-stack alias-sync-form">
         <label className="form-field">
-          <span className="field-label">{isIcloud ? "已创建的别名或隐藏邮箱反代（每行一个）" : "官网已创建的别名（每行一个）"}</span>
+          <span className="field-label">{isIcloud ? "已创建的 iCloud 别名（每行一个）" : "官网已创建的别名（每行一个）"}</span>
           <textarea rows="6" value={aliases} onChange={(event) => setAliases(event.target.value)} placeholder={isIcloud ? "例如 name@icloud.com\nxxxx@privaterelay.appleid.com" : "例如 name@outlook.jp、name@outlook.de"} autoCapitalize="off" autoCorrect="off" spellCheck="false" autoFocus />
         </label>
-        <div className="provider-login-note"><AtSign size={22} /><span><b>{account?.email}</b><small>{isIcloud ? "只保存 AliasHub 本地映射；不会在 Apple 创建或删除别名，也不会把反代地址当作 IMAP 登录账号" : "只登记到 AliasHub，不会在微软官网创建或删除别名"}</small></span></div>
+        <div className="provider-login-note"><AtSign size={22} /><span><b>{account?.email}</b><small>{isIcloud ? "支持普通邮箱别名和 Apple Hide My Email 别名；只保存本地映射，不会在 Apple 创建或删除别名" : "只登记到 AliasHub，不会在微软官网创建或删除别名"}</small></span></div>
         {message && <div className="inline-alert danger"><AlertCircle size={17} /><span>{message}</span></div>}
       </div>
     </Modal>
