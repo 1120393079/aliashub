@@ -697,7 +697,7 @@ export function createApp(options = {}) {
       if (invalid.length) {
         throw Object.assign(new Error(`仅支持 @icloud.com、@me.com、@mac.com 或 @privaterelay.appleid.com 地址：${invalid[0]}`), { status: 400 });
       }
-      const items = importIcloudAliases(db, account, input);
+      const items = importIcloudAliases(db, account, input, { type: String(req.body?.type || "") });
       res.json({
         items,
         account: publicAccount(db, db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(account.id)),

@@ -58,7 +58,7 @@ export default function AddressesPage({ refreshKey, onDataChange, onNavigate, in
   const isImportedIcloudAddress = (item) => itemProvider(item).id === "icloud"
     && ["icloud_mail_alias", "icloud_hide_my_email"].includes(item.strategy);
   const addressTypeLabel = (item) => item.strategy === "icloud_hide_my_email"
-    ? "隐藏邮箱别名"
+    ? "隐藏邮箱"
     : item.strategy === "icloud_mail_alias"
       ? "iCloud 邮箱别名"
       : kindText[item.kind];

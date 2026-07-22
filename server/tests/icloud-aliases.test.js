@@ -53,10 +53,23 @@ test("iCloud aliases and Hide My Email relays import, receive mail, and register
   });
 
   const account = createConnectedAccount(db, "primary@icloud.com");
+  const wrongType = await request(runtime.app, `/api/accounts/${account.id}/icloud-aliases/import`, {
+    aliases: ["relay-abc@privaterelay.appleid.com"],
+    type: "mail_alias",
+  });
+  assert.equal(wrongType.response.status, 400);
+  const mailAliases = await request(runtime.app, `/api/accounts/${account.id}/icloud-aliases/import`, {
+    aliases: ["Work@Me.com"],
+    type: "mail_alias",
+  });
+  assert.equal(mailAliases.response.status, 200);
+  assert.equal(mailAliases.body.account.icloud_mail_aliases, 1);
   const imported = await request(runtime.app, `/api/accounts/${account.id}/icloud-aliases/import`, {
-    aliases: ["Work@Me.com", "relay-abc@privaterelay.appleid.com"],
+    aliases: ["relay-abc@privaterelay.appleid.com"],
+    type: "hide_my_email",
   });
   assert.equal(imported.response.status, 200);
+  assert.equal(imported.body.account.icloud_hide_my_emails, 1);
   const mailAlias = imported.body.items.find((item) => item.address === "work@me.com");
   const relay = imported.body.items.find((item) => item.address === "relay-abc@privaterelay.appleid.com");
   assert.equal(mailAlias.strategy, "icloud_mail_alias");

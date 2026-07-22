@@ -186,7 +186,7 @@ export default function SourcesPage({ refreshKey, onDataChange, onNavigate, addO
   const [data, setData] = useState(null);
   const [reconnecting, setReconnecting] = useState(null);
   const [removing, setRemoving] = useState(null);
-  const [aliasSyncAccount, setAliasSyncAccount] = useState(null);
+  const [aliasSyncTarget, setAliasSyncTarget] = useState(null);
   const toast = useToast();
   const load = async () => {
     try { setData(await api("/api/accounts")); } catch (error) { toast(error.message, "error"); }
@@ -197,6 +197,7 @@ export default function SourcesPage({ refreshKey, onDataChange, onNavigate, addO
     catch (error) { toast(error.message, "error"); }
   };
   const connectionDone = () => { load(); onDataChange(); };
+  const openAliasSync = (account, icloudKind = "") => setAliasSyncTarget({ account, icloudKind });
   const items = data?.items || [];
 
   return (
@@ -212,16 +213,16 @@ export default function SourcesPage({ refreshKey, onDataChange, onNavigate, addO
           return <article className={`source-card source-card-${accountMeta.id}`} key={account.id}>
             <header><ProviderMark provider={accountMeta.id} size={38} /><div><h2>{account.display_name || account.email.split("@")[0]}</h2><p>{account.email}<span className="provider-name">{accountMeta.name}</span></p></div><StatusBadge status={account.status}>{accountStatus[account.status]}</StatusBadge></header>
             {supportsOfficial ? <div className="source-quota"><div><span>官方基础地址</span><b>{account.official_used} <small>/ {account.official_limit}</small></b></div><div className="quota-track"><i style={{ width: `${Math.min(100, account.official_used / account.official_limit * 100)}%` }} /></div><small>剩余 {account.official_remaining} 个记录名额，实际以 Microsoft 官网限制为准</small></div> : <div className="source-provider-capability">{supportsPlus ? <WandSparkles size={18} /> : supportsImported ? <AtSign size={18} /> : <KeyRound size={18} />}<span><b>{accountMeta.capabilityTitle}</b><small>{accountMeta.capabilityDescription}</small></span></div>}
-            <dl className="source-stats"><div><dt>{supportsImported ? "邮箱别名 / 隐藏邮箱" : "官方别名"}</dt><dd>{supportsAliases ? account.official_aliases : "不支持"}</dd></div><div><dt>分裂地址</dt><dd>{supportsPlus ? account.split_count : "不支持"}</dd></div><div><dt>收件扫描</dt><dd>{relativeTime(account.last_inbox_scan_at)}</dd></div><div><dt>{supportsOfficial ? "别名同步" : supportsImported ? "本地登记" : accountMeta.connectionLabel}</dt><dd>{supportsOfficial ? relativeTime(account.last_synced_at) : supportsImported ? `${account.official_aliases || 0} 个可直接注册` : account.connection_connected ? "已连接" : "待连接"}</dd></div></dl>
+            {supportsImported ? <dl className="source-stats"><div><dt>邮箱别名</dt><dd>{account.icloud_mail_aliases || 0}</dd></div><div><dt>隐藏邮箱</dt><dd>{account.icloud_hide_my_emails || 0}</dd></div><div><dt>收件扫描</dt><dd>{relativeTime(account.last_inbox_scan_at)}</dd></div><div><dt>本地登记</dt><dd>{(account.icloud_mail_aliases || 0) + (account.icloud_hide_my_emails || 0)} 个可直接注册</dd></div></dl> : <dl className="source-stats"><div><dt>官方别名</dt><dd>{supportsAliases ? account.official_aliases : "不支持"}</dd></div><div><dt>分裂地址</dt><dd>{supportsPlus ? account.split_count : "不支持"}</dd></div><div><dt>收件扫描</dt><dd>{relativeTime(account.last_inbox_scan_at)}</dd></div><div><dt>{supportsOfficial ? "别名同步" : accountMeta.connectionLabel}</dt><dd>{supportsOfficial ? relativeTime(account.last_synced_at) : account.connection_connected ? "已连接" : "待连接"}</dd></div></dl>}
             {account.status === "action_required" && <div className="inline-alert warning"><AlertCircle size={15} /><span>{accountMeta.name} 连接需要更新</span><Button size="sm" onClick={() => setReconnecting(account)}>{accountMeta.reconnectLabel}</Button></div>}
             {account.limit_reason && <div className="inline-alert warning"><AlertCircle size={15} /><span>{account.limit_reason}</span></div>}
-            <footer>{supportsOfficial && <Button icon={AtSign} onClick={() => onNavigate("factory", { accountId: account.id, mode: "official" })}>官方别名</Button>}{supportsImported && <Button icon={AtSign} onClick={() => setAliasSyncAccount(account)}>导入邮箱别名</Button>}{supportsPlus && <Button icon={WandSparkles} onClick={() => onNavigate("factory", { accountId: account.id, mode: "split" })}>生成分裂</Button>}<div className="source-more">{supportsOfficial && <IconButton icon={ListPlus} label="手工登记官网别名" onClick={() => setAliasSyncAccount(account)} />}<IconButton icon={account.status === "connected" ? ShieldCheck : Unplug} label={`${accountMeta.reconnectLabel} ${accountMeta.name}`} onClick={() => setReconnecting(account)} /><IconButton icon={Trash2} label="移除源头邮箱" onClick={() => setRemoving(account)} /></div></footer>
+            <footer>{supportsOfficial && <Button icon={AtSign} onClick={() => onNavigate("factory", { accountId: account.id, mode: "official" })}>官方别名</Button>}{supportsImported && <Button icon={AtSign} onClick={() => openAliasSync(account, "mail_alias")}>邮箱别名</Button>}{supportsImported && <Button icon={ShieldCheck} onClick={() => openAliasSync(account, "hide_my_email")}>隐藏邮箱</Button>}{supportsPlus && <Button icon={WandSparkles} onClick={() => onNavigate("factory", { accountId: account.id, mode: "split" })}>生成分裂</Button>}<div className="source-more">{supportsOfficial && <IconButton icon={ListPlus} label="手工登记官网别名" onClick={() => openAliasSync(account)} />}<IconButton icon={account.status === "connected" ? ShieldCheck : Unplug} label={`${accountMeta.reconnectLabel} ${accountMeta.name}`} onClick={() => setReconnecting(account)} /><IconButton icon={Trash2} label="移除源头邮箱" onClick={() => setRemoving(account)} /></div></footer>
           </article>;
         }) : <div className="empty-source-panel"><EmptyState icon={Mail} title="添加第一个源头邮箱" description="支持 Microsoft Outlook、Gmail、Google Workspace 与 iCloud Mail。" action={<Button variant="primary" icon={Plus} onClick={() => setAddOpen(true)}>添加源头邮箱</Button>} /></div>}
       </section>
       <ConnectionModal open={addOpen} onClose={() => setAddOpen(false)} onConnected={connectionDone} />
       <ConnectionModal open={Boolean(reconnecting)} existingAccount={reconnecting} onClose={() => setReconnecting(null)} onConnected={connectionDone} />
-      <AliasSyncModal account={aliasSyncAccount} onClose={() => setAliasSyncAccount(null)} onSynced={connectionDone} />
+      <AliasSyncModal account={aliasSyncTarget?.account} icloudKind={aliasSyncTarget?.icloudKind} onClose={() => setAliasSyncTarget(null)} onSynced={connectionDone} />
       <ConfirmDialog open={Boolean(removing)} onClose={() => setRemoving(null)} onConfirm={remove} title="移除这个源头邮箱？" description={removing ? `${removing.email} 的登录凭据、官方别名记录（如有）、分裂地址和验证码都会从本系统删除。` : ""} confirmText="移除邮箱" danger />
     </div>
   );

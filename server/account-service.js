@@ -24,6 +24,8 @@ export function publicAccount(db, row) {
     SELECT
       SUM(CASE WHEN kind = 'primary' THEN 1 ELSE 0 END) AS primary_count,
       SUM(CASE WHEN kind = 'official' AND status = 'active' THEN 1 ELSE 0 END) AS official_count,
+      SUM(CASE WHEN kind = 'official' AND status = 'active' AND strategy = 'icloud_mail_alias' THEN 1 ELSE 0 END) AS icloud_mail_alias_count,
+      SUM(CASE WHEN kind = 'official' AND status = 'active' AND strategy = 'icloud_hide_my_email' THEN 1 ELSE 0 END) AS icloud_hide_my_email_count,
       SUM(CASE WHEN kind = 'split' AND status = 'active' THEN 1 ELSE 0 END) AS split_count,
       COUNT(*) AS address_count
     FROM addresses WHERE account_id = ?
@@ -43,6 +45,8 @@ export function publicAccount(db, row) {
     official_used: officialUsed,
     official_remaining: Math.max(0, row.official_limit - officialUsed),
     official_aliases: counts.official_count || 0,
+    icloud_mail_aliases: counts.icloud_mail_alias_count || 0,
+    icloud_hide_my_emails: counts.icloud_hide_my_email_count || 0,
     split_count: counts.split_count || 0,
     address_count: counts.address_count || 0,
     oauth_connected: oauthConnected,
@@ -56,7 +60,7 @@ export function publicAccount(db, row) {
   };
 }
 
-export function importIcloudAliases(db, account, values = []) {
+export function importIcloudAliases(db, account, values = [], { type = "" } = {}) {
   if (account?.provider !== "icloud") {
     throw Object.assign(new Error("这个源头邮箱不是 iCloud 账号"), { status: 409, code: "ICLOUD_ACCOUNT_REQUIRED" });
   }
@@ -70,6 +74,19 @@ export function importIcloudAliases(db, account, values = []) {
     .filter((address) => address !== account.email.toLowerCase());
   if (!aliases.length) {
     throw Object.assign(new Error("请至少填写一个 iCloud 别名"), { status: 400 });
+  }
+  if (!["", "mail_alias", "hide_my_email"].includes(type)) {
+    throw Object.assign(new Error("iCloud 地址类型无效"), { status: 400 });
+  }
+  const wrongType = aliases.find((address) => {
+    const isHiddenEmail = isIcloudPrivateRelay(address);
+    return (type === "mail_alias" && isHiddenEmail) || (type === "hide_my_email" && !isHiddenEmail);
+  });
+  if (wrongType) {
+    const message = type === "hide_my_email"
+      ? "隐藏邮箱必须是 @privaterelay.appleid.com 地址"
+      : "iCloud 邮箱别名必须是 @icloud.com、@me.com 或 @mac.com 地址";
+    throw Object.assign(new Error(`${message}：${wrongType}`), { status: 400 });
   }
   const duplicate = db.prepare(`
     SELECT source_accounts.email AS source_email
@@ -102,7 +119,7 @@ export function importIcloudAliases(db, account, values = []) {
         account.id,
         address,
         relay ? ICLOUD_HIDE_MY_EMAIL_STRATEGY : ICLOUD_MAIL_ALIAS_STRATEGY,
-        relay ? "iCloud 隐藏邮箱别名" : "iCloud 邮箱别名",
+        relay ? "iCloud 隐藏邮箱" : "iCloud 邮箱别名",
         now,
         now,
       );
@@ -111,7 +128,7 @@ export function importIcloudAliases(db, account, values = []) {
       db,
       account.id,
       "alias",
-      "导入 iCloud 别名",
+      type === "hide_my_email" ? "导入 iCloud 隐藏邮箱" : "导入 iCloud 邮箱别名",
       `本次导入 ${aliases.length} 个地址`,
       { count: aliases.length },
     );

@@ -323,12 +323,20 @@ function preferredBase(account) {
 }
 
 function baseOptionLabel(item) {
-  if (item.registration_state === "in_progress") return `${item.address}（注册进行中）`;
-  if (item.registration_state === "used") return `${item.address}（已用于注册）`;
-  if (item.registration_state === "likely_exhausted") return `${item.address}（疑似已占用）`;
-  if (item.registration_state === "warning") return `${item.address}（有占用冲突）`;
-  if (item.registration_success_count) return `${item.address}（已成功 ${item.registration_success_count}）`;
-  return item.address;
+  const type = item.strategy === "icloud_hide_my_email"
+    ? "隐藏邮箱"
+    : item.strategy === "icloud_mail_alias" ? "邮箱别名" : "";
+  const state = item.registration_state === "in_progress"
+    ? "注册进行中"
+    : item.registration_state === "used"
+      ? "已用于注册"
+      : item.registration_state === "likely_exhausted"
+        ? "疑似已占用"
+        : item.registration_state === "warning"
+          ? "有占用冲突"
+          : item.registration_success_count ? `已成功 ${item.registration_success_count}` : "";
+  const details = [type, state].filter(Boolean).join(" · ");
+  return details ? `${item.address}（${details}）` : item.address;
 }
 
 function jobStatusLabel(job) {
@@ -1582,11 +1590,11 @@ export default function RegistrationPage({ refreshKey }) {
       {view === "tasks" && <>
         <section className="registration-control-grid">
           <article className="panel registration-launch-panel">
-            <header className="panel-header"><div><h2>创建邮箱注册任务</h2><p>{isDirectRegistration ? "直接使用已导入的 iCloud 邮箱别名或隐藏邮箱，不生成 +tag 分裂地址" : "自动生成独立分裂邮箱，并使用全新随机指纹环境"}</p></div><Fingerprint size={20} /></header>
+            <header className="panel-header"><div><h2>创建邮箱注册任务</h2><p>{isDirectRegistration ? "可分别选择 iCloud 邮箱别名或隐藏邮箱；两者均直接注册，不生成 +tag 分裂地址" : "自动生成独立分裂邮箱，并使用全新随机指纹环境"}</p></div><Fingerprint size={20} /></header>
             <div className="registration-launch-form">
               <div className="form-grid two">
                 <FormField label="源头邮箱"><select value={form.accountId} onChange={(event) => changeAccount(event.target.value)}><option value="">请选择</option>{options.accounts.map((item) => <option key={item.id} value={item.id}>{item.email}</option>)}</select></FormField>
-                <FormField label={isDirectRegistration ? "iCloud 邮箱别名 / 隐藏邮箱" : "基础地址"}><select value={form.baseAddressId} onChange={(event) => setForm({ ...form, baseAddressId: event.target.value })}><option value="">请选择</option>{selectedAccount?.bases.map((item) => <option key={item.id} value={item.id} disabled={Boolean(item.registration_disabled)}>{baseOptionLabel(item)}</option>)}</select></FormField>
+                <FormField label={isDirectRegistration ? "iCloud 地址类型" : "基础地址"}><select value={form.baseAddressId} onChange={(event) => setForm({ ...form, baseAddressId: event.target.value })}><option value="">请选择</option>{selectedAccount?.bases.map((item) => <option key={item.id} value={item.id} disabled={Boolean(item.registration_disabled)}>{baseOptionLabel(item)}</option>)}</select></FormField>
               </div>
               {selectedBase?.registration_hint && <div className="inline-alert warning"><AlertTriangle size={16} /><span>{selectedBase.registration_hint}</span></div>}
               <div className="form-grid two">
