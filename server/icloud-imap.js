@@ -140,7 +140,7 @@ export class ICloudImapClient {
   }
 
   createClient(username, password) {
-    return this.imapFactory({
+    const client = this.imapFactory({
       host: ICLOUD_IMAP_HOST,
       port: ICLOUD_IMAP_PORT,
       secure: true,
@@ -156,6 +156,10 @@ export class ICloudImapClient {
         servername: ICLOUD_IMAP_HOST,
       },
     });
+    // ImapFlow also reports socket failures through EventEmitter. Keep an
+    // error listener attached so a disconnected mailbox cannot terminate Node.
+    client?.on?.("error", () => {});
+    return client;
   }
 
   async closeClient(client) {

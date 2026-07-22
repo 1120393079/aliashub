@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -55,6 +56,15 @@ test("requires an explicit server encryption key before accepting iCloud credent
     (error) => error.status === 503 && error.code === "ICLOUD_ENCRYPTION_KEY_REQUIRED",
   );
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM source_accounts").get().count, 0);
+});
+
+test("keeps an IMAP error listener attached so socket errors cannot terminate Node", (t) => {
+  const { db } = context(t);
+  const rawClient = new EventEmitter();
+  const client = new ICloudImapClient({ db, encryptionKey: "test-encryption-key", imapFactory: () => rawClient });
+  assert.equal(client.createClient("source", APP_PASSWORD), rawClient);
+  assert.equal(rawClient.listenerCount("error"), 1);
+  assert.doesNotThrow(() => rawClient.emit("error", new Error("socket closed")));
 });
 
 test("connects iCloud with fixed TLS settings and stores only encrypted credentials", async (t) => {
