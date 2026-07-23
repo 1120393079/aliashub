@@ -466,11 +466,12 @@ export class MicrosoftRegistrationRunnerService {
     read(child.stderr, "error");
   }
 
-  driveInteractivePrompts(child, config) {
+  driveInteractivePrompts(child, config, runId) {
     if (!child?.stdout?.on || !child?.stdin?.write) return;
     const answered = new Set();
     const decoder = new StringDecoder("utf8");
     let pending = "";
+    let terminalFailure = false;
     const answer = (name, value) => {
       if (answered.has(name)) return;
       answered.add(name);
@@ -483,7 +484,14 @@ export class MicrosoftRegistrationRunnerService {
       if (/请输入注册最大数量\s*:/.test(pending)) answer("quantity", config.quantity);
       if (/请选择国家\s*:/.test(pending)) answer("country", "");
       if (/请选择.*邮箱后缀\s*:/.test(pending)) answer("domain", "");
-      if (/程序执行结果汇总/.test(pending)) answer("completion", "");
+      if (/按压验证失败|打码平台\s*打码失败|重试次数达到上限/.test(pending)) terminalFailure = true;
+      if (/程序执行结果汇总/.test(pending) && /程序运行时长/.test(pending)) {
+        this.scheduleTerminalFinish(
+          runId,
+          terminalFailure ? "failed" : "completed",
+          terminalFailure ? "注册机打码失败，重试次数达到上限" : "注册机已完成",
+        );
+      }
     };
     child.stdout.on("data", processChunk);
     child.stdout.once("end", () => processChunk(decoder.end()));
@@ -570,6 +578,7 @@ export class MicrosoftRegistrationRunnerService {
     `).run(status, status, message, exitCode, timestamp, timestamp, runId);
     const processInfo = this.processes.get(runId);
     this.processes.delete(runId);
+    if (processInfo?.terminalTimer) clearTimeout(processInfo.terminalTimer);
     this.killChild(processInfo?.registrar);
     this.killChild(processInfo?.auth);
     if (processInfo?.runDir) {
@@ -588,6 +597,19 @@ export class MicrosoftRegistrationRunnerService {
     } catch {
       try { child.kill("SIGTERM"); } catch { /* process already stopped */ }
     }
+  }
+
+  scheduleTerminalFinish(runId, status, message) {
+    const processInfo = this.processes.get(runId);
+    if (!processInfo?.registrar || processInfo.terminalTimer) return;
+    const timer = setTimeout(() => {
+      const active = this.processes.get(runId);
+      if (active?.terminalTimer === timer) active.terminalTimer = null;
+      const row = this.run(runId);
+      if (activeStatus(row.status)) this.finish(runId, status, { message });
+    }, 2_000);
+    timer.unref?.();
+    processInfo.terminalTimer = timer;
   }
 
   watchChild(runId, child, kind, secrets) {
@@ -640,7 +662,7 @@ export class MicrosoftRegistrationRunnerService {
       const environment = this.runnerEnvironment(runDir);
       this.appendLog(runId, "system", "正在启动服务器授权服务", "info", secrets);
       const auth = this.spawnWindowsProcess(this.authExecutable, runDir, environment);
-      this.processes.set(runId, { runDir, auth, registrar: null, secrets });
+      this.processes.set(runId, { runDir, auth, registrar: null, secrets, terminalTimer: null });
       this.watchChild(runId, auth, "auth", secrets);
       this.updateRun(runId, { auth_pid: Number(auth.pid) || null });
       const ready = await this.waitForPort(AUTH_PORT, 20_000);
@@ -652,7 +674,7 @@ export class MicrosoftRegistrationRunnerService {
       const info = this.processes.get(runId);
       if (info) info.registrar = registrar;
       this.watchChild(runId, registrar, "registrar", secrets);
-      this.driveInteractivePrompts(registrar, config);
+      this.driveInteractivePrompts(registrar, config, runId);
       this.updateRun(runId, {
         status: "running",
         phase: "registrar",

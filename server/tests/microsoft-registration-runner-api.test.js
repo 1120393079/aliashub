@@ -83,6 +83,9 @@ test("server Microsoft registrar stores config encrypted, starts both Wine proce
   assert.equal(stored.secret_payload_encrypted.includes(captchaKey), false);
   assert.equal(stored.secret_payload_encrypted.includes("runner-password"), false);
 
+  const terminalFinishes = [];
+  runner.scheduleTerminalFinish = (...args) => terminalFinishes.push(args);
+
   const started = await runner.start("https://aliashub.test/alias-hub");
   assert.equal(started.status, "running");
   assert.equal(calls.length, 2);
@@ -93,13 +96,13 @@ test("server Microsoft registrar stores config encrypted, starts both Wine proce
   children[1].stdout.emit("data", prompts.subarray(0, 5));
   children[1].stdout.emit("data", prompts.subarray(5));
   assert.equal(children[1].stdin.text, "1\n3\n\n\n");
-  children[1].stdout.emit("data", Buffer.from("程序执行结果汇总\n"));
-  assert.equal(children[1].stdin.text, "1\n3\n\n\n\n");
+  children[1].stdout.emit("data", Buffer.from("重试次数达到上限，停止注册\n程序执行结果汇总\n程序运行时长：33 秒\n"));
+  assert.deepEqual(terminalFinishes, [[started.id, "failed", "注册机打码失败，重试次数达到上限"]]);
   const runDir = calls[0].options.cwd;
   const mailToml = fs.readFileSync(path.join(runDir, "mail.toml"), "utf8");
   assert.match(mailToml, /server_upload_url = "https:\/\/aliashub\.test\/alias-hub\/api\/integrations\/microsoft-register\/v1\/runner\//);
   assert.equal(fs.readFileSync(path.join(runDir, "proxyList.txt"), "utf8").trim(), proxy);
-  children[0].stdout.emit("data", Buffer.from(`captcha=${captchaKey}\nlogin:runner-inline-user password:runner-inline-password\nchallengeDetails: {"continuationToken":"runner-continuation-token","uuid":"runner-challenge-uuid"}\n`));
+  children[0].stdout.emit("data", Buffer.from(`captcha=${captchaKey}\nlogin:runner-inline-user password:runner-inline-password\n"challengeDetails":{"continuationToken":"runner-continuation-token","uuid":"runner-challenge-uuid"}\n`));
   const logs = runner.logs({ runId: started.id });
   assert.equal(JSON.stringify(logs).includes(captchaKey), false);
   assert.equal(JSON.stringify(logs).includes("runner-inline-user"), false);
