@@ -112,6 +112,132 @@ function stripAnsi(value) {
   return String(value || "").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replaceAll("\r", "");
 }
 
+const SENSITIVE_LOG_PAYLOAD_START = /(^|[,{[\s])"?(?:challenge(?:[_\s-]?(?:details|metadata|url|type))?|human[_\s-]?captcha|(?:request|response)(?:[_\s-]?(?:body|payload|data|details|metadata))?|payload|continuation[_\s-]?token|(?:access|refresh|id)?[_\s-]?token|session(?:[_\s-]?id)?|uuid|vid|captcha(?:[_\s-]?(?:token|data|response))?)"?\s*[:=]\s*/i;
+
+function sensitivePayloadStart(text, offset = 0) {
+  const match = SENSITIVE_LOG_PAYLOAD_START.exec(text.slice(offset));
+  if (!match) return null;
+  const index = offset + match.index;
+  return {
+    index,
+    valueStart: index + match[0].length,
+  };
+}
+
+function structuredPayloadStart(text, offset = 0) {
+  const source = text.slice(offset);
+  const match = /^\s*\{/.exec(source) || /^\s*\[(?=\s*(?:[\[{"\d-]|\]))/.exec(source);
+  if (!match) return null;
+  const index = offset + match[0].length - 1;
+  return { index, valueStart: index };
+}
+
+function safeLogText(value, secrets) {
+  const text = redact(stripAnsi(value), secrets).trim();
+  return /^[\[\]{}(),;:\s]*$/.test(text) ? "" : text;
+}
+
+function clearlySafeStatus(value) {
+  const text = stripAnsi(value).trim();
+  return /^(?:应用启动成功|当前版本|请输入|请选择|正在|授权服务|程序(?:执行结果汇总|运行时长)|注册(?:成功|失败|机)|重试次数达到上限|按压验证失败|打码平台|已(?:完成|停止|接收)|(?:\[auth\]\s*)?Listening(?:\s+and\s+serving)?\b|Error\b|错误|失败|成功)/i.test(text);
+}
+
+function payloadState(text, valueStart) {
+  let index = valueStart;
+  while (index < text.length && /\s/.test(text[index])) index += 1;
+  const initial = text[index];
+  if (initial === "{" || initial === "[") {
+    return { kind: "structured", depth: 0, quote: "", escaped: false };
+  }
+  if (initial === '"' || initial === "'") {
+    return { kind: "quoted", quote: initial, escaped: false };
+  }
+  if (initial) return { kind: "opaque" };
+  return { kind: "awaiting" };
+}
+
+function consumePayload(text, offset, state) {
+  let index = offset;
+  if (state.kind === "awaiting") {
+    while (index < text.length && /\s/.test(text[index])) index += 1;
+    if (index === text.length) return null;
+    Object.assign(state, payloadState(text, index));
+  }
+  if (state.kind === "opaque") return null;
+
+  for (; index < text.length; index += 1) {
+    const character = text[index];
+    if (state.escaped) {
+      state.escaped = false;
+      continue;
+    }
+    if (character === "\\") {
+      state.escaped = true;
+      continue;
+    }
+    if (state.quote) {
+      if (character === state.quote) {
+        state.quote = "";
+        if (state.kind === "quoted") return index + 1;
+      }
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      state.quote = character;
+      continue;
+    }
+    if (state.kind === "structured") {
+      if (character === "{" || character === "[") state.depth += 1;
+      if (character === "}" || character === "]") {
+        state.depth -= 1;
+        if (state.depth === 0) return index + 1;
+      }
+    }
+  }
+  return null;
+}
+
+function createPayloadLogFilter(secrets) {
+  let state = null;
+  return {
+    filter(value) {
+      const text = stripAnsi(value);
+      const output = [];
+      let offset = 0;
+      while (offset < text.length) {
+        if (state) {
+          if (state.kind === "opaque" && clearlySafeStatus(text.slice(offset))) state = null;
+          else {
+            const next = consumePayload(text, offset, state);
+            if (next === null) return output.join(" ").trim();
+            state = null;
+            offset = next;
+            continue;
+          }
+        }
+
+        const sensitive = sensitivePayloadStart(text, offset);
+        const structured = structuredPayloadStart(text, offset);
+        const start = !sensitive || (structured && structured.index < sensitive.index) ? structured : sensitive;
+        if (!start) {
+          const safe = safeLogText(text.slice(offset), secrets);
+          if (safe) output.push(safe);
+          break;
+        }
+        const prefix = safeLogText(text.slice(offset, start.index), secrets);
+        if (prefix) output.push(prefix);
+        output.push("[敏感挑战/请求载荷已隐藏]");
+        state = payloadState(text, start.valueStart);
+        const next = consumePayload(text, start.valueStart, state);
+        if (next === null) return output.join(" ").trim();
+        state = null;
+        offset = next;
+      }
+      return output.join(" ").trim();
+    },
+  };
+}
+
 function callbackUrl(publicBaseUrl, runId, token) {
   const root = String(publicBaseUrl || "").replace(/\/+$/, "");
   return `${root}/api/integrations/microsoft-register/v1/runner/${runId}/${token}`;
@@ -450,16 +576,21 @@ export class MicrosoftRegistrationRunnerService {
     const read = (source, level) => {
       if (!source?.on) return;
       const decoder = new StringDecoder("utf8");
+      const filter = createPayloadLogFilter(secrets);
       let pending = "";
       source.on("data", (chunk) => {
         pending += decoder.write(chunk);
-        const lines = pending.split(/\r?\n/);
+        const lines = pending.split(/\r\n|[\r\n]/);
         pending = lines.pop() || "";
-        lines.forEach((line) => this.appendLog(runId, stream, line, level, secrets));
+        lines.forEach((line) => {
+          const safe = filter.filter(line);
+          if (safe) this.appendLog(runId, stream, safe, level, secrets);
+        });
       });
       source.on("end", () => {
         pending += decoder.end();
-        this.appendLog(runId, stream, pending, level, secrets);
+        const safe = filter.filter(pending);
+        if (safe) this.appendLog(runId, stream, safe, level, secrets);
       });
     };
     read(child.stdout, "info");

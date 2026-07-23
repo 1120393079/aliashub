@@ -102,13 +102,24 @@ test("server Microsoft registrar stores config encrypted, starts both Wine proce
   const mailToml = fs.readFileSync(path.join(runDir, "mail.toml"), "utf8");
   assert.match(mailToml, /server_upload_url = "https:\/\/aliashub\.test\/alias-hub\/api\/integrations\/microsoft-register\/v1\/runner\//);
   assert.equal(fs.readFileSync(path.join(runDir, "proxyList.txt"), "utf8").trim(), proxy);
-  children[0].stdout.emit("data", Buffer.from(`captcha=${captchaKey}\nlogin:runner-inline-user password:runner-inline-password\n"challengeDetails":{"continuationToken":"runner-continuation-token","uuid":"runner-challenge-uuid"}\n`));
+  const continuationPrefix = "runner-continuation-token-prefix";
+  const continuationSuffix = "runner-continuation-token-suffix";
+  const requestPrefix = "runner-request-payload-prefix";
+  const requestSuffix = "runner-request-payload-suffix";
+  children[0].stdout.emit("data", Buffer.from(`captcha=${captchaKey}\nlogin:runner-inline-user password:runner-inline-password\n\x1b[?25l{"challengeDetails":{"challengeType":"HumanCaptcha","continuationToken":"${continuationPrefix}\n`));
+  children[0].stdout.emit("data", Buffer.from(`${continuationSuffix}","uuid":"runner-challenge-uuid","requestPayload":{"body":"${requestPrefix}\n${requestSuffix}"}}}\n请求状态: requestPayload: {"body":"${requestPrefix}\n${requestSuffix}"}\n[auth] Listening and serving HTTP on :8081\n授权服务已就绪\n`));
   const logs = runner.logs({ runId: started.id });
   assert.equal(JSON.stringify(logs).includes(captchaKey), false);
   assert.equal(JSON.stringify(logs).includes("runner-inline-user"), false);
   assert.equal(JSON.stringify(logs).includes("runner-inline-password"), false);
-  assert.equal(JSON.stringify(logs).includes("runner-continuation-token"), false);
+  assert.equal(JSON.stringify(logs).includes(continuationPrefix), false);
+  assert.equal(JSON.stringify(logs).includes(continuationSuffix), false);
   assert.equal(JSON.stringify(logs).includes("runner-challenge-uuid"), false);
+  assert.equal(JSON.stringify(logs).includes(requestPrefix), false);
+  assert.equal(JSON.stringify(logs).includes(requestSuffix), false);
+  assert.equal(logs.items.some((item) => item.message.includes("敏感挑战/请求载荷已隐藏")), true);
+  assert.equal(logs.items.some((item) => item.message.includes("Listening and serving HTTP on :8081")), true);
+  assert.equal(logs.items.some((item) => item.message.includes("授权服务已就绪")), true);
 
   const callback = new URL(mailToml.match(/server_upload_url = "([^"]+)"/)[1]);
   const parts = callback.pathname.split("/");
