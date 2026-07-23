@@ -108,7 +108,8 @@ function redact(value, secrets = []) {
     .replace(/((?:"?)(?:captcha|px|api|access|refresh|auth|password|passwd|pwd|token|continuationToken|session(?:[_-]?id)?|uuid|vid|login|username|developer)(?:"?)\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|[^\s,;}\]]+)/gi, "$1[已隐藏]")
     .replace(/([?&](?:access_token|auth(?:entication)?|continuationToken|session(?:[_-]?id)?|token)=)[^&#\s]+/gi, "$1[已隐藏]")
     .replace(/((?:captcha|px|api|access|refresh|auth)[^\s=:]{0,40}[=:]\s*)[^\s,;]+/gi, "$1[已隐藏]")
-    .replace(/\b[^\s:@]{1,100}:[^\s@]{1,100}@[^\s/:]+:\d{1,5}\b/g, "[代理已隐藏]");
+    .replace(/\b[^\s:@]{1,100}:[^\s@]{1,100}@[^\s/:]+:\d{1,5}\b/g, "[代理已隐藏]")
+    .replace(/\b[A-Za-z0-9_-]{24,}\b/g, "[已隐藏]");
   return output.slice(0, 4_000);
 }
 
@@ -592,10 +593,10 @@ export class MicrosoftRegistrationRunnerService {
   }
 
   captureOutput(child, runId, stream, secrets) {
+    const filter = createPayloadLogFilter(secrets);
     const read = (source, level) => {
       if (!source?.on) return;
       const decoder = new StringDecoder("utf8");
-      const filter = createPayloadLogFilter(secrets);
       let pending = "";
       source.on("data", (chunk) => {
         pending += decoder.write(chunk);

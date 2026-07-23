@@ -109,7 +109,8 @@ test("server Microsoft registrar stores config encrypted, starts both Wine proce
   const requestPrefix = "runner-request-payload-prefix";
   const requestSuffix = "runner-request-payload-suffix";
   children[0].stdout.emit("data", Buffer.from(`captcha=${captchaKey}\nlogin:runner-inline-user password:runner-inline-password\n\x1b[?25l{"challengeDetails":{"challengeType":"HumanCaptcha","continuationToken":"${continuationPrefix}\n`));
-  children[0].stdout.emit("data", Buffer.from(`${continuationSuffix}","uuid":"runner-challenge-uuid","requestPayload":{"body":"${requestPrefix}\n${requestSuffix}"}}}\n请求状态: requestPayload: {"body":"${requestPrefix}\n${requestSuffix}"}\n[auth] Listening and serving HTTP on :8081\n授权服务已就绪\n`));
+  children[0].stderr.emit("data", Buffer.from(`${continuationSuffix}","uuid":"runner-challenge-uuid","requestPayload":{"body":"${requestPrefix}\n${requestSuffix}"}}}\n请求状态: requestPayload: {"body":"${requestPrefix}\n${requestSuffix}"}\n`));
+  children[0].stdout.emit("data", Buffer.from("[auth] Listening and serving HTTP on :8081\n授权服务已就绪\n"));
   const logs = runner.logs({ runId: started.id });
   assert.equal(JSON.stringify(logs).includes(captchaKey), false);
   assert.equal(JSON.stringify(logs).includes("runner-inline-user"), false);
