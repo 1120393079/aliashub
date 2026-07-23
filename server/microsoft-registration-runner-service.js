@@ -100,6 +100,9 @@ function redact(value, secrets = []) {
     if (text.length >= 3) output = output.replaceAll(text, "[已隐藏]");
   }
   output = output
+    .replace(/((?:"?)(?:challenge(?:Details|Metadata|Url)?)(?:"?)\s*[:=]\s*)[^\r\n]*/gi, "$1[已隐藏]")
+    .replace(/((?:"?)(?:captcha|px|api|access|refresh|auth|password|passwd|pwd|token|continuationToken|session(?:[_-]?id)?|uuid|vid|login|username|developer)(?:"?)\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|[^\s,;}\]]+)/gi, "$1[已隐藏]")
+    .replace(/([?&](?:access_token|auth(?:entication)?|continuationToken|session(?:[_-]?id)?|token)=)[^&#\s]+/gi, "$1[已隐藏]")
     .replace(/((?:captcha|px|api|access|refresh|auth)[^\s=:]{0,40}[=:]\s*)[^\s,;]+/gi, "$1[已隐藏]")
     .replace(/\b[^\s:@]{1,100}:[^\s@]{1,100}@[^\s/:]+:\d{1,5}\b/g, "[代理已隐藏]");
   return output.slice(0, 4_000);
@@ -480,6 +483,7 @@ export class MicrosoftRegistrationRunnerService {
       if (/请输入注册最大数量\s*:/.test(pending)) answer("quantity", config.quantity);
       if (/请选择国家\s*:/.test(pending)) answer("country", "");
       if (/请选择.*邮箱后缀\s*:/.test(pending)) answer("domain", "");
+      if (/程序执行结果汇总/.test(pending)) answer("completion", "");
     };
     child.stdout.on("data", processChunk);
     child.stdout.once("end", () => processChunk(decoder.end()));

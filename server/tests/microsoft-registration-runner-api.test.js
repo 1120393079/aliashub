@@ -93,13 +93,19 @@ test("server Microsoft registrar stores config encrypted, starts both Wine proce
   children[1].stdout.emit("data", prompts.subarray(0, 5));
   children[1].stdout.emit("data", prompts.subarray(5));
   assert.equal(children[1].stdin.text, "1\n3\n\n\n");
+  children[1].stdout.emit("data", Buffer.from("程序执行结果汇总\n"));
+  assert.equal(children[1].stdin.text, "1\n3\n\n\n\n");
   const runDir = calls[0].options.cwd;
   const mailToml = fs.readFileSync(path.join(runDir, "mail.toml"), "utf8");
   assert.match(mailToml, /server_upload_url = "https:\/\/aliashub\.test\/alias-hub\/api\/integrations\/microsoft-register\/v1\/runner\//);
   assert.equal(fs.readFileSync(path.join(runDir, "proxyList.txt"), "utf8").trim(), proxy);
-  children[0].stdout.emit("data", Buffer.from(`captcha=${captchaKey}\n`));
+  children[0].stdout.emit("data", Buffer.from(`captcha=${captchaKey}\nlogin:runner-inline-user password:runner-inline-password\nchallengeDetails: {"continuationToken":"runner-continuation-token","uuid":"runner-challenge-uuid"}\n`));
   const logs = runner.logs({ runId: started.id });
   assert.equal(JSON.stringify(logs).includes(captchaKey), false);
+  assert.equal(JSON.stringify(logs).includes("runner-inline-user"), false);
+  assert.equal(JSON.stringify(logs).includes("runner-inline-password"), false);
+  assert.equal(JSON.stringify(logs).includes("runner-continuation-token"), false);
+  assert.equal(JSON.stringify(logs).includes("runner-challenge-uuid"), false);
 
   const callback = new URL(mailToml.match(/server_upload_url = "([^"]+)"/)[1]);
   const parts = callback.pathname.split("/");
