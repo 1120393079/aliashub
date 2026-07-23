@@ -144,33 +144,31 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
   };
 
   if (!config || !accounts) return <div className="page-stack"><LoadingBlock rows={9} /></div>;
+  const configLine = provisioned ? `server_upload_url = "${provisioned.ingest_url}"` : "";
 
   return <div className="page-stack microsoft-registration-page">
-    <section className="metric-grid">
-      <article className="metric-card"><span className="metric-icon blue"><MailPlus size={19} /></span><div><span>回传注册邮箱</span><strong>{config.accounts}</strong><small>已接收的唯一邮箱</small></div></article>
-      <article className="metric-card"><span className="metric-icon green"><CheckCircle2 size={19} /></span><div><span>注册成功</span><strong>{config.successful_accounts}</strong><small>来自 Go 注册机结果</small></div></article>
-      <article className="metric-card"><span className="metric-icon coral"><AlertTriangle size={19} /></span><div><span>注册失败</span><strong>{config.failed_accounts}</strong><small>保留失败记录便于重试</small></div></article>
-      <article className="metric-card"><span className="metric-icon amber"><Server size={19} /></span><div><span>最近回传</span><strong>{config.last_received_at ? formatDate(config.last_received_at, false) : "-"}</strong><small>{config.imports} 次原始回传已加密保存</small></div></article>
-    </section>
-
     <section className="panel microsoft-registration-webhook">
-      <header className="panel-header"><div><h2>Go 微软注册机接入</h2><p>Windows 注册机通过 server_upload_url 自动回传注册结果、密码和 OAuth 数据</p></div><StatusBadge status={config.webhook_configured ? "active" : "inactive"}>{config.webhook_configured ? "回传已配置" : "等待配置"}</StatusBadge></header>
+      <header className="panel-header"><div><h2>微软邮箱注册</h2><p>按下面 3 步操作即可；注册结果会自动回到本页。</p></div><StatusBadge status={config.webhook_configured ? "active" : "inactive"}>{provisioned ? "配置已生成" : config.webhook_configured ? "已设置" : "未设置"}</StatusBadge></header>
       {!config.encryption_ready && <div className="inline-alert error"><AlertTriangle size={16} /><span>服务端尚未配置 DATA_ENCRYPTION_KEY，不能接收并加密保存注册凭据。</span></div>}
       <div className="microsoft-registration-webhook-body">
-        {provisioned ? <div className="microsoft-registration-provisioned">
-          <div className="inline-alert success"><ShieldCheck size={16} /><span>回传地址只在本次显示；复制后填写到 Windows 注册机目录的 <code>mail.toml</code>。</span></div>
-          <FormField label="server_upload_url"><div className="copy-input"><input readOnly value={provisioned.ingest_url} /><Button icon={Copy} onClick={() => copy(provisioned.ingest_url, "回传地址已复制")}>复制</Button></div></FormField>
-          <FormField label="mail.toml 接入片段"><div className="copy-input"><textarea readOnly value={provisioned.config_snippet} rows={7} /><Button icon={Copy} onClick={() => copy(provisioned.config_snippet, "配置片段已复制")}>复制</Button></div></FormField>
-        </div> : <div className="microsoft-registration-setup-copy">
-          <div><b>1. 在 Windows 启动 go授权服务-v1.0.5.exe 与 go-ms-v9.2.8.exe。</b><small>原程序的 <code>auth_service_url</code> 保持本地 <code>http://127.0.0.1:8081/api/scope</code>。</small></div>
-          <div><b>2. 生成一次回传地址，复制到 <code>mail.toml</code> 的 <code>server_upload_url</code>。</b><small>注册完成后，AliasHub 会自动接收并加密归档账号结果。</small></div>
-          <div><b>3. 在本页查看记录，需要时一键加入“源头邮箱”继续 OAuth 与收件管理。</b><small>网页不直接运行 Windows EXE；注册任务仍由 Windows 端程序执行。</small></div>
-        </div>}
-        <div className="microsoft-registration-webhook-actions">
-          <Button icon={Download} onClick={downloadTool}>下载 Windows 注册机</Button>
-          <Button variant="primary" icon={config.webhook_configured ? RotateCw : KeyRound} loading={rotating} disabled={!config.encryption_ready} onClick={rotateWebhook}>{config.webhook_configured ? "重新生成回传地址" : "生成回传地址"}</Button>
+        <div className="microsoft-registration-step-grid">
+          <article className="microsoft-registration-step is-ready"><span>1</span><div><b>下载并解压</b><small>下载后解压到 Windows 任意文件夹。</small><Button icon={Download} onClick={downloadTool}>下载注册机</Button></div></article>
+          <article className={`microsoft-registration-step ${provisioned ? "is-done" : "is-ready"}`}><span>2</span><div><b>{provisioned ? "配置已生成" : config.webhook_configured ? "重新生成配置" : "生成配置"}</b><small>{provisioned ? "复制下面的一行配置即可。" : config.webhook_configured ? "需要新配置时点击；旧配置会自动失效。" : "点击一次，系统会生成需要填入的配置。"}</small><Button variant="primary" icon={config.webhook_configured ? RotateCw : KeyRound} loading={rotating} disabled={!config.encryption_ready} onClick={rotateWebhook}>{config.webhook_configured ? "重新生成配置" : "生成配置"}</Button></div></article>
+          <article className={`microsoft-registration-step ${provisioned ? "is-ready" : "is-waiting"}`}><span>3</span><div><b>双击开始注册</b><small>先双击 <code>go授权服务</code>，再双击 <code>go-ms</code>。</small></div></article>
         </div>
+        {provisioned ? <div className="microsoft-registration-config-ready">
+          <header><span><ShieldCheck size={19} /></span><div><b>现在只需要复制一行</b><small>打开解压后的 <code>mail.toml</code>，找到 <code>server_upload_url = ""</code>，整行替换后保存。</small></div></header>
+          <FormField label="第 2 步：一键复制配置"><div className="copy-input"><input readOnly value={configLine} /><Button variant="primary" icon={Copy} onClick={() => copy(configLine, "配置已复制，现在粘贴到 mail.toml")}>复制配置</Button></div></FormField>
+          <div className="microsoft-registration-launch-note"><CheckCircle2 size={16} /><span>保存后：先启动 <b>go授权服务-v1.0.5.exe</b>，再启动 <b>go-ms-v9.2.8.exe</b>。成功账号会自动显示在下方。</span></div>
+        </div> : <div className="microsoft-registration-next-hint"><KeyRound size={18} /><span>{config.webhook_configured ? "需要再次查看配置时，点击第 2 步“重新生成配置”；旧配置会自动失效。" : "先完成第 1 步，再点击“生成配置”；不需要手动填写网站地址。"}</span></div>}
       </div>
+    </section>
+
+    <section className="metric-grid">
+      <article className="metric-card"><span className="metric-icon blue"><MailPlus size={19} /></span><div><span>回传注册邮箱</span><strong>{config.accounts}</strong><small>已接收的唯一邮箱</small></div></article>
+      <article className="metric-card"><span className="metric-icon green"><CheckCircle2 size={19} /></span><div><span>注册成功</span><strong>{config.successful_accounts}</strong><small>来自注册机结果</small></div></article>
+      <article className="metric-card"><span className="metric-icon coral"><AlertTriangle size={19} /></span><div><span>注册失败</span><strong>{config.failed_accounts}</strong><small>保留失败记录便于重试</small></div></article>
+      <article className="metric-card"><span className="metric-icon amber"><Server size={19} /></span><div><span>最近回传</span><strong>{config.last_received_at ? formatDate(config.last_received_at, false) : "-"}</strong><small>{config.imports} 次原始回传已加密保存</small></div></article>
     </section>
 
     <section className="table-panel microsoft-registration-records">

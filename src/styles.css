@@ -182,6 +182,28 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .microsoft-registration-setup-copy small { color: var(--text-soft); font-size: 10px; line-height: 1.45; }
 .microsoft-registration-setup-copy code, .microsoft-registration-provisioned code { color: var(--green-dark); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 0.94em; }
 .microsoft-registration-webhook-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.microsoft-registration-step-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.microsoft-registration-step { display: grid; grid-template-columns: 30px minmax(0, 1fr); align-items: start; gap: 9px; min-height: 142px; padding: 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-2); }
+.microsoft-registration-step > span { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; background: var(--surface-3); color: var(--text-soft); font-size: 12px; font-weight: 800; }
+.microsoft-registration-step > div { display: grid; align-content: start; gap: 6px; min-width: 0; }
+.microsoft-registration-step b { color: var(--text); font-size: 11px; }
+.microsoft-registration-step small { min-height: 31px; color: var(--text-soft); font-size: 9px; line-height: 1.45; }
+.microsoft-registration-step code, .microsoft-registration-config-ready code { color: var(--green-dark); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 0.94em; }
+.microsoft-registration-step .button { justify-self: start; margin-top: 2px; }
+.microsoft-registration-step.is-ready { border-color: color-mix(in srgb, var(--green) 40%, var(--line)); background: color-mix(in srgb, var(--green) 6%, var(--surface-2)); }
+.microsoft-registration-step.is-ready > span { background: var(--green); color: #fff; }
+.microsoft-registration-step.is-done { border-color: color-mix(in srgb, var(--green) 46%, var(--line)); background: var(--green-soft); }
+.microsoft-registration-step.is-done > span { background: var(--green-dark); color: #fff; }
+.microsoft-registration-step.is-waiting { opacity: 0.72; }
+.microsoft-registration-config-ready { display: grid; gap: 12px; padding: 13px; border: 1px solid color-mix(in srgb, var(--green) 35%, var(--line)); border-radius: 7px; background: var(--green-soft); }
+.microsoft-registration-config-ready > header { display: grid; grid-template-columns: 30px minmax(0, 1fr); align-items: start; gap: 9px; }
+.microsoft-registration-config-ready > header > span { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; background: var(--green); color: #fff; }
+.microsoft-registration-config-ready > header > div { display: grid; gap: 3px; }
+.microsoft-registration-config-ready b { color: var(--green-dark); font-size: 11px; }
+.microsoft-registration-config-ready small { color: var(--text-soft); font-size: 10px; line-height: 1.45; }
+.microsoft-registration-launch-note, .microsoft-registration-next-hint { display: flex; align-items: flex-start; gap: 8px; padding: 10px 11px; border-radius: 6px; background: color-mix(in srgb, var(--surface) 72%, transparent); color: var(--text-soft); font-size: 10px; line-height: 1.5; }
+.microsoft-registration-launch-note svg, .microsoft-registration-next-hint svg { flex: 0 0 auto; margin-top: 1px; color: var(--green-dark); }
+.microsoft-registration-next-hint { border: 1px dashed var(--line); }
 .microsoft-registration-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 13px; border-bottom: 1px solid var(--line); }
 .microsoft-registration-toolbar .search-box { width: min(330px, 100%); }
 .microsoft-registration-email, .microsoft-registration-source { display: grid; gap: 3px; min-width: 0; }
@@ -997,6 +1019,10 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
   .microsoft-registration-webhook-body { padding: 12px; }
   .microsoft-registration-webhook-actions { display: grid; grid-template-columns: 1fr; }
   .microsoft-registration-webhook-actions .button { width: 100%; }
+  .microsoft-registration-step-grid { grid-template-columns: 1fr; }
+  .microsoft-registration-step { min-height: 0; }
+  .microsoft-registration-step small { min-height: 0; }
+  .microsoft-registration-step .button { width: 100%; }
   .microsoft-registration-toolbar { align-items: stretch; flex-direction: column; }
   .microsoft-registration-toolbar .search-box { width: 100%; }
   .microsoft-registration-mobile-list { display: grid; gap: 9px; padding: 10px; }
