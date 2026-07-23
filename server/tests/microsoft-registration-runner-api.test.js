@@ -105,7 +105,8 @@ test("server Microsoft registrar stores config encrypted, starts both Wine proce
   children[1].stdout.emit("data", prompts.subarray(5));
   assert.equal(children[1].stdin.text, "1\n3\n\n\n");
   children[1].stdout.emit("data", Buffer.from("重试次数达到上限，停止注册\n程序执行结果汇总\n程序运行时长：33 秒\n"));
-  assert.deepEqual(terminalFinishes, [[started.id, "failed", "注册机打码失败，重试次数达到上限"]]);
+  assert.deepEqual(terminalFinishes, [[started.id, "failed", "注册机失败：注册重试次数达到上限"]]);
+  assert.equal(runner.logs({ runId: started.id }).items.some((item) => item.message === "注册机失败阶段：注册重试次数达到上限"), true);
   const runDir = calls[0].options.cwd;
   const mailToml = fs.readFileSync(path.join(runDir, "mail.toml"), "utf8");
   assert.match(mailToml, /server_upload_url = "http:\/\/127\.0\.0\.1:4180\/api\/integrations\/microsoft-register\/v1\/runner\//);
@@ -194,4 +195,20 @@ test("runner imports saved successful registrations when the executable misses i
     data: [{ email: "saved-result@outlook.com", password: "saved-result-password", status: "success", runner_run_id: String(started.id) }],
     server_upload_other: { source: "go-ms-server-runner-file", runner_run_id: String(started.id) },
   }]);
+});
+
+test("runner does not turn an unclassified zero-result summary into a captcha failure", async (t) => {
+  const { runner, children } = fixture(t);
+  runner.saveConfiguration({
+    captcha_key: "runner-zero-result-key",
+    proxy_mode: "list",
+    proxy_value: "runner-user:runner-password@198.51.100.26:9300",
+  });
+  const terminalFinishes = [];
+  runner.scheduleTerminalFinish = (...args) => terminalFinishes.push(args);
+  const started = await runner.start("https://aliashub.test/alias-hub");
+  children[1].stdout.emit("data", Buffer.from("[ERROR] hidden challenge payload marker\n程序执行结果汇总\n注册成功次数   :      0 次\n程序运行时长：4 秒\n"));
+  assert.deepEqual(terminalFinishes, [[started.id, "completed", "注册机已完成（未产生成功账号）"]]);
+  assert.equal(runner.logs({ runId: started.id }).items.some((item) => item.message.startsWith("注册机失败阶段：")), false);
+  runner.stop();
 });

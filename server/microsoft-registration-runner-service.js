@@ -147,6 +147,30 @@ function clearlySafeStatus(value) {
   return /^(?:应用启动成功|当前版本|请输入|请选择|正在|授权服务|程序(?:执行结果汇总|运行时长)|注册(?:成功|失败|机)|重试次数达到上限|按压验证失败|打码平台|已(?:完成|停止|接收)|(?:\[auth\]\s*)?Listening(?:\s+and\s+serving)?\b|Error\b|错误|失败|成功)/i.test(text);
 }
 
+const REGISTRAR_FAILURE_TYPES = [
+  { expression: /按压验证失败/gi, message: "按压验证失败" },
+  { expression: /打码平台\s*打码失败/gi, message: "打码平台处理失败" },
+  { expression: /无感验证提交失败/gi, message: "无感验证提交失败" },
+  { expression: /(?:微软风控初始化失败|微软(?:入口网页地址|请求)[^\r\n]{0,120}请求失败)/gi, message: "Microsoft 注册请求失败" },
+  { expression: /获取代理失败|代理.*?(?:解析|连接|认证).*?失败|Invalid format/gi, message: "代理不可用或格式无效" },
+  { expression: /注册失败/gi, message: "Microsoft 注册失败" },
+  { expression: /重试次数达到上限/gi, message: "注册重试次数达到上限" },
+];
+
+function classifyRegistrarFailure(value) {
+  const text = stripAnsi(value);
+  let latest = null;
+  for (const item of REGISTRAR_FAILURE_TYPES) {
+    const expression = new RegExp(item.expression.source, item.expression.flags);
+    let match;
+    while ((match = expression.exec(text))) {
+      if (!latest || match.index >= latest.index) latest = { index: match.index, message: item.message };
+      if (!match[0]) expression.lastIndex += 1;
+    }
+  }
+  return latest?.message || "";
+}
+
 function payloadState(text, valueStart) {
   let index = valueStart;
   while (index < text.length && /\s/.test(text[index])) index += 1;
@@ -624,7 +648,8 @@ export class MicrosoftRegistrationRunnerService {
     const answered = new Set();
     const decoder = new StringDecoder("utf8");
     let pending = "";
-    let terminalFailure = false;
+    let failureReason = "";
+    let loggedFailureReason = "";
     const answer = (name, value) => {
       if (answered.has(name)) return;
       answered.add(name);
@@ -637,13 +662,19 @@ export class MicrosoftRegistrationRunnerService {
       if (/请输入注册最大数量\s*:/.test(pending)) answer("quantity", config.quantity);
       if (/请选择国家\s*:/.test(pending)) answer("country", "");
       if (/请选择.*邮箱后缀\s*:/.test(pending)) answer("domain", "");
-      if (/按压验证失败|打码平台\s*打码失败|重试次数达到上限|注册失败|获取代理失败|代理.*解析失败|Invalid format|\[ERROR\]/i.test(pending)) terminalFailure = true;
+      const classifiedFailure = classifyRegistrarFailure(pending);
+      if (classifiedFailure) failureReason = classifiedFailure;
+      if (failureReason && failureReason !== loggedFailureReason) {
+        loggedFailureReason = failureReason;
+        this.appendLog(runId, "system", `注册机失败阶段：${failureReason}`, "error");
+      }
       if (/程序执行结果汇总/.test(pending) && /程序运行时长/.test(pending)) {
         const successes = Number(/注册成功次数\s*[:：]\s*(\d+)/.exec(pending)?.[1] || 0);
+        const failed = successes === 0 && Boolean(failureReason);
         this.scheduleTerminalFinish(
           runId,
-          successes > 0 || !terminalFailure ? "completed" : "failed",
-          successes > 0 || !terminalFailure ? "注册机已完成" : "注册机打码失败，重试次数达到上限",
+          failed ? "failed" : "completed",
+          failed ? `注册机失败：${failureReason}` : successes > 0 ? "注册机已完成" : "注册机已完成（未产生成功账号）",
         );
       }
     };
