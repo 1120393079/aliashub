@@ -39,12 +39,19 @@ function fixture(t) {
   const db = createDatabase({ filename: path.join(directory, "test.db"), seedDemo: false });
   const calls = [];
   const children = [];
+  const savedResultImports = [];
   const runner = new MicrosoftRegistrationRunnerService({
     db,
     dataDir: path.join(directory, "data"),
     toolDir,
     encryptionKey: "runner-test-encryption-key",
     waitForPort: async () => true,
+    registrationService: {
+      ingestTrusted(payload) {
+        savedResultImports.push(payload);
+        return { accepted: payload.data.length, updated: 0 };
+      },
+    },
     spawnFn(command, args, options) {
       const child = new FakeChild(70_000 + children.length);
       children.push(child);
@@ -58,7 +65,7 @@ function fixture(t) {
     db.close();
     fs.rmSync(directory, { recursive: true, force: true });
   });
-  return { directory, db, runner, calls, children };
+  return { directory, db, runner, calls, children, savedResultImports };
 }
 
 test("server Microsoft registrar stores config encrypted, starts both Wine processes, and keeps callback credentials private", async (t) => {
@@ -169,4 +176,22 @@ test("runner APIs require a complete saved config and expose only masked configu
   const stopped = await jsonRequest(runtime.app, "/api/microsoft-registration/runner/stop", { method: "POST" });
   assert.equal(stopped.response.status, 200);
   assert.equal(stopped.body.run.status, "cancelled");
+});
+
+test("runner imports saved successful registrations when the executable misses its callback", async (t) => {
+  const { runner, calls, savedResultImports } = fixture(t);
+  runner.saveConfiguration({
+    captcha_key: "runner-file-import-key",
+    proxy_mode: "list",
+    proxy_value: "runner-user:runner-password@198.51.100.25:9200",
+  });
+  const started = await runner.start("https://aliashub.test/alias-hub");
+  fs.writeFileSync(path.join(calls[0].options.cwd, "注册成功(总).txt"), "saved-result@outlook.com----saved-result-password\n");
+  const completed = runner.finish(started.id, "completed", { message: "注册机已完成" });
+  assert.equal(completed.received_count, 1);
+  assert.match(completed.message, /已从结果文件导入 1 条注册邮箱/);
+  assert.deepEqual(savedResultImports, [{
+    data: [{ email: "saved-result@outlook.com", password: "saved-result-password", status: "success", runner_run_id: String(started.id) }],
+    server_upload_other: { source: "go-ms-server-runner-file", runner_run_id: String(started.id) },
+  }]);
 });

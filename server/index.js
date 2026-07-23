@@ -364,6 +364,7 @@ export function createApp(options = {}) {
     toolDir: options.microsoftRegistrationRunnerDir,
     wineBinary: options.microsoftRegistrationWineBinary,
     xvfbBinary: options.microsoftRegistrationXvfbBinary,
+    registrationService: microsoftRegistration,
     spawnFn: options.microsoftRegistrationSpawnFn,
     waitForPort: options.microsoftRegistrationWaitForPort,
   });

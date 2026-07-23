@@ -279,6 +279,7 @@ export class MicrosoftRegistrationRunnerService {
     wineBinary = process.env.MICROSOFT_REGISTRATION_WINE_BINARY || "wine",
     xvfbBinary = process.env.MICROSOFT_REGISTRATION_XVFB_BINARY || "xvfb-run",
     scriptBinary = process.env.MICROSOFT_REGISTRATION_SCRIPT_BINARY || "script",
+    registrationService,
     spawnFn = nodeSpawn,
     waitForPort,
   } = {}) {
@@ -292,6 +293,7 @@ export class MicrosoftRegistrationRunnerService {
     this.wineBinary = wineBinary;
     this.xvfbBinary = xvfbBinary;
     this.scriptBinary = scriptBinary;
+    this.registrationService = registrationService || null;
     this.spawn = spawnFn;
     this.waitForPort = waitForPort || this.waitForLocalPort.bind(this);
     this.processes = new Map();
@@ -719,16 +721,51 @@ export class MicrosoftRegistrationRunnerService {
     return row;
   }
 
+  importSavedResults(runId, runDir) {
+    if (!this.registrationService?.ingestTrusted || !runDir) return { received: 0 };
+    try {
+      const file = path.join(runDir, "注册成功(总).txt");
+      if (!fs.existsSync(file)) return { received: 0 };
+      const items = splitLines(fs.readFileSync(file, "utf8"))
+        .map((line) => {
+          const separator = line.indexOf("----");
+          if (separator < 1) return null;
+          const email = line.slice(0, separator).trim();
+          const password = line.slice(separator + 4).trim();
+          if (!/^[^\s@]+@(outlook|hotmail|live)\.[a-z]{2,}$/i.test(email) || !password) return null;
+          return { email, password, status: "success", runner_run_id: String(runId) };
+        })
+        .filter(Boolean)
+        .slice(0, 100);
+      if (!items.length) return { received: 0 };
+      const result = this.registrationService.ingestTrusted({
+        data: items,
+        server_upload_other: { source: "go-ms-server-runner-file", runner_run_id: String(runId) },
+      });
+      const received = Number(result.accepted || 0) + Number(result.updated || 0);
+      if (received) this.appendLog(runId, "system", `已从注册机结果文件导入 ${received} 条注册邮箱`, "info");
+      return { received };
+    } catch (error) {
+      this.appendLog(runId, "system", `注册结果文件导入失败: ${error.message}`, "error");
+      return { received: 0 };
+    }
+  }
+
   finish(runId, status, { message = "", exitCode = null } = {}) {
     const row = this.run(runId);
     if (FINISHED_STATUSES.has(row.status)) return row;
+    const processInfo = this.processes.get(runId);
+    const recovered = row.received_count || ["cancelled", "interrupted"].includes(status)
+      ? { received: 0 }
+      : this.importSavedResults(runId, processInfo?.runDir);
+    const receivedCount = Number(row.received_count || 0) + recovered.received;
+    const finalMessage = recovered.received ? `${message || "注册机已完成"}；已从结果文件导入 ${recovered.received} 条注册邮箱` : message;
     const timestamp = nowIso();
     this.db.prepare(`
       UPDATE microsoft_registration_runner_runs
-      SET status = ?, phase = ?, message = ?, exit_code = ?, finished_at = ?, updated_at = ?
+      SET status = ?, phase = ?, message = ?, exit_code = ?, received_count = ?, finished_at = ?, updated_at = ?
       WHERE id = ?
-    `).run(status, status, message, exitCode, timestamp, timestamp, runId);
-    const processInfo = this.processes.get(runId);
+    `).run(status, status, finalMessage, exitCode, receivedCount, timestamp, timestamp, runId);
     this.processes.delete(runId);
     if (processInfo?.terminalTimer) clearTimeout(processInfo.terminalTimer);
     this.killChild(processInfo?.registrar);
