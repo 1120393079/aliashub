@@ -64,7 +64,8 @@ function fixture(t) {
 test("server Microsoft registrar stores config encrypted, starts both Wine processes, and keeps callback credentials private", async (t) => {
   const { db, runner, calls, children } = fixture(t);
   const captchaKey = "captcha-runner-test-secret";
-  const proxy = "runner-user:runner-password@198.51.100.22:9000";
+  const proxy = "runner-user:runner-password:198.51.100.22:9000";
+  const normalizedProxy = "runner-user:runner-password@198.51.100.22:9000";
   const saved = runner.saveConfiguration({
     captcha_key: captchaKey,
     proxy_mode: "list",
@@ -102,7 +103,7 @@ test("server Microsoft registrar stores config encrypted, starts both Wine proce
   const mailToml = fs.readFileSync(path.join(runDir, "mail.toml"), "utf8");
   assert.match(mailToml, /server_upload_url = "https:\/\/aliashub\.test\/alias-hub\/api\/integrations\/microsoft-register\/v1\/runner\//);
   assert.match(mailToml, /imap_and_oauth_enabled = "1"/);
-  assert.equal(fs.readFileSync(path.join(runDir, "proxyList.txt"), "utf8").trim(), proxy);
+  assert.equal(fs.readFileSync(path.join(runDir, "proxyList.txt"), "utf8").trim(), normalizedProxy);
   const continuationPrefix = "runner-continuation-token-prefix";
   const continuationSuffix = "runner-continuation-token-suffix";
   const requestPrefix = "runner-request-payload-prefix";

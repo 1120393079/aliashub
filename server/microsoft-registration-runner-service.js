@@ -79,10 +79,14 @@ function splitLines(value) {
   return String(value || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
 }
 
-function validProxyLine(value) {
-  const at = value.lastIndexOf("@");
-  const colon = value.lastIndexOf(":");
-  return at > 1 && colon > at + 1 && colon < value.length - 1 && !/\s/.test(value);
+function normalizeProxyLine(value) {
+  const text = trimText(value, 1_000);
+  if (!text || /\s/.test(text)) return "";
+  const existing = /^([^:@\s]+):([^@\s]+)@([^:@\s]+):(\d{1,5})$/.exec(text);
+  const colonSeparated = /^([^:@\s]+):([^:@\s]+):([^:@\s]+):(\d{1,5})$/.exec(text);
+  const match = existing || colonSeparated;
+  if (!match || Number(match[4]) < 1 || Number(match[4]) > 65_535) return "";
+  return `${match[1]}:${match[2]}@${match[3]}:${match[4]}`;
 }
 
 function validFormat(value, label) {
@@ -398,14 +402,15 @@ export class MicrosoftRegistrationRunnerService {
     if (!captchaKey) throw failure("请填写打码平台 Key");
     const proxyMode = has("proxy_mode") ? trimText(input.proxy_mode, 10) : existing.proxy_mode;
     if (!["list", "api"].includes(proxyMode)) throw failure("代理类型无效");
-    const proxyValue = has("proxy_value") ? trimText(input.proxy_value, MAX_PROXY_TEXT) : existing.proxy_value;
+    let proxyValue = has("proxy_value") ? trimText(input.proxy_value, MAX_PROXY_TEXT) : existing.proxy_value;
     if (!proxyValue) throw failure(proxyMode === "list" ? "请粘贴账号密码代理列表" : "请填写动态代理 API 地址");
     let proxyCount = 0;
     if (proxyMode === "list") {
-      const proxies = splitLines(proxyValue);
-      if (!proxies.length || proxies.length > MAX_PROXY_LINES || proxies.some((item) => !validProxyLine(item))) {
-        throw failure("代理列表格式错误，请使用 username:password@host:port，每行一个");
+      const proxies = splitLines(proxyValue).map(normalizeProxyLine);
+      if (!proxies.length || proxies.length > MAX_PROXY_LINES || proxies.some((item) => !item)) {
+        throw failure("代理列表格式错误，请使用 username:password@host:port 或 username:password:host:port，每行一个");
       }
+      proxyValue = proxies.join("\n");
       proxyCount = proxies.length;
     } else {
       try {
