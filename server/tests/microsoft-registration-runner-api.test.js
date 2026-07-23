@@ -101,7 +101,7 @@ test("server Microsoft registrar stores config encrypted, starts both Wine proce
   assert.deepEqual(terminalFinishes, [[started.id, "failed", "注册机打码失败，重试次数达到上限"]]);
   const runDir = calls[0].options.cwd;
   const mailToml = fs.readFileSync(path.join(runDir, "mail.toml"), "utf8");
-  assert.match(mailToml, /server_upload_url = "https:\/\/aliashub\.test\/alias-hub\/api\/integrations\/microsoft-register\/v1\/runner\//);
+  assert.match(mailToml, /server_upload_url = "http:\/\/127\.0\.0\.1:4180\/api\/integrations\/microsoft-register\/v1\/runner\//);
   assert.match(mailToml, /imap_and_oauth_enabled = "1"/);
   assert.equal(fs.readFileSync(path.join(runDir, "proxyList.txt"), "utf8").trim(), normalizedProxy);
   const continuationPrefix = "runner-continuation-token-prefix";

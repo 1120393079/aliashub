@@ -247,6 +247,13 @@ function callbackUrl(publicBaseUrl, runId, token) {
   return `${root}/api/integrations/microsoft-register/v1/runner/${runId}/${token}`;
 }
 
+function runnerCallbackBaseUrl(publicBaseUrl) {
+  const configured = trimText(process.env.MICROSOFT_REGISTRATION_CALLBACK_BASE_URL, 2_000);
+  if (configured) return configured;
+  const port = integer(process.env.PORT, 4180, 1, 65_535);
+  return `http://127.0.0.1:${port}`;
+}
+
 function defaultConfig() {
   return {
     captcha_type: "3",
@@ -629,10 +636,11 @@ export class MicrosoftRegistrationRunnerService {
       if (/请选择.*邮箱后缀\s*:/.test(pending)) answer("domain", "");
       if (/按压验证失败|打码平台\s*打码失败|重试次数达到上限|注册失败|获取代理失败|代理.*解析失败|Invalid format|\[ERROR\]/i.test(pending)) terminalFailure = true;
       if (/程序执行结果汇总/.test(pending) && /程序运行时长/.test(pending)) {
+        const successes = Number(/注册成功次数\s*[:：]\s*(\d+)/.exec(pending)?.[1] || 0);
         this.scheduleTerminalFinish(
           runId,
-          terminalFailure ? "failed" : "completed",
-          terminalFailure ? "注册机打码失败，重试次数达到上限" : "注册机已完成",
+          successes > 0 || !terminalFailure ? "completed" : "failed",
+          successes > 0 || !terminalFailure ? "注册机已完成" : "注册机打码失败，重试次数达到上限",
         );
       }
     };
@@ -798,7 +806,7 @@ export class MicrosoftRegistrationRunnerService {
     `).run(config.account_format, config.quantity, config.concurrency, config.proxy_mode, config.proxy_count, sha256(token), expiresAt, timestamp, timestamp);
     const runId = Number(inserted.lastInsertRowid);
     const runDir = this.ensureRunDirectory(runId);
-    const callback = callbackUrl(publicBaseUrl, runId, token);
+    const callback = callbackUrl(runnerCallbackBaseUrl(publicBaseUrl), runId, token);
     const secrets = [config.captcha_key, config.proxy_value, token, callback];
     try {
       this.writeRunFiles(runDir, config, runId, callback);
