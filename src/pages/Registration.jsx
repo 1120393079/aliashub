@@ -349,21 +349,52 @@ function preferredBase(account) {
     || account?.bases[0];
 }
 
+function occupiedAliasInfo(item) {
+  const aliases = Array.isArray(item?.occupied_aliases)
+    ? item.occupied_aliases
+      .map((entry) => typeof entry === "string" ? entry : (entry?.email || entry?.address || entry?.alias || ""))
+      .map((entry) => String(entry || "").trim())
+      .filter(Boolean)
+    : [];
+  const reportedCount = Number(item?.occupied_alias_count ?? item?.already_exists_count);
+  return {
+    count: Math.max(Number.isFinite(reportedCount) ? Math.floor(reportedCount) : 0, aliases.length),
+    aliases: [...new Set(aliases)],
+  };
+}
+
 function baseOptionLabel(item) {
   const type = item.strategy === "icloud_hide_my_email"
     ? "隐藏邮箱"
     : item.strategy === "icloud_mail_alias" ? "邮箱别名" : "";
+  const occupied = occupiedAliasInfo(item);
   const state = item.registration_state === "in_progress"
     ? "注册进行中"
     : item.registration_state === "used"
       ? "已用于注册"
+      : item.registration_state === "occupied"
+        ? "已被目标站占用"
       : item.registration_state === "likely_exhausted"
         ? "疑似已占用"
         : item.registration_state === "warning"
           ? "有占用冲突"
           : item.registration_success_count ? `已成功 ${item.registration_success_count}` : "";
-  const details = [type, state].filter(Boolean).join(" · ");
+  const details = [occupied.count ? `注册占用 ${occupied.count}` : "", type, state].filter(Boolean).join(" · ");
   return details ? `${item.address}（${details}）` : item.address;
+}
+
+function OccupiedAliasNotice({ base }) {
+  const occupied = occupiedAliasInfo(base);
+  if (!occupied.count) return null;
+  const samples = occupied.aliases.slice(0, 3);
+  const remainder = occupied.count > samples.length ? `等 ${occupied.count} 个` : "";
+  return <div className="inline-alert danger registration-occupied-alias-alert" role="alert">
+    <AlertTriangle size={16} />
+    <span>
+      <b>已标记 {occupied.count} 个注册占用别名</b>
+      <small>{samples.length ? `最近占用：${samples.join("、")}${remainder ? `，${remainder}` : ""}` : "该基础地址曾生成被目标站占用的注册邮箱；请优先更换基础地址或后缀。"}</small>
+    </span>
+  </div>;
 }
 
 function jobStatusLabel(job) {
@@ -656,6 +687,9 @@ export default function RegistrationPage({ refreshKey }) {
   const [nfapiMailboxLoading, setNfapiMailboxLoading] = useState(false);
   const [nfapiMailboxError, setNfapiMailboxError] = useState("");
   const [nfapiMailboxUpdatedAt, setNfapiMailboxUpdatedAt] = useState("");
+  const registrationOptionsRequest = useRef(0);
+  const registrationJobsRequest = useRef(0);
+  const registrationAccountsRequest = useRef(0);
   const nfapiOptionsRequest = useRef(0);
   const nfapiMailboxRequest = useRef(0);
   const nfapiMailboxBusy = useRef(false);
@@ -672,7 +706,9 @@ export default function RegistrationPage({ refreshKey }) {
   const nfapiMailboxAccountId = nfapiImportIds[0];
 
   const loadOptions = useCallback(async () => {
+    const requestId = ++registrationOptionsRequest.current;
     const data = await api("/api/registration/options");
+    if (requestId !== registrationOptionsRequest.current) return null;
     setOptions(data);
     setProxyText((current) => current || (data.proxies || []).join("\n"));
     setForm((current) => {
@@ -692,20 +728,48 @@ export default function RegistrationPage({ refreshKey }) {
       };
     });
     setProxyInspectIndex((current) => current !== "" && Number(current) < data.proxies.length ? current : (data.proxies.length ? "0" : ""));
+    return data;
   }, []);
 
   const loadJobs = useCallback(async () => {
-    try { setJobs((await api("/api/registration/jobs?limit=200")).items); } catch (error) { toast(error.message, "error"); }
+    const requestId = ++registrationJobsRequest.current;
+    try {
+      const result = await api("/api/registration/jobs?limit=500");
+      if (requestId !== registrationJobsRequest.current) return null;
+      setJobs(result.items);
+      return result.items;
+    } catch (error) {
+      if (requestId !== registrationJobsRequest.current) return null;
+      toast(error.message, "error");
+      return null;
+    }
   }, [toast]);
 
   const loadAccounts = useCallback(async () => {
+    const requestId = ++registrationAccountsRequest.current;
     try {
-      setAccounts(await api("/api/registration/accounts"));
+      const data = await api("/api/registration/accounts");
+      if (requestId !== registrationAccountsRequest.current) return null;
+      setAccounts(data);
       setAccountsError("");
+      return data;
     } catch (error) {
+      if (requestId !== registrationAccountsRequest.current) return null;
       setAccounts((current) => current || { total: 0, items: [] });
       setAccountsError(error.message || "注册账号加载失败");
+      return null;
     }
+  }, []);
+
+  const refreshRegistrationData = useCallback(async () => {
+    await loadJobs();
+    await Promise.all([loadOptions(), loadAccounts()]);
+  }, [loadJobs, loadOptions, loadAccounts]);
+
+  useEffect(() => () => {
+    registrationOptionsRequest.current += 1;
+    registrationJobsRequest.current += 1;
+    registrationAccountsRequest.current += 1;
   }, []);
 
   const loadNfapiMailbox = useCallback(async ({ background = false } = {}) => {
@@ -729,8 +793,8 @@ export default function RegistrationPage({ refreshKey }) {
   }, [nfapiMailboxAccountId]);
 
   useEffect(() => {
-    Promise.all([loadOptions(), loadJobs(), loadAccounts()]).catch((error) => toast(error.message, "error"));
-  }, [loadOptions, loadJobs, loadAccounts, refreshKey, toast]);
+    refreshRegistrationData().catch((error) => toast(error.message, "error"));
+  }, [refreshRegistrationData, refreshKey, toast]);
 
   useEffect(() => {
     if (!nfapiOAuthSession?.oauth_session_id || !nfapiMailboxOpen) return undefined;
@@ -754,9 +818,11 @@ export default function RegistrationPage({ refreshKey }) {
   useEffect(() => {
     const active = jobs?.some((item) => releasableStatuses.has(item.status));
     if (!active) return undefined;
-    const timer = window.setInterval(() => Promise.all([loadJobs(), loadAccounts()]), 3_000);
+    const timer = window.setInterval(() => {
+      refreshRegistrationData().catch((error) => toast(error.message, "error"));
+    }, 3_000);
     return () => window.clearInterval(timer);
-  }, [jobs, loadJobs, loadAccounts]);
+  }, [jobs, refreshRegistrationData, toast]);
 
   useEffect(() => {
     if (!jobs) return;
@@ -880,7 +946,7 @@ export default function RegistrationPage({ refreshKey }) {
       const submitted = response.items.filter((item) => item.status !== "failed").length;
       toast(`已创建 ${response.items.length} 个邮箱，提交 ${submitted} 个注册任务`);
       setView("tasks");
-      await Promise.all([loadJobs(), loadOptions()]);
+      await refreshRegistrationData();
     } catch (error) { toast(error.message, "error"); } finally { setStarting(false); }
   };
 
@@ -932,7 +998,7 @@ export default function RegistrationPage({ refreshKey }) {
   };
 
   const cancel = async (id) => {
-    try { await api(`/api/registration/jobs/${id}/cancel`, { method: "POST" }); toast("注册任务已取消"); await loadJobs(); }
+    try { await api(`/api/registration/jobs/${id}/cancel`, { method: "POST" }); toast("注册任务已取消"); await refreshRegistrationData(); }
     catch (error) { toast(error.message, "error"); }
   };
 
@@ -944,7 +1010,7 @@ export default function RegistrationPage({ refreshKey }) {
       const label = result.item?.status === "cancelled" ? "已取消并释放" : "已强制释放";
       toast(`${releaseTarget.email} ${label}`);
       setReleaseTarget(null);
-      await Promise.all([loadJobs(), loadAccounts()]);
+      await refreshRegistrationData();
     } catch (error) {
       toast(error.message, "error");
     } finally {
@@ -973,7 +1039,7 @@ export default function RegistrationPage({ refreshKey }) {
         setSelectedAccountIds((current) => current.filter((id) => !deleteTarget.ids.includes(id)));
       }
       setDeleteTarget(null);
-      await Promise.all([loadJobs(), loadAccounts()]);
+      await refreshRegistrationData();
     } catch (error) { toast(error.message, "error"); } finally { setDeleting(false); }
   };
 
@@ -1664,6 +1730,7 @@ export default function RegistrationPage({ refreshKey }) {
                 <FormField label="源头邮箱"><select value={form.accountId} onChange={(event) => changeAccount(event.target.value)}><option value="">请选择</option>{options.accounts.map((item) => <option key={item.id} value={item.id}>{item.email}</option>)}</select></FormField>
                 <FormField label={isDirectRegistration ? "iCloud 地址类型" : "基础地址"}><select value={form.baseAddressId} onChange={(event) => setForm({ ...form, baseAddressId: event.target.value })}><option value="">请选择</option>{selectedAccount?.bases.map((item) => <option key={item.id} value={item.id} disabled={Boolean(item.registration_disabled)}>{baseOptionLabel(item)}</option>)}</select></FormField>
               </div>
+              <OccupiedAliasNotice base={selectedBase} />
               {selectedBase?.registration_hint && <div className="inline-alert warning"><AlertTriangle size={16} /><span>{selectedBase.registration_hint}</span></div>}
               <div className="form-grid two">
                 <FormField label="注册数量" hint={isDirectRegistration ? "iCloud 地址直接注册，固定为 1 个任务" : form.suffix.trim() ? "批量注册会自动追加 -01、-02 编号" : "留空后缀时，每个账号生成随机分裂邮箱"}><input type="number" min="1" max="20" value={isDirectRegistration ? 1 : form.count} disabled={isDirectRegistration} onChange={(event) => setForm({ ...form, count: Number(event.target.value) })} /></FormField>
@@ -1690,7 +1757,7 @@ export default function RegistrationPage({ refreshKey }) {
         </section>
 
         <section className="table-panel registration-task-panel">
-          <header className="panel-header"><div><h2>注册记录</h2><p>邮箱、身份、代理出口和注册结果</p></div><Button size="sm" onClick={loadJobs}>刷新</Button></header>
+          <header className="panel-header"><div><h2>注册记录</h2><p>邮箱、身份、代理出口和注册结果</p></div><Button size="sm" onClick={() => refreshRegistrationData().catch((error) => toast(error.message, "error"))}>刷新</Button></header>
           {jobs.length ? <>
             <div className="registration-bulk-bar">
               <label><input type="checkbox" checked={allJobsSelected} disabled={!deletableJobIds.length} onChange={toggleAllJobs} />全选可删除记录</label>

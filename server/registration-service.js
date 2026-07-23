@@ -14,18 +14,143 @@ const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled", "interrup
 const ACTIVE_STATUSES = new Set(["pending", "claimed", "running", "cancel_requested"]);
 const RELEASABLE_JOB_STATUSES = new Set(["queued", "pending", "claimed", "running", "cancel_requested"]);
 const EMAIL_UNAVAILABLE_MESSAGE = "目标站已存在此邮箱账号，建议更换基础地址";
+const OCCUPIED_ALIAS_FAILURE_REASON = "user_already_exists";
+const OCCUPIED_ALIAS_SAMPLE_LIMIT = 20;
+const OCCUPIED_ALIAS_ERROR_CODES = new Set([
+  "user_exists",
+  "account_already_exists",
+  "email_already_exists",
+  "email_already_registered",
+  "email_already_registered_on_openai",
+  "email_already_used",
+  "email_in_use",
+  "email_taken",
+]);
 const ACCOUNT_STATUS_REFRESH_COOLDOWN_MS = 15 * 60 * 1000;
 const ACCOUNT_STATUS_REFRESH_BATCH_SIZE = 20;
 const KOOKEEY_GATEWAY_HOST = /^gate-[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.kookeey\.info$/i;
 const KOOKEEY_STICKY_PASSWORD = /^(.+)-([a-z]{2})-(\d{4,32})-([1-9]\d{0,3})m$/i;
 const KOOKEEY_MAX_SESSION_TTL_MINUTES = 1_440;
 
+function normalizeRegistrationErrorCode(value) {
+  if (typeof value !== "string" && typeof value !== "number") return "";
+  return String(value)
+    .trim()
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 160);
+}
+
+function isOccupiedAliasErrorCode(value) {
+  const code = normalizeRegistrationErrorCode(value);
+  return code === OCCUPIED_ALIAS_FAILURE_REASON
+    || OCCUPIED_ALIAS_ERROR_CODES.has(code)
+    || /(?:^|_)(?:user|account|email)_?already_?(?:exists|registered|used)(?:_|$)/.test(code)
+    || /(?:^|_)email_(?:in_)?use(?:_|$)/.test(code);
+}
+
+function occupiedAliasReasonFromText(value) {
+  const text = String(value || "");
+  if (!text) return "";
+  return /user_already_exists|user_exists|account_already_exists|email_already_exists|email_already_registered(?:_on_openai)?|email_already_used|email_in_use|(?:user|account|email)\s+already\s+(?:exists|registered|used)|(?:邮箱|电子邮箱)\s*(?:(?:已|已经)\s*(?:被)?|被)\s*(?:占用|注册|使用|存在)|(?:可能|疑似)?\s*已在\s*openai\s*(?:上)?注册过/i.test(text)
+    ? OCCUPIED_ALIAS_FAILURE_REASON
+    : "";
+}
+
+function structuredOccupiedAliasReason(value, seen = new WeakSet(), depth = 0) {
+  if (!value || depth > 6) return "";
+  if (typeof value !== "object") return "";
+  if (seen.has(value)) return "";
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const reason = structuredOccupiedAliasReason(item, seen, depth + 1);
+      if (reason) return reason;
+    }
+    return "";
+  }
+  const directCodes = [
+    value.error_code,
+    value.errorCode,
+    value.code,
+    value.reason_code,
+    value.reasonCode,
+    value.failure_code,
+    value.failureCode,
+    value.failure_reason,
+    value.failureReason,
+    value.register_failed_reason,
+    value.registerFailedReason,
+  ];
+  for (const code of directCodes) {
+    if (isOccupiedAliasErrorCode(code)) return OCCUPIED_ALIAS_FAILURE_REASON;
+  }
+  for (const item of Object.values(value)) {
+    const reason = structuredOccupiedAliasReason(item, seen, depth + 1);
+    if (reason) return reason;
+  }
+  return "";
+}
+
+function textOccupiedAliasReason(value, seen = new WeakSet(), depth = 0) {
+  if (depth > 6 || value === null || value === undefined) return "";
+  if (typeof value === "string" || typeof value === "number") return occupiedAliasReasonFromText(value);
+  if (typeof value !== "object" || seen.has(value)) return "";
+  seen.add(value);
+  const directText = [value.message, value.error, value.detail, value.reason, value.description];
+  for (const item of directText) {
+    if (typeof item === "string" && occupiedAliasReasonFromText(item)) return OCCUPIED_ALIAS_FAILURE_REASON;
+  }
+  for (const item of Object.values(value)) {
+    const reason = textOccupiedAliasReason(item, seen, depth + 1);
+    if (reason) return reason;
+  }
+  return "";
+}
+
+function remoteOccupiedAliasReason(...values) {
+  for (const value of values) {
+    const reason = structuredOccupiedAliasReason(value);
+    if (reason) return reason;
+  }
+  for (const value of values) {
+    const reason = textOccupiedAliasReason(value);
+    if (reason) return reason;
+  }
+  return "";
+}
+
 function registrationFailureReason(row = {}) {
   if (String(row.status || "").toLowerCase() !== "failed") return "";
-  const text = `${row.stage || ""} ${row.message || ""}`;
-  return /user_already_exists|user_exists|account_already_exists|email_already_exists|(?:user|account|email)\s+already\s+exists/i.test(text)
-    ? "user_already_exists"
-    : "";
+  if (isOccupiedAliasErrorCode(row.failure_reason)) return OCCUPIED_ALIAS_FAILURE_REASON;
+  return occupiedAliasReasonFromText(`${row.stage || ""} ${row.message || ""}`);
+}
+
+function registrationObservationAt(row = {}) {
+  return String(row.finished_at || row.updated_at || row.created_at || "");
+}
+
+function occupiedAliasHistory(rows = []) {
+  const aliases = new Map();
+  for (const row of rows) {
+    if (registrationFailureReason(row) !== OCCUPIED_ALIAS_FAILURE_REASON) continue;
+    const email = String(row.email || "").trim();
+    if (!email) continue;
+    const key = email.toLowerCase();
+    const lastSeenAt = registrationObservationAt(row);
+    const current = aliases.get(key);
+    if (!current || lastSeenAt > current.last_seen_at) {
+      aliases.set(key, { email, last_seen_at: lastSeenAt });
+    }
+  }
+  const all = [...aliases.values()].sort((left, right) => right.last_seen_at.localeCompare(left.last_seen_at));
+  return {
+    count: all.length,
+    aliases: all.slice(0, OCCUPIED_ALIAS_SAMPLE_LIMIT),
+    lastSeenAt: all[0]?.last_seen_at || "",
+  };
 }
 
 function publicRegistrationJob(row) {
@@ -1352,6 +1477,7 @@ function accountMetadataValue(input, key, label, maximum) {
 function statusFromExternal(value) {
   const status = String(value || "").toLowerCase();
   if (status === "succeeded") return "completed";
+  if (status === "failure" || status === "error") return "failed";
   if (status === "pending" || status === "claimed") return "queued";
   if (status === "cancel_requested") return "cancel_requested";
   return status || "queued";
@@ -1499,11 +1625,18 @@ export class RegistrationService {
 
   async options() {
     const baseJobs = this.db.prepare(`
-      SELECT registration_jobs.email, registration_jobs.status, registration_jobs.stage, registration_jobs.message
+      SELECT registration_jobs.id, registration_jobs.email, registration_jobs.status, registration_jobs.stage,
+        registration_jobs.message, registration_jobs.failure_reason, registration_jobs.created_at,
+        registration_jobs.updated_at, registration_jobs.finished_at, registration_jobs.deleted_at
       FROM registration_jobs
-      JOIN addresses job_address ON job_address.id = registration_jobs.address_id
-      WHERE job_address.parent_address_id = ? OR job_address.id = ?
-      ORDER BY registration_jobs.created_at DESC, registration_jobs.id DESC
+      LEFT JOIN addresses job_address ON job_address.id = registration_jobs.address_id
+      WHERE registration_jobs.base_address_id = ?
+        OR (
+          (registration_jobs.base_address_id IS NULL OR registration_jobs.base_address_id = 0)
+          AND (job_address.parent_address_id = ? OR job_address.id = ?)
+        )
+      ORDER BY COALESCE(registration_jobs.finished_at, registration_jobs.updated_at, registration_jobs.created_at) DESC,
+        registration_jobs.id DESC
     `);
     const accounts = this.db.prepare("SELECT * FROM source_accounts WHERE status = 'connected' AND provider IN ('microsoft', 'google', 'icloud') ORDER BY updated_at DESC").all().map((account) => {
       const direct = account.provider === "icloud";
@@ -1518,37 +1651,41 @@ export class RegistrationService {
         registration_mode: direct ? "direct" : "split",
         max_registration_count: direct ? 1 : 20,
         bases: bases.map((base) => {
-        const jobs = baseJobs.all(base.id, base.id);
-        const latest = jobs[0];
-        const conflicts = new Set();
-        for (const job of jobs) {
-          if (job.status === "completed") break;
-          if (registrationFailureReason(job) === "user_already_exists") conflicts.add(String(job.email || "").toLowerCase());
-        }
-        const conflictCount = conflicts.size;
-        const activeDirectJob = direct && jobs.some((job) => RELEASABLE_JOB_STATUSES.has(String(job.status || "")));
-        const completedDirectJob = direct && jobs.some((job) => job.status === "completed");
-        const registrationState = activeDirectJob ? "in_progress"
-          : completedDirectJob ? "used"
-            : conflictCount >= 2 ? "likely_exhausted" : (conflictCount === 1 ? "warning" : "available");
-        return {
-          ...base,
-          registration_state: registrationState,
-          registration_disabled: activeDirectJob || completedDirectJob,
-          already_exists_count: conflictCount,
-          registration_success_count: jobs.filter((job) => job.status === "completed").length,
-          last_registration_status: latest?.status || "",
-          registration_hint: activeDirectJob
-            ? "这个 iCloud 地址已有进行中的注册任务，请等待任务结束。"
-            : completedDirectJob
-              ? "这个 iCloud 别名已经用于成功注册；请导入新的别名继续注册。"
-              : direct
-                ? "iCloud 地址会直接用于注册，不会生成 +tag 分裂地址。"
-                : registrationState === "likely_exhausted"
-            ? "这个基础地址已有多次邮箱占用冲突，疑似不再适合继续分裂注册，建议更换基础地址。"
-            : (registrationState === "warning" ? "这个基础地址最近出现邮箱占用冲突，再次失败时请更换基础地址。" : ""),
-        };
-      }),
+          const jobs = baseJobs.all(base.id, base.id, base.id);
+          const latest = jobs[0];
+          const occupied = occupiedAliasHistory(jobs);
+          const conflictCount = occupied.count;
+          const activeDirectJob = direct && jobs.some((job) => RELEASABLE_JOB_STATUSES.has(String(job.status || "")));
+          const completedDirectJob = direct && jobs.some((job) => job.status === "completed");
+          const occupiedDirectAlias = direct && conflictCount > 0;
+          const registrationState = activeDirectJob ? "in_progress"
+            : occupiedDirectAlias ? "occupied"
+            : completedDirectJob ? "used"
+              : conflictCount >= 2 ? "likely_exhausted" : (conflictCount === 1 ? "warning" : "available");
+          return {
+            ...base,
+            registration_state: registrationState,
+            registration_disabled: activeDirectJob || completedDirectJob || occupiedDirectAlias,
+            already_exists_count: conflictCount,
+            occupied_alias_count: conflictCount,
+            occupied_aliases: occupied.aliases,
+            occupied_alias_last_seen_at: occupied.lastSeenAt,
+            last_occupied_alias_at: occupied.lastSeenAt,
+            registration_success_count: jobs.filter((job) => job.status === "completed").length,
+            last_registration_status: latest?.status || "",
+            registration_hint: activeDirectJob
+              ? "这个 iCloud 地址已有进行中的注册任务，请等待任务结束。"
+              : occupiedDirectAlias
+                ? "这个 iCloud 别名已被目标站占用，不能重复注册；请导入新的别名。"
+              : completedDirectJob
+                ? "这个 iCloud 别名已经用于成功注册；请导入新的别名继续注册。"
+                : direct
+                  ? "iCloud 地址会直接用于注册，不会生成 +tag 分裂地址。"
+                  : registrationState === "likely_exhausted"
+                    ? "这个基础地址已标记多个目标站占用别名，建议更换基础地址。"
+                    : (registrationState === "warning" ? "这个基础地址已标记目标站占用别名；再次注册请优先更换后缀。" : ""),
+          };
+        }),
       };
     });
     const proxies = this.getProxyPool();
@@ -1614,13 +1751,24 @@ export class RegistrationService {
     let addresses;
     if (directIcloud) {
       const existing = this.db.prepare(`
-        SELECT status FROM registration_jobs
-        WHERE address_id = ?
-          AND status IN ('queued', 'pending', 'claimed', 'running', 'cancel_requested', 'completed')
-        ORDER BY created_at DESC, id DESC LIMIT 1
-      `).get(base.id);
-      if (existing) {
-        const message = existing.status === "completed"
+        SELECT status, stage, message, failure_reason
+        FROM registration_jobs
+        WHERE base_address_id = ?
+          OR (
+            (base_address_id IS NULL OR base_address_id = 0)
+            AND address_id = ?
+          )
+        ORDER BY created_at DESC, id DESC
+      `).all(base.id, base.id);
+      const occupied = existing.find((job) => registrationFailureReason(job) === OCCUPIED_ALIAS_FAILURE_REASON);
+      if (occupied) {
+        throw Object.assign(new Error("这个 iCloud 别名已被目标站占用，不能重复注册，请导入新的别名"), { status: 409 });
+      }
+      const activeOrCompleted = existing.find((job) => (
+        RELEASABLE_JOB_STATUSES.has(String(job.status || "")) || job.status === "completed"
+      ));
+      if (activeOrCompleted) {
+        const message = activeOrCompleted.status === "completed"
           ? "这个 iCloud 别名已经用于成功注册，请导入新的别名"
           : "这个 iCloud 别名已有进行中的注册任务";
         throw Object.assign(new Error(message), { status: 409 });
@@ -1647,10 +1795,10 @@ export class RegistrationService {
       const now = nowIso();
       const result = this.db.prepare(`
         INSERT INTO registration_jobs (
-          account_id, address_id, email, status, stage, browser_mode, proxy_label, fingerprint_id,
+          account_id, address_id, base_address_id, email, status, stage, browser_mode, proxy_label, fingerprint_id,
           message, created_at, updated_at
-        ) VALUES (?, ?, ?, 'queued', 'queued', ?, ?, ?, '正在提交注册任务', ?, ?)
-      `).run(account.id, address.id, address.address, browserMode, maskProxy(proxy), crypto.randomUUID().slice(0, 12), now, now);
+        ) VALUES (?, ?, ?, ?, 'queued', 'queued', ?, ?, ?, '正在提交注册任务', ?, ?)
+      `).run(account.id, address.id, base.id, address.address, browserMode, maskProxy(proxy), crypto.randomUUID().slice(0, 12), now, now);
       const jobId = Number(result.lastInsertRowid);
       try {
         const task = await this.client.createTask({
@@ -1685,9 +1833,14 @@ export class RegistrationService {
         const taskId = String(task.task_id || task.id || "");
         this.db.prepare("UPDATE registration_jobs SET external_task_id = ?, message = ?, updated_at = ? WHERE id = ?")
           .run(taskId, "任务已提交，等待执行", nowIso(), jobId);
-      } catch {
-        this.db.prepare("UPDATE registration_jobs SET status = 'failed', stage = 'submit', message = ?, finished_at = ?, updated_at = ? WHERE id = ?")
-          .run("注册任务提交失败", nowIso(), nowIso(), jobId);
+      } catch (error) {
+        const failureReason = remoteOccupiedAliasReason(error);
+        const finishedAt = nowIso();
+        this.db.prepare(`
+          UPDATE registration_jobs
+          SET status = 'failed', stage = 'submit', message = ?, failure_reason = ?, finished_at = ?, updated_at = ?
+          WHERE id = ?
+        `).run("注册任务提交失败", failureReason, finishedAt, finishedAt, jobId);
       }
       jobs.push(publicRegistrationJob(this.getJob(jobId)));
     }
@@ -1706,15 +1859,33 @@ export class RegistrationService {
     if (!row?.external_task_id || TERMINAL_STATUSES.has(row.status)) return row;
     try {
       const task = await this.client.getTask(row.external_task_id);
+      const status = statusFromExternal(task.status);
       let events = [];
-      if (!row.display_name || ACTIVE_STATUSES.has(String(task.status || ""))) {
-        const response = await this.client.getTaskEvents(row.external_task_id);
-        const remoteEvents = Array.isArray(response) ? response : response.items || response.events || [];
-        events = sanitizeRegistrationRemoteValue(remoteEvents);
+      let eventReadError = "";
+      if (!row.display_name || ACTIVE_STATUSES.has(String(task.status || "")) || status === "failed") {
+        try {
+          const response = await this.client.getTaskEvents(row.external_task_id);
+          const remoteEvents = Array.isArray(response) ? response : response.items || response.events || [];
+          events = sanitizeRegistrationRemoteValue(remoteEvents);
+        } catch (error) {
+          eventReadError = redactProxySecrets(error?.message) || "读取注册任务事件失败";
+        }
       }
       const identity = identityFromEvents(events);
-      const status = statusFromExternal(task.status);
       const lastMessage = events.length ? eventMessage(events[events.length - 1]) : "";
+      const priorFailureReason = isOccupiedAliasErrorCode(row.failure_reason)
+        ? OCCUPIED_ALIAS_FAILURE_REASON
+        : "";
+      const detectedFailureReason = status === "failed"
+        ? remoteOccupiedAliasReason(task, task?.errors, task?.result, events)
+        : "";
+      const failureReason = priorFailureReason || detectedFailureReason || String(row.failure_reason || "");
+      const taskError = typeof task.error === "string"
+        ? task.error
+        : (typeof task?.error?.message === "string" ? task.error.message : "");
+      const message = priorFailureReason && row.message
+        ? row.message
+        : (taskError || lastMessage || eventReadError || row.message || "");
       let externalAccountId = row.external_account_id;
       if (status === "completed") {
         const accounts = await this.client.listAccounts({ email: row.email, pageSize: 10 });
@@ -1725,7 +1896,7 @@ export class RegistrationService {
       this.db.prepare(`
         UPDATE registration_jobs SET external_account_id = ?, status = ?, stage = ?,
           display_name = ?, birth_date = ?, exit_ip = ?, fingerprint_id = ?, progress_current = ?, progress_total = ?,
-          message = ?, finished_at = ?, updated_at = ? WHERE id = ?
+          message = ?, failure_reason = ?, finished_at = ?, updated_at = ? WHERE id = ?
       `).run(
         externalAccountId,
         status,
@@ -1736,7 +1907,8 @@ export class RegistrationService {
         identity.fingerprintId || row.fingerprint_id,
         Number(task.progress_current ?? task.success ?? row.progress_current ?? 0),
         Math.max(1, Number(task.progress_total ?? row.progress_total ?? 1)),
-        redactProxySecrets(task.error || lastMessage || row.message || ""),
+        redactProxySecrets(message),
+        failureReason,
         finishedAt,
         nowIso(),
         row.id,

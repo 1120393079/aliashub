@@ -209,6 +209,7 @@ const schema = `
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER REFERENCES source_accounts(id) ON DELETE SET NULL,
     address_id INTEGER REFERENCES addresses(id) ON DELETE SET NULL,
+    base_address_id INTEGER REFERENCES addresses(id) ON DELETE SET NULL,
     email TEXT NOT NULL COLLATE NOCASE,
     external_task_id TEXT NOT NULL DEFAULT '',
     external_account_id TEXT NOT NULL DEFAULT '',
@@ -223,6 +224,7 @@ const schema = `
     progress_current INTEGER NOT NULL DEFAULT 0,
     progress_total INTEGER NOT NULL DEFAULT 1,
     message TEXT NOT NULL DEFAULT '',
+    failure_reason TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     finished_at TEXT,
@@ -455,6 +457,89 @@ function seedDemoData(db) {
   audit(db, account.id, "split", "生成分裂地址", "共生成 3 个地址", {});
 }
 
+function legacyRegistrationFailureReason(row = {}) {
+  if (String(row.status || "").toLowerCase() !== "failed") return "";
+  const text = `${row.failure_reason || ""} ${row.stage || ""} ${row.message || ""}`.toLowerCase();
+  return /(?:user_already_exists|user_exists|account_already_exists|email_already_exists|email_already_registered(?:_on_openai)?|email_already_used|email_in_use|(?:user|account|email)\s+already\s+(?:exists|registered|used)|(?:邮箱|电子邮箱)\s*(?:(?:已|已经)\s*(?:被)?|被)\s*(?:占用|注册|使用|存在)|(?:可能|疑似)?\s*已在\s*openai\s*(?:上)?注册过)/i.test(text)
+    ? "user_already_exists"
+    : "";
+}
+
+function normalizedAddressEmail(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function legacyBaseAddressId(email, bases) {
+  const target = normalizedAddressEmail(email);
+  if (!target) return null;
+  const exact = bases.find((base) => normalizedAddressEmail(base.address) === target);
+  if (exact) return exact.id;
+  const at = target.lastIndexOf("@");
+  if (at <= 0 || at === target.length - 1) return null;
+  const local = target.slice(0, at);
+  const domain = target.slice(at + 1);
+  const candidates = bases
+    .map((base) => ({ ...base, address: normalizedAddressEmail(base.address) }))
+    .filter((base) => {
+      const separator = base.address.lastIndexOf("@");
+      if (separator <= 0 || separator === base.address.length - 1) return false;
+      return base.address.slice(separator + 1) === domain && local.startsWith(`${base.address.slice(0, separator)}+`);
+    })
+    .sort((left, right) => right.address.length - left.address.length);
+  return candidates.length ? candidates[0].id : null;
+}
+
+function migrateRegistrationJobHistory(db) {
+  const migrateLinkedAddress = db.prepare(`
+    UPDATE registration_jobs
+    SET base_address_id = (
+      SELECT COALESCE(addresses.parent_address_id, addresses.id)
+      FROM addresses
+      WHERE addresses.id = registration_jobs.address_id
+    )
+    WHERE (base_address_id IS NULL OR base_address_id = 0)
+      AND address_id IS NOT NULL
+      AND EXISTS (SELECT 1 FROM addresses WHERE addresses.id = registration_jobs.address_id)
+  `);
+  const unresolvedRows = db.prepare(`
+    SELECT id, account_id, email
+    FROM registration_jobs
+    WHERE (base_address_id IS NULL OR base_address_id = 0)
+      AND account_id IS NOT NULL
+  `);
+  const basesByAccount = db.prepare(`
+    SELECT id, account_id, address
+    FROM addresses
+    WHERE kind IN ('primary', 'official')
+  `);
+  const setBaseAddress = db.prepare("UPDATE registration_jobs SET base_address_id = ? WHERE id = ? AND (base_address_id IS NULL OR base_address_id = 0)");
+  const failedRows = db.prepare(`
+    SELECT id, status, stage, message, failure_reason
+    FROM registration_jobs
+    WHERE lower(status) = 'failed'
+  `);
+  const setFailureReason = db.prepare("UPDATE registration_jobs SET failure_reason = ? WHERE id = ?");
+
+  db.transaction(() => {
+    migrateLinkedAddress.run();
+    const groupedBases = new Map();
+    for (const base of basesByAccount.all()) {
+      const accountId = Number(base.account_id);
+      const items = groupedBases.get(accountId) || [];
+      items.push(base);
+      groupedBases.set(accountId, items);
+    }
+    for (const row of unresolvedRows.all()) {
+      const baseAddressId = legacyBaseAddressId(row.email, groupedBases.get(Number(row.account_id)) || []);
+      if (baseAddressId) setBaseAddress.run(baseAddressId, row.id);
+    }
+    for (const row of failedRows.all()) {
+      const failureReason = legacyRegistrationFailureReason(row);
+      if (failureReason) setFailureReason.run(failureReason, row.id);
+    }
+  })();
+}
+
 export function createDatabase({ filename, seedDemo = false } = {}) {
   const resolved = path.resolve(filename || "./data/outlook-alias-hub.db");
   fs.mkdirSync(path.dirname(resolved), { recursive: true, mode: 0o700 });
@@ -476,7 +561,16 @@ export function createDatabase({ filename, seedDemo = false } = {}) {
   if (!registrationColumns.includes("exit_ip")) db.exec("ALTER TABLE registration_jobs ADD COLUMN exit_ip TEXT NOT NULL DEFAULT ''");
   if (!registrationColumns.includes("fingerprint_id")) db.exec("ALTER TABLE registration_jobs ADD COLUMN fingerprint_id TEXT NOT NULL DEFAULT ''");
   if (!registrationColumns.includes("deleted_at")) db.exec("ALTER TABLE registration_jobs ADD COLUMN deleted_at TEXT");
+  if (!registrationColumns.includes("base_address_id")) {
+    db.exec("ALTER TABLE registration_jobs ADD COLUMN base_address_id INTEGER REFERENCES addresses(id) ON DELETE SET NULL");
+  }
+  if (!registrationColumns.includes("failure_reason")) {
+    db.exec("ALTER TABLE registration_jobs ADD COLUMN failure_reason TEXT NOT NULL DEFAULT ''");
+  }
+  migrateRegistrationJobHistory(db);
   db.exec("CREATE INDEX IF NOT EXISTS idx_registration_jobs_visible ON registration_jobs(deleted_at, created_at DESC)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_registration_jobs_base_address ON registration_jobs(base_address_id, created_at DESC)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_registration_jobs_address_failure ON registration_jobs(address_id, failure_reason, created_at DESC)");
   const accountStatusCheckColumns = db.pragma("table_info(registered_account_status_checks)")
     .map((column) => column.name);
   if (!accountStatusCheckColumns.includes("http_status")) {

@@ -14,6 +14,7 @@ export async function api(path, options = {}) {
   const response = await fetch(target, {
     credentials: "same-origin",
     ...options,
+    cache: options.cache ?? "no-store",
     headers: {
       ...(options.body && !(options.body instanceof FormData) ? { "Content-Type": "application/json" } : {}),
       ...options.headers,

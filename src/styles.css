@@ -168,6 +168,10 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .registration-launch-form { display: grid; gap: 14px; padding: 17px; }
 .registration-launch-form > .button { justify-self: start; }
 .registration-launch-form .inline-alert { margin: 0; }
+.registration-occupied-alias-alert { align-items: flex-start; }
+.registration-occupied-alias-alert > span { display: grid; min-width: 0; gap: 2px; }
+.registration-occupied-alias-alert b { color: currentColor; font-size: 10px; }
+.registration-occupied-alias-alert small { overflow-wrap: anywhere; color: currentColor; font-size: 9px; line-height: 1.45; opacity: 0.9; }
 .fresh-browser-note { min-height: 52px; display: flex; align-items: center; gap: 10px; padding: 9px 11px; border: 1px solid color-mix(in srgb, var(--green) 24%, var(--line)); border-radius: 6px; background: var(--green-soft); color: var(--green); }
 .fresh-browser-note > span { display: grid; }
 .fresh-browser-note b { color: var(--green-dark); font-size: 10px; }

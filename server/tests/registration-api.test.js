@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import Database from "better-sqlite3";
 import { createDatabase, createSourceAccount, getSetting, nowIso, setSetting } from "../db.js";
 import { createApp } from "../index.js";
 import { jsonRequest } from "./http-harness.js";
@@ -120,6 +121,72 @@ class FakeRegistrationClient {
     return { ok: true };
   }
 }
+
+test("registration job migration preserves legacy occupied alias history", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "aliashub-registration-legacy-test-"));
+  const filename = path.join(directory, "legacy.db");
+  let db;
+  try {
+    const legacy = new Database(filename);
+    legacy.exec(`
+      CREATE TABLE source_accounts (
+        id INTEGER PRIMARY KEY,
+        email TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'connected'
+      );
+      CREATE TABLE addresses (
+        id INTEGER PRIMARY KEY,
+        account_id INTEGER NOT NULL,
+        parent_address_id INTEGER,
+        address TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE registration_jobs (
+        id INTEGER PRIMARY KEY,
+        account_id INTEGER,
+        address_id INTEGER,
+        email TEXT NOT NULL,
+        external_task_id TEXT NOT NULL DEFAULT '',
+        external_account_id TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'queued',
+        stage TEXT NOT NULL DEFAULT 'queued',
+        browser_mode TEXT NOT NULL DEFAULT 'headed',
+        proxy_label TEXT NOT NULL DEFAULT '',
+        display_name TEXT NOT NULL DEFAULT '',
+        birth_date TEXT NOT NULL DEFAULT '',
+        progress_current INTEGER NOT NULL DEFAULT 0,
+        progress_total INTEGER NOT NULL DEFAULT 1,
+        message TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        finished_at TEXT
+      );
+    `);
+    legacy.prepare("INSERT INTO source_accounts (id, email, status) VALUES (1, 'source@outlook.com', 'connected')").run();
+    legacy.prepare(`
+      INSERT INTO addresses (id, account_id, address, kind, status, created_at, updated_at)
+      VALUES (10, 1, 'source@outlook.com', 'primary', 'active', ?, ?)
+    `).run("2026-07-20T12:00:00.000Z", "2026-07-20T12:00:00.000Z");
+    legacy.prepare(`
+      INSERT INTO registration_jobs (id, account_id, address_id, email, status, stage, message, created_at, updated_at, finished_at)
+      VALUES (100, 1, NULL, 'source+legacy-occupied@outlook.com', 'failed', 'register', '可能已在 OpenAI 注册过', ?, ?, ?)
+    `).run("2026-07-20T12:00:00.000Z", "2026-07-20T12:00:00.000Z", "2026-07-20T12:00:00.000Z");
+    legacy.close();
+
+    db = createDatabase({ filename, seedDemo: false });
+    const migrated = db.prepare("SELECT base_address_id, failure_reason FROM registration_jobs WHERE id = 100").get();
+    assert.deepEqual(migrated, {
+      base_address_id: 10,
+      failure_reason: "user_already_exists",
+    });
+  } finally {
+    db?.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test("registration integration generates isolated addresses and exposes mailbox messages", async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "aliashub-registration-api-test-"));
@@ -990,7 +1057,99 @@ test("registration integration generates isolated addresses and exposes mailbox 
       });
     });
 
-    await t.test("classifies occupied emails and warns only after recent distinct conflicts", async () => {
+    await t.test("persists structured occupied error codes without replacing them with later generic failures", async () => {
+      const mappedAddress = db.prepare(`
+        SELECT id FROM addresses
+        WHERE account_id = ? AND parent_address_id = ? AND kind = 'split'
+        ORDER BY id LIMIT 1
+      `).get(account.id, base.id);
+      assert.ok(mappedAddress);
+      const cases = [
+        {
+          name: "task error_code",
+          task: { type: "register", status: "failed", error_code: "email_already_registered_on_openai" },
+          events: [{ message: "注册失败" }],
+        },
+        {
+          name: "task errors",
+          task: { type: "register", status: "failed", errors: [{ code: "user_already_exists" }] },
+          events: [{ message: "注册失败" }],
+        },
+        {
+          name: "task result",
+          task: {
+            type: "register",
+            status: "failed",
+            result: { register_failed_reason: "email_already_registered_on_openai" },
+          },
+          events: [{ message: "注册失败" }],
+        },
+        {
+          name: "task events",
+          task: { type: "register", status: "failed" },
+          events: [{ message: "注册失败", detail: { errors: [{ error_code: "user_already_exists" }] } }],
+        },
+      ];
+      const insert = db.prepare(`
+        INSERT INTO registration_jobs (
+          account_id, address_id, base_address_id, email, external_task_id, status, stage, browser_mode,
+          proxy_label, fingerprint_id, message, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 'running', 'register', 'headed', '直连', 'structured-error', '等待同步', ?, ?)
+      `);
+      const remote = new Map();
+      const ids = [];
+      const originalGetTask = client.getTask;
+      const originalGetTaskEvents = client.getTaskEvents;
+      try {
+        cases.forEach((item, index) => {
+          const taskId = `structured-occupied-${index + 1}`;
+          const createdAt = `2099-01-02T00:00:0${index}.000Z`;
+          const jobId = Number(insert.run(
+            account.id,
+            mappedAddress.id,
+            base.id,
+            `source+structured-occupied-${index + 1}@outlook.com`,
+            taskId,
+            createdAt,
+            createdAt,
+          ).lastInsertRowid);
+          ids.push(jobId);
+          remote.set(taskId, item);
+        });
+        client.getTask = async (taskId) => ({ task_id: taskId, ...remote.get(taskId).task });
+        client.getTaskEvents = async (taskId) => remote.get(taskId).events;
+
+        for (const jobId of ids) {
+          const job = await runtime.registration.syncJob(runtime.registration.getJob(jobId));
+          assert.equal(job.status, "failed");
+          assert.equal(job.failure_reason, "user_already_exists");
+          assert.equal(db.prepare("SELECT failure_reason FROM registration_jobs WHERE id = ?").get(jobId).failure_reason, "user_already_exists");
+        }
+
+        const preservedId = ids[0];
+        const preservedTaskId = "structured-occupied-1";
+        db.prepare(`
+          UPDATE registration_jobs
+          SET status = 'running', message = '已识别结构化占用错误', finished_at = NULL
+          WHERE id = ?
+        `).run(preservedId);
+        remote.set(preservedTaskId, {
+          task: { type: "register", status: "failed", error: "generic registration failed" },
+          events: [{ message: "generic registration failed" }],
+        });
+        await runtime.registration.syncJob(runtime.registration.getJob(preservedId));
+        assert.deepEqual(
+          db.prepare("SELECT failure_reason, message FROM registration_jobs WHERE id = ?").get(preservedId),
+          { failure_reason: "user_already_exists", message: "已识别结构化占用错误" },
+        );
+      } finally {
+        client.getTask = originalGetTask;
+        client.getTaskEvents = originalGetTaskEvents;
+        if (ids.length) db.prepare(`DELETE FROM registration_jobs WHERE id IN (${ids.map(() => "?").join(", ")})`).run(...ids);
+      }
+    });
+
+    await t.test("keeps occupied alias markers after completed jobs, soft deletes, and split deletion", async () => {
       const splitAddresses = db.prepare(`
         SELECT id, address FROM addresses
         WHERE parent_address_id = ? AND kind = 'split'
@@ -999,13 +1158,24 @@ test("registration integration generates isolated addresses and exposes mailbox 
       assert.equal(splitAddresses.length, 2);
       const insert = db.prepare(`
         INSERT INTO registration_jobs (
-          account_id, address_id, email, status, stage, browser_mode, proxy_label, fingerprint_id,
-          message, created_at, updated_at, finished_at
-        ) VALUES (?, ?, ?, ?, 'register', 'headed', '直连', 'synthetic123', ?, ?, ?, ?)
+          account_id, address_id, base_address_id, email, status, stage, browser_mode, proxy_label, fingerprint_id,
+          message, failure_reason, created_at, updated_at, finished_at
+        ) VALUES (?, ?, ?, ?, ?, 'register', 'headed', '直连', 'synthetic123', ?, ?, ?, ?, ?)
       `);
       const syntheticIds = [];
-      const addJob = (address, status, message, createdAt) => {
-        const result = insert.run(account.id, address.id, address.address, status, message, createdAt, createdAt, createdAt);
+      const addJob = (address, status, message, createdAt, failureReason = "") => {
+        const result = insert.run(
+          account.id,
+          address.id,
+          base.id,
+          address.address,
+          status,
+          message,
+          failureReason,
+          createdAt,
+          createdAt,
+          createdAt,
+        );
         syntheticIds.push(Number(result.lastInsertRowid));
         return Number(result.lastInsertRowid);
       };
@@ -1023,25 +1193,93 @@ test("registration integration generates isolated addresses and exposes mailbox 
 
       db.prepare("UPDATE registration_jobs SET deleted_at = ? WHERE id = ?").run("2099-01-01T00:00:01.500Z", firstId);
       let options = await jsonRequest(runtime.app, "/api/registration/options");
-      let baseOption = options.body.accounts[0].bases.find((item) => item.id === base.id);
+      let baseOption = options.body.accounts.find((item) => item.id === account.id).bases.find((item) => item.id === base.id);
       assert.equal(baseOption.registration_state, "warning");
       assert.equal(baseOption.already_exists_count, 1);
+      assert.equal(baseOption.occupied_alias_count, 1);
+      assert.equal(baseOption.occupied_aliases[0].email, splitAddresses[0].address);
+      assert.equal(baseOption.occupied_alias_last_seen_at, "2099-01-01T00:00:01.000Z");
 
       addJob(splitAddresses[1], "failed", "ACCOUNT_ALREADY_EXISTS", "2099-01-01T00:00:02.000Z");
       addJob(splitAddresses[1], "failed", "task already running", "2099-01-01T00:00:03.000Z");
       options = await jsonRequest(runtime.app, "/api/registration/options");
-      baseOption = options.body.accounts[0].bases.find((item) => item.id === base.id);
+      baseOption = options.body.accounts.find((item) => item.id === account.id).bases.find((item) => item.id === base.id);
       assert.equal(baseOption.registration_state, "likely_exhausted");
       assert.equal(baseOption.already_exists_count, 2);
       assert.match(baseOption.registration_hint, /建议更换基础地址/);
 
       addJob(splitAddresses[0], "completed", "注册成功", "2099-01-01T00:00:04.000Z");
       options = await jsonRequest(runtime.app, "/api/registration/options");
-      baseOption = options.body.accounts[0].bases.find((item) => item.id === base.id);
-      assert.equal(baseOption.registration_state, "available");
-      assert.equal(baseOption.already_exists_count, 0);
+      baseOption = options.body.accounts.find((item) => item.id === account.id).bases.find((item) => item.id === base.id);
+      assert.equal(baseOption.registration_state, "likely_exhausted");
+      assert.equal(baseOption.already_exists_count, 2);
+      assert.equal(baseOption.occupied_alias_count, 2);
+
+      const deletedSplitAddress = "source+gpt-occupied-history@outlook.com";
+      const createdAt = "2099-01-01T00:00:05.000Z";
+      const deletedSplitId = Number(db.prepare(`
+        INSERT INTO addresses (
+          account_id, parent_address_id, address, kind, status, strategy, label, purpose, remote_confirmed, created_at, updated_at
+        ) VALUES (?, ?, ?, 'split', 'active', 'plus', 'GPT 注册', 'ChatGPT 注册', 0, ?, ?)
+      `).run(account.id, base.id, deletedSplitAddress, createdAt, createdAt).lastInsertRowid);
+      const deletedSplit = db.prepare("SELECT id, address FROM addresses WHERE id = ?").get(deletedSplitId);
+      const deletedJobId = addJob(
+        deletedSplit,
+        "failed",
+        "邮箱已被占用",
+        "2099-01-01T00:00:06.000Z",
+        "user_already_exists",
+      );
+      const addressList = await jsonRequest(runtime.app, `/api/addresses?accountId=${account.id}&kind=split&q=occupied-history`);
+      assert.equal(addressList.response.status, 200);
+      assert.equal(addressList.body.items.find((item) => item.id === deletedSplitId).registration_occupied, true);
+
+      const removedSplit = await jsonRequest(runtime.app, "/api/addresses/bulk-delete", {
+        method: "POST",
+        body: JSON.stringify({ accountId: account.id, ids: [deletedSplitId] }),
+      });
+      assert.equal(removedSplit.response.status, 200);
+      assert.equal(removedSplit.body.deleted, 1);
+      assert.equal(db.prepare("SELECT address_id, base_address_id FROM registration_jobs WHERE id = ?").get(deletedJobId).address_id, null);
+      assert.equal(db.prepare("SELECT address_id, base_address_id FROM registration_jobs WHERE id = ?").get(deletedJobId).base_address_id, base.id);
+
+      options = await jsonRequest(runtime.app, "/api/registration/options");
+      baseOption = options.body.accounts.find((item) => item.id === account.id).bases.find((item) => item.id === base.id);
+      assert.equal(baseOption.occupied_alias_count, 3);
+      assert.equal(baseOption.occupied_aliases.length, 3);
+      assert.ok(baseOption.occupied_aliases.some((item) => item.email === deletedSplitAddress));
 
       db.prepare(`DELETE FROM registration_jobs WHERE id IN (${syntheticIds.map(() => "?").join(", ")})`).run(...syntheticIds);
+    });
+
+    await t.test("blocks direct iCloud retries after a definite occupied alias failure", async () => {
+      const icloud = createSourceAccount(db, { email: "occupied-alias@icloud.com", provider: "icloud" });
+      db.prepare("UPDATE source_accounts SET status = 'connected', updated_at = ? WHERE id = ?").run(nowIso(), icloud.id);
+      const icloudBase = db.prepare("SELECT * FROM addresses WHERE account_id = ? AND kind = 'primary'").get(icloud.id);
+      const occupiedAt = "2099-01-03T00:00:00.000Z";
+      const jobId = Number(db.prepare(`
+        INSERT INTO registration_jobs (
+          account_id, address_id, base_address_id, email, status, stage, browser_mode,
+          message, failure_reason, created_at, updated_at, finished_at
+        ) VALUES (?, ?, ?, ?, 'failed', 'register', 'headed', '邮箱已占用', 'user_already_exists', ?, ?, ?)
+      `).run(icloud.id, icloudBase.id, icloudBase.id, icloudBase.address, occupiedAt, occupiedAt, occupiedAt).lastInsertRowid);
+      try {
+        const options = await jsonRequest(runtime.app, "/api/registration/options");
+        const option = options.body.accounts.find((item) => item.id === icloud.id).bases.find((item) => item.id === icloudBase.id);
+        assert.equal(option.registration_state, "occupied");
+        assert.equal(option.registration_disabled, true);
+        assert.equal(option.occupied_alias_count, 1);
+
+        const repeated = await jsonRequest(runtime.app, "/api/registration/jobs", {
+          method: "POST",
+          body: JSON.stringify({ accountId: icloud.id, baseAddressId: icloudBase.id, count: 1 }),
+        });
+        assert.equal(repeated.response.status, 409);
+        assert.match(repeated.body.error, /已被目标站占用/);
+      } finally {
+        db.prepare("DELETE FROM registration_jobs WHERE id = ?").run(jobId);
+        db.prepare("DELETE FROM source_accounts WHERE id = ?").run(icloud.id);
+      }
     });
 
     await t.test("bulk deletes terminal registration records atomically", async () => {

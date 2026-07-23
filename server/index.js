@@ -52,14 +52,29 @@ function addressQuery(db, { accountId, kind, q, page = 1, limit = 50 } = {}) {
   const items = db.prepare(`
     SELECT addresses.*, source_accounts.email AS source_email, source_accounts.display_name AS source_name,
       source_accounts.provider AS source_provider,
-      parent.address AS parent_address
+      parent.address AS parent_address,
+      CASE WHEN EXISTS (
+        SELECT 1
+        FROM registration_jobs AS registration_history
+        WHERE (
+          registration_history.address_id = addresses.id
+          OR (
+            addresses.kind IN ('primary', 'official')
+            AND registration_history.base_address_id = addresses.id
+            AND registration_history.email = addresses.address COLLATE NOCASE
+          )
+        )
+          AND lower(registration_history.status) = 'failed'
+          AND registration_history.failure_reason = 'user_already_exists'
+      ) THEN 1 ELSE 0 END AS registration_occupied
     FROM addresses
     JOIN source_accounts ON source_accounts.id = addresses.account_id
     LEFT JOIN addresses parent ON parent.id = addresses.parent_address_id
     WHERE ${where}
     ORDER BY CASE addresses.kind WHEN 'primary' THEN 0 WHEN 'official' THEN 1 ELSE 2 END, addresses.created_at DESC
     LIMIT ? OFFSET ?
-  `).all(...params, limit, (page - 1) * limit);
+  `).all(...params, limit, (page - 1) * limit)
+    .map((item) => ({ ...item, registration_occupied: Boolean(item.registration_occupied) }));
   return { items, total, page, pages: Math.max(1, Math.ceil(total / limit)) };
 }
 
