@@ -163,10 +163,11 @@ test("runner APIs require a complete saved config and expose only masked configu
   const proxy = "api-user:api-password@198.51.100.23:9100";
   const configured = await jsonRequest(runtime.app, "/api/microsoft-registration/runner/config", {
     method: "PUT",
-    body: JSON.stringify({ captcha_key: captchaKey, proxy_mode: "list", proxy_value: proxy, quantity: 2 }),
+    body: JSON.stringify({ captcha_key: captchaKey, proxy_mode: "list", proxy_value: proxy, quantity: 2, country_code: "JP" }),
   });
   assert.equal(configured.response.status, 200);
   assert.equal(configured.body.configured, true);
+  assert.equal(configured.body.country_code, "JP");
   assert.equal(JSON.stringify(configured.body).includes(captchaKey), false);
   assert.equal(JSON.stringify(configured.body).includes("api-password"), false);
   const started = await jsonRequest(runtime.app, "/api/microsoft-registration/runner/start", { method: "POST" });
@@ -177,6 +178,35 @@ test("runner APIs require a complete saved config and expose only masked configu
   const stopped = await jsonRequest(runtime.app, "/api/microsoft-registration/runner/stop", { method: "POST" });
   assert.equal(stopped.response.status, 200);
   assert.equal(stopped.body.run.status, "cancelled");
+});
+
+test("runner selects the Chinese country label from explicit or uniformly tagged proxy regions", async (t) => {
+  const { runner, children } = fixture(t);
+  const proxy = "runner-region-JP-user:runner-password@198.51.100.27:9400";
+  const automatic = runner.saveConfiguration({
+    captcha_key: "runner-country-key",
+    proxy_mode: "list",
+    proxy_value: proxy,
+  });
+  assert.equal(automatic.country_code, "auto");
+  assert.equal(automatic.detected_country_code, "JP");
+  assert.equal(JSON.stringify(automatic).includes("runner-password"), false);
+
+  const automaticRun = await runner.start("https://aliashub.test/alias-hub");
+  children[1].stdout.emit("data", Buffer.from("请输入并发数: (1)\n请输入注册最大数量: (1)\n请选择国家:\n请选择JP的邮箱后缀:\n"));
+  assert.equal(children[1].stdin.text, "1\n1\n日本\n\n");
+  runner.stop();
+
+  const explicit = runner.saveConfiguration({ country_code: "US" });
+  assert.equal(explicit.country_code, "US");
+  const explicitRun = await runner.start("https://aliashub.test/alias-hub");
+  children[3].stdout.emit("data", Buffer.from("请输入并发数: (1)\n请输入注册最大数量: (1)\n请选择国家:\n请选择US的邮箱后缀:\n"));
+  assert.equal(children[3].stdin.text, "1\n1\n美国\n\n");
+  runner.stop();
+
+  assert.throws(() => runner.saveConfiguration({ country_code: "DE" }), /注册地区/);
+  assert.equal(automaticRun.status, "running");
+  assert.equal(explicitRun.status, "running");
 });
 
 test("runner imports saved successful registrations when the executable misses its callback", async (t) => {

@@ -12,6 +12,10 @@ const MAX_PROXY_LINES = 10_000;
 const MAX_PROXY_TEXT = 2_000_000;
 const CALLBACK_TTL_MS = 24 * 60 * 60 * 1000;
 const AUTH_PORT = 8081;
+const COUNTRY_PROMPT_LABELS = {
+  JP: "日本",
+  US: "美国",
+};
 
 function failure(message, status = 400, code = "MICROSOFT_RUNNER_ERROR") {
   return Object.assign(new Error(message), { status, code });
@@ -87,6 +91,35 @@ function normalizeProxyLine(value) {
   const match = existing || colonSeparated;
   if (!match || Number(match[4]) < 1 || Number(match[4]) > 65_535) return "";
   return `${match[1]}:${match[2]}@${match[3]}:${match[4]}`;
+}
+
+function normalizeCountryCode(value) {
+  const code = trimText(value, 8).toUpperCase();
+  if (!code || code === "AUTO") return "auto";
+  if (!Object.hasOwn(COUNTRY_PROMPT_LABELS, code)) {
+    throw failure("注册地区只支持自动、日本或美国");
+  }
+  return code;
+}
+
+function proxyRegionCode(value) {
+  const username = /^([^:@\s]+):/.exec(String(value || ""))?.[1] || "";
+  const match = /(?:^|[-_])(?:region|country)[-_]?([A-Za-z]{2})(?=$|[-_])/i.exec(username);
+  const code = String(match?.[1] || "").toUpperCase();
+  return Object.hasOwn(COUNTRY_PROMPT_LABELS, code) ? code : "";
+}
+
+function detectedProxyRegion(config) {
+  if (config?.proxy_mode !== "list") return "";
+  const codes = splitLines(config.proxy_value).map(proxyRegionCode);
+  if (!codes.length || codes.some((code) => !code)) return "";
+  return new Set(codes).size === 1 ? codes[0] : "";
+}
+
+function countryPromptValue(config) {
+  const configured = normalizeCountryCode(config?.country_code);
+  const code = configured === "auto" ? detectedProxyRegion(config) : configured;
+  return COUNTRY_PROMPT_LABELS[code] || "";
 }
 
 function validFormat(value, label) {
@@ -291,6 +324,7 @@ function defaultConfig() {
     concurrency: 1,
     oauth_mode: "1",
     chrome_version: "143",
+    country_code: "auto",
   };
 }
 
@@ -384,6 +418,17 @@ export class MicrosoftRegistrationRunnerService {
     const latest = this.db.prepare("SELECT * FROM microsoft_registration_runner_runs ORDER BY id DESC LIMIT 1").get();
     const current = this.currentRun();
     const toolReady = this.toolReady();
+    let countryCode = defaultConfig().country_code;
+    let detectedCountryCode = "";
+    if (row?.secret_payload_encrypted) {
+      try {
+        const config = this.storedConfiguration(row);
+        countryCode = config.country_code;
+        detectedCountryCode = detectedProxyRegion(config);
+      } catch {
+        // Keep the masked configuration endpoint available if an old payload cannot be decrypted.
+      }
+    }
     return {
       available: this.encryptionReady && toolReady,
       encryption_ready: this.encryptionReady,
@@ -402,6 +447,8 @@ export class MicrosoftRegistrationRunnerService {
       captcha_type: row?.captcha_type || defaultConfig().captcha_type,
       oauth_mode: row?.oauth_mode || defaultConfig().oauth_mode,
       chrome_version: row?.chrome_version || defaultConfig().chrome_version,
+      country_code: countryCode,
+      detected_country_code: detectedCountryCode,
       updated_at: row?.updated_at || "",
       run: publicRun(current || latest),
       current_run: publicRun(current),
@@ -465,6 +512,7 @@ export class MicrosoftRegistrationRunnerService {
       throw failure("CaptchaRun Two 只支持账号密码代理列表，请使用 username:password@host:port");
     }
     const chromeVersion = integer(has("chrome_version") ? input.chrome_version : existing.chrome_version, 143, 128, 144);
+    const countryCode = normalizeCountryCode(has("country_code") ? input.country_code : existing.country_code);
     return {
       captcha_type: captchaType,
       captcha_key: captchaKey,
@@ -477,6 +525,7 @@ export class MicrosoftRegistrationRunnerService {
       concurrency,
       oauth_mode: oauthMode,
       chrome_version: String(chromeVersion),
+      country_code: countryCode,
     };
   }
 
@@ -504,7 +553,7 @@ export class MicrosoftRegistrationRunnerService {
         chrome_version = excluded.chrome_version,
         updated_at = excluded.updated_at
     `).run(
-      this.encrypt({ captcha_key: normalized.captcha_key, proxy_value: normalized.proxy_value }),
+      this.encrypt({ captcha_key: normalized.captcha_key, proxy_value: normalized.proxy_value, country_code: normalized.country_code }),
       normalized.proxy_mode,
       normalized.proxy_count,
       normalized.account_format,
@@ -521,6 +570,7 @@ export class MicrosoftRegistrationRunnerService {
       proxyCount: normalized.proxy_count,
       quantity: normalized.quantity,
       concurrency: normalized.concurrency,
+      countryCode: normalized.country_code,
     });
     return this.configuration();
   }
@@ -660,7 +710,7 @@ export class MicrosoftRegistrationRunnerService {
       pending = stripAnsi(`${pending}${text}`).slice(-8_000);
       if (/请输入并发数\s*:/.test(pending)) answer("concurrency", config.concurrency);
       if (/请输入注册最大数量\s*:/.test(pending)) answer("quantity", config.quantity);
-      if (/请选择国家\s*:/.test(pending)) answer("country", "");
+      if (/请选择国家\s*:/.test(pending)) answer("country", countryPromptValue(config));
       if (/请选择.*邮箱后缀\s*:/.test(pending)) answer("domain", "");
       const classifiedFailure = classifyRegistrarFailure(pending);
       if (classifiedFailure) failureReason = classifiedFailure;

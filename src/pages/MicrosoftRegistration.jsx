@@ -32,7 +32,10 @@ const defaultRunnerForm = {
   concurrency: 1,
   oauth_mode: "1",
   chrome_version: "143",
+  country_code: "auto",
 };
+
+const countryLabels = { JP: "日本", US: "美国" };
 
 function RegistrationStatus({ status }) {
   const meta = statusMeta[status] || statusMeta.unknown;
@@ -124,6 +127,7 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
           concurrency: nextRunner.concurrency || defaultRunnerForm.concurrency,
           oauth_mode: nextRunner.oauth_mode || defaultRunnerForm.oauth_mode,
           chrome_version: nextRunner.chrome_version || defaultRunnerForm.chrome_version,
+          country_code: nextRunner.country_code || defaultRunnerForm.country_code,
         });
       }
     } catch (error) {
@@ -164,6 +168,7 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
       concurrency: saved.concurrency,
       oauth_mode: saved.oauth_mode,
       chrome_version: saved.chrome_version,
+      country_code: saved.country_code || defaultRunnerForm.country_code,
     }));
     if (!silent) toast("服务器注册配置已保存");
     return saved;
@@ -265,6 +270,7 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
             <FormField label="打码 Key" hint={runner.captcha_key_configured ? "已保存；留空不会覆盖原 Key。" : "注册机必须填写。"}><input type="password" autoComplete="new-password" value={runnerForm.captcha_key} onChange={(event) => updateRunner("captcha_key", event.target.value)} placeholder={runner.captcha_key_configured ? "已保存" : "粘贴打码平台 Key"} /></FormField>
           </div>
           <FormField label="代理方式"><select value={runnerForm.proxy_mode} onChange={(event) => updateRunner("proxy_mode", event.target.value)}><option value="list">账号密码代理列表</option><option value="api">动态代理 API</option></select></FormField>
+          <FormField label="注册地区" hint={runnerForm.country_code === "auto" ? runner.detected_country_code ? `自动匹配：${countryLabels[runner.detected_country_code] || runner.detected_country_code}` : "仅识别代理账号中明确的 region-JP / region-US 标识；未识别时使用注册机默认美国。" : "会按所选地区启动注册机。"}><select value={runnerForm.country_code} onChange={(event) => updateRunner("country_code", event.target.value)}><option value="auto">自动（推荐）</option><option value="JP">日本</option><option value="US">美国</option></select></FormField>
           {captchaRunTwoNeedsList && <div className="inline-alert error"><AlertTriangle size={16} /><span>CaptchaRun Two 只能使用账号密码代理列表；请切换后粘贴 username:password@host:port。</span></div>}
           {runnerForm.proxy_mode === "list" ? <FormField label="账号密码代理" hint={savedProxyMatchesForm ? `已保存 ${runner.proxy.count} 条；留空继续使用。` : "每行一个：username:password@host:port"}><textarea value={runnerForm.proxy_value} onChange={(event) => updateRunner("proxy_value", event.target.value)} rows={5} placeholder={savedProxyMatchesForm ? "需要替换代理时再粘贴新列表" : "username:password@host:port"} /></FormField> : <FormField label="动态代理 API" hint={savedProxyMatchesForm ? "已保存；留空继续使用。" : "填写代理平台 API 地址。"}><input value={runnerForm.proxy_value} onChange={(event) => updateRunner("proxy_value", event.target.value)} placeholder={savedProxyMatchesForm ? "需要替换时再填写" : "https://..."} /></FormField>}
           <div className="form-grid three">
