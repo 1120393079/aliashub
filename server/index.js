@@ -395,6 +395,11 @@ export function createApp(options = {}) {
     if (!fs.existsSync(archive)) return next(Object.assign(new Error("浏览器扩展安装包尚未生成"), { status: 404 }));
     return res.download(archive, "aliashub-outlook-extension.zip");
   });
+  app.get("/api/microsoft-registration/download", auth.requireAdmin, (_req, res, next) => {
+    const archive = path.join(projectRoot, "release", "go-language-microsoft-registration-v9.2.8.zip");
+    if (!fs.existsSync(archive)) return next(Object.assign(new Error("微软注册机安装包尚未上传"), { status: 404 }));
+    return res.download(archive, "go-language-microsoft-registration-v9.2.8.zip");
+  });
 
   app.use("/api/extension", (req, res, next) => {
     res.setHeader("Access-Control-Allow-Origin", "*");

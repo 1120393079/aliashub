@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AlertTriangle, CheckCircle2, Copy, Eye, KeyRound, MailPlus, RefreshCw, RotateCw, Server, ShieldCheck, Trash2, UserPlus } from "lucide-react";
-import { api } from "../api.js";
+import { AlertTriangle, CheckCircle2, Copy, Download, Eye, KeyRound, MailPlus, RefreshCw, RotateCw, Server, ShieldCheck, Trash2, UserPlus } from "lucide-react";
+import { api, appUrl } from "../api.js";
 import { Button, ConfirmDialog, EmptyState, FormField, IconButton, LoadingBlock, Modal, Pagination, StatusBadge, useToast } from "../components.jsx";
 import { copyText, formatDate } from "../utils.js";
 
@@ -57,6 +57,8 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
       toast("复制失败，请手动复制", "error");
     }
   };
+
+  const downloadTool = () => { window.location.href = appUrl("/api/microsoft-registration/download"); };
 
   const load = useCallback(async () => {
     const requestId = ++loadRequest.current;
@@ -165,6 +167,7 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
           <div><b>3. 在本页查看记录，需要时一键加入“源头邮箱”继续 OAuth 与收件管理。</b><small>网页不直接运行 Windows EXE；注册任务仍由 Windows 端程序执行。</small></div>
         </div>}
         <div className="microsoft-registration-webhook-actions">
+          <Button icon={Download} onClick={downloadTool}>下载 Windows 注册机</Button>
           <Button variant="primary" icon={config.webhook_configured ? RotateCw : KeyRound} loading={rotating} disabled={!config.encryption_ready} onClick={rotateWebhook}>{config.webhook_configured ? "重新生成回传地址" : "生成回传地址"}</Button>
         </div>
       </div>
