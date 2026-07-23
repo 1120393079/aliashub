@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AlertCircle, AtSign, CheckCircle2, ClipboardPaste, ExternalLink, KeyRound, ListPlus, LoaderCircle, Mail, Plus, ShieldCheck, Trash2, Unplug, WandSparkles } from "lucide-react";
 import { api } from "../api.js";
 import { Button, ConfirmDialog, EmptyState, FormField, IconButton, LoadingBlock, Modal, ProviderMark, Segmented, StatusBadge, useToast } from "../components.jsx";
@@ -182,16 +182,28 @@ function ConnectionModal({ open, onClose, existingAccount, onConnected }) {
   );
 }
 
-export default function SourcesPage({ refreshKey, onDataChange, onNavigate, addOpen, setAddOpen }) {
+export default function SourcesPage({ refreshKey, onDataChange, onNavigate, addOpen, setAddOpen, initialAccountId, connectAccount = false }) {
   const [data, setData] = useState(null);
   const [reconnecting, setReconnecting] = useState(null);
   const [removing, setRemoving] = useState(null);
   const [aliasSyncTarget, setAliasSyncTarget] = useState(null);
+  const handledConnectTarget = useRef("");
   const toast = useToast();
   const load = async () => {
     try { setData(await api("/api/accounts")); } catch (error) { toast(error.message, "error"); }
   };
   useEffect(() => { load(); }, [refreshKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const accountId = Number(initialAccountId);
+    if (!connectAccount || !data || !Number.isSafeInteger(accountId) || accountId <= 0) return;
+    const key = String(accountId);
+    if (handledConnectTarget.current === key) return;
+    const account = data.items.find((item) => item.id === accountId);
+    if (!account) return;
+    handledConnectTarget.current = key;
+    setReconnecting(account);
+    window.requestAnimationFrame(() => document.getElementById(`source-account-${accountId}`)?.scrollIntoView({ behavior: "smooth", block: "center" }));
+  }, [data, initialAccountId, connectAccount]);
   const remove = async () => {
     try { await api(`/api/accounts/${removing.id}`, { method: "DELETE" }); toast("源头邮箱已移除"); setRemoving(null); load(); onDataChange(); }
     catch (error) { toast(error.message, "error"); }
@@ -210,7 +222,7 @@ export default function SourcesPage({ refreshKey, onDataChange, onNavigate, addO
           const supportsPlus = accountSupportsPlusAliases(account);
           const supportsImported = accountSupportsImportedAliases(account);
           const supportsAliases = supportsOfficial || supportsImported;
-          return <article className={`source-card source-card-${accountMeta.id}`} key={account.id}>
+          return <article id={`source-account-${account.id}`} className={`source-card source-card-${accountMeta.id}${Number(initialAccountId) === account.id ? " source-card-target" : ""}`} key={account.id}>
             <header><ProviderMark provider={accountMeta.id} size={38} /><div><h2>{account.display_name || account.email.split("@")[0]}</h2><p>{account.email}<span className="provider-name">{accountMeta.name}</span></p></div><StatusBadge status={account.status}>{accountStatus[account.status]}</StatusBadge></header>
             {supportsOfficial ? <div className="source-quota"><div><span>官方基础地址</span><b>{account.official_used} <small>/ {account.official_limit}</small></b></div><div className="quota-track"><i style={{ width: `${Math.min(100, account.official_used / account.official_limit * 100)}%` }} /></div><small>剩余 {account.official_remaining} 个记录名额，实际以 Microsoft 官网限制为准</small></div> : <div className="source-provider-capability">{supportsPlus ? <WandSparkles size={18} /> : supportsImported ? <AtSign size={18} /> : <KeyRound size={18} />}<span><b>{accountMeta.capabilityTitle}</b><small>{accountMeta.capabilityDescription}</small></span></div>}
             {supportsImported ? <dl className="source-stats"><div><dt>邮箱别名</dt><dd>{account.icloud_mail_aliases || 0}</dd></div><div><dt>隐藏邮箱</dt><dd>{account.icloud_hide_my_emails || 0}</dd></div><div><dt>收件扫描</dt><dd>{relativeTime(account.last_inbox_scan_at)}</dd></div><div><dt>本地登记</dt><dd>{(account.icloud_mail_aliases || 0) + (account.icloud_hide_my_emails || 0)} 个可直接注册</dd></div></dl> : <dl className="source-stats"><div><dt>官方别名</dt><dd>{supportsAliases ? account.official_aliases : "不支持"}</dd></div><div><dt>分裂地址</dt><dd>{supportsPlus ? account.split_count : "不支持"}</dd></div><div><dt>收件扫描</dt><dd>{relativeTime(account.last_inbox_scan_at)}</dd></div><div><dt>{supportsOfficial ? "别名同步" : accountMeta.connectionLabel}</dt><dd>{supportsOfficial ? relativeTime(account.last_synced_at) : account.connection_connected ? "已连接" : "待连接"}</dd></div></dl>}

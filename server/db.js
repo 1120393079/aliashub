@@ -301,6 +301,49 @@ const schema = `
   CREATE INDEX IF NOT EXISTS idx_registered_account_nfapi_links_account
     ON registered_account_nfapi_links(nfapi_account_id, updated_at DESC);
 
+  CREATE TABLE IF NOT EXISTS microsoft_registration_imports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    payload_sha256 TEXT NOT NULL UNIQUE,
+    source_label TEXT NOT NULL DEFAULT 'go-ms',
+    item_count INTEGER NOT NULL DEFAULT 0,
+    raw_payload_encrypted TEXT NOT NULL,
+    received_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_microsoft_registration_imports_received
+    ON microsoft_registration_imports(received_at DESC);
+
+  CREATE TABLE IF NOT EXISTS microsoft_registration_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    display_name TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'received'
+      CHECK(status IN ('received', 'success', 'failed', 'unknown')),
+    proxy_label TEXT NOT NULL DEFAULT '',
+    source_label TEXT NOT NULL DEFAULT 'go-ms',
+    credential_payload_encrypted TEXT NOT NULL DEFAULT '',
+    source_payload_encrypted TEXT NOT NULL DEFAULT '',
+    source_import_id INTEGER REFERENCES microsoft_registration_imports(id) ON DELETE SET NULL,
+    source_account_id INTEGER REFERENCES source_accounts(id) ON DELETE SET NULL,
+    external_record_key TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    has_password INTEGER NOT NULL DEFAULT 0,
+    has_refresh_token INTEGER NOT NULL DEFAULT 0,
+    has_access_token INTEGER NOT NULL DEFAULT 0,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    upload_count INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_microsoft_registration_accounts_seen
+    ON microsoft_registration_accounts(last_seen_at DESC, id DESC);
+  CREATE INDEX IF NOT EXISTS idx_microsoft_registration_accounts_status
+    ON microsoft_registration_accounts(status, last_seen_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_microsoft_registration_accounts_source
+    ON microsoft_registration_accounts(source_account_id, last_seen_at DESC);
+
   CREATE TABLE IF NOT EXISTS nfapi_oauth_import_sessions (
     id TEXT PRIMARY KEY,
     external_account_id INTEGER NOT NULL CHECK(external_account_id > 0),
@@ -611,6 +654,7 @@ export function createDatabase({ filename, seedDemo = false } = {}) {
     nfapi_admin_api_key_encrypted: "",
     nfapi_import_defaults: "{}",
     nfapi_last_connected_at: "",
+    microsoft_registration_webhook_token_hash: "",
   };
   const statement = db.prepare("INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, ?, ?)");
   Object.entries(defaults).forEach(([key, value]) => statement.run(key, value, nowIso()));

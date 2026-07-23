@@ -12,6 +12,7 @@ import { GoogleGmailClient } from "./google-gmail.js";
 import { ICloudImapClient, icloudImapConfiguration } from "./icloud-imap.js";
 import { MicrosoftGraphClient } from "./microsoft-graph.js";
 import { NfapiService, PUBLIC_AGENT_IDENTITY_ERROR_CODES } from "./nfapi-service.js";
+import { MicrosoftRegistrationService } from "./microsoft-registration-service.js";
 import { RegistrationClient } from "./registration-client.js";
 import { RegistrationService } from "./registration-service.js";
 
@@ -351,6 +352,10 @@ export function createApp(options = {}) {
     baseUrl: options.nfapiBaseUrl || process.env.SUB2_BASE_URL || process.env.NFAPI_BASE_URL,
     apiKey: options.nfapiApiKey || process.env.SUB2_ADMIN_API_KEY || process.env.NFAPI_ADMIN_API_KEY,
   });
+  const microsoftRegistration = options.microsoftRegistration || new MicrosoftRegistrationService({
+    db,
+    encryptionKey: options.dataEncryptionKey || process.env.DATA_ENCRYPTION_KEY,
+  });
   const auth = createAuth({
     username: process.env.ADMIN_USERNAME ?? "admin",
     password: process.env.ADMIN_PASSWORD || "",
@@ -408,6 +413,10 @@ export function createApp(options = {}) {
     try { res.json(extension.syncAliases(req.body?.email, req.body?.aliases)); } catch (error) { next(error); }
   });
 
+  app.post("/api/integrations/microsoft-register/v1/ingest/:token", (req, res, next) => {
+    try { res.status(202).json(microsoftRegistration.ingest(req.params.token, req.body)); } catch (error) { next(error); }
+  });
+
   app.use("/api/external", registration.requireConnectorKey.bind(registration));
   app.get("/api/external/accounts", (req, res, next) => {
     try { res.json(registration.externalAccounts(req.query)); } catch (error) { next(error); }
@@ -417,6 +426,25 @@ export function createApp(options = {}) {
   });
 
   app.use("/api", auth.requireAdmin);
+
+  app.get("/api/microsoft-registration/config", (_req, res) => {
+    res.json(microsoftRegistration.configuration(publicBaseUrl));
+  });
+  app.post("/api/microsoft-registration/webhook-token", (_req, res, next) => {
+    try { res.status(201).json(microsoftRegistration.rotateWebhookToken(publicBaseUrl)); } catch (error) { next(error); }
+  });
+  app.get("/api/microsoft-registration/accounts", (req, res, next) => {
+    try { res.json(microsoftRegistration.listAccounts(req.query)); } catch (error) { next(error); }
+  });
+  app.get("/api/microsoft-registration/accounts/:id/credentials", (req, res, next) => {
+    try { res.json(microsoftRegistration.credentials(req.params.id)); } catch (error) { next(error); }
+  });
+  app.post("/api/microsoft-registration/accounts/:id/add-source", (req, res, next) => {
+    try { res.json(microsoftRegistration.addSourceAccount(req.params.id)); } catch (error) { next(error); }
+  });
+  app.delete("/api/microsoft-registration/accounts/:id", (req, res, next) => {
+    try { res.json(microsoftRegistration.deleteAccount(req.params.id)); } catch (error) { next(error); }
+  });
 
   app.get("/api/registration/options", async (_req, res, next) => {
     try { res.json(await registration.options()); } catch (error) { next(error); }
@@ -1204,6 +1232,7 @@ export function createApp(options = {}) {
     delete settings.google_oauth_client_secret_encrypted;
     delete settings.nfapi_admin_api_key_encrypted;
     delete settings.nfapi_import_defaults;
+    delete settings.microsoft_registration_webhook_token_hash;
     res.json({
       ...settings,
       ...gmail.configuration(),
@@ -1242,7 +1271,7 @@ export function createApp(options = {}) {
     if (PUBLIC_AGENT_IDENTITY_ERROR_CODES.has(error?.code)) body.code = error.code;
     res.status(status).json(body);
   });
-  return { app, db, graph, gmail, icloud, inbox, extension, jobs, registration, nfapi };
+  return { app, db, graph, gmail, icloud, inbox, extension, jobs, registration, nfapi, microsoftRegistration };
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
