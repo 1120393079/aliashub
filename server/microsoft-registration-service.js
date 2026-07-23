@@ -269,6 +269,14 @@ export class MicrosoftRegistrationService {
 
   ingest(token, body) {
     this.authorizeWebhook(token);
+    return this.ingestPayload(body);
+  }
+
+  ingestTrusted(body) {
+    return this.ingestPayload(body);
+  }
+
+  ingestPayload(body) {
     this.requireEncryption();
     if (!plainObject(body) && !Array.isArray(body)) {
       throw errorWithStatus("回传数据必须为 JSON 对象或数组", 400, "MICROSOFT_REGISTRATION_INVALID_PAYLOAD");

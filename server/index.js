@@ -12,6 +12,7 @@ import { GoogleGmailClient } from "./google-gmail.js";
 import { ICloudImapClient, icloudImapConfiguration } from "./icloud-imap.js";
 import { MicrosoftGraphClient } from "./microsoft-graph.js";
 import { NfapiService, PUBLIC_AGENT_IDENTITY_ERROR_CODES } from "./nfapi-service.js";
+import { MicrosoftRegistrationRunnerService } from "./microsoft-registration-runner-service.js";
 import { MicrosoftRegistrationService } from "./microsoft-registration-service.js";
 import { RegistrationClient } from "./registration-client.js";
 import { RegistrationService } from "./registration-service.js";
@@ -356,6 +357,16 @@ export function createApp(options = {}) {
     db,
     encryptionKey: options.dataEncryptionKey ?? process.env.DATA_ENCRYPTION_KEY,
   });
+  const microsoftRegistrationRunner = options.microsoftRegistrationRunner || new MicrosoftRegistrationRunnerService({
+    db,
+    dataDir,
+    encryptionKey: options.dataEncryptionKey ?? process.env.DATA_ENCRYPTION_KEY,
+    toolDir: options.microsoftRegistrationRunnerDir,
+    wineBinary: options.microsoftRegistrationWineBinary,
+    xvfbBinary: options.microsoftRegistrationXvfbBinary,
+    spawnFn: options.microsoftRegistrationSpawnFn,
+    waitForPort: options.microsoftRegistrationWaitForPort,
+  });
   const auth = createAuth({
     username: process.env.ADMIN_USERNAME ?? "admin",
     password: process.env.ADMIN_PASSWORD || "",
@@ -421,6 +432,9 @@ export function createApp(options = {}) {
   app.post("/api/integrations/microsoft-register/v1/ingest/:token", (req, res, next) => {
     try { res.status(202).json(microsoftRegistration.ingest(req.params.token, req.body)); } catch (error) { next(error); }
   });
+  app.post("/api/integrations/microsoft-register/v1/runner/:runId/:token", (req, res, next) => {
+    try { res.status(202).json(microsoftRegistrationRunner.ingest(req.params.runId, req.params.token, req.body, microsoftRegistration)); } catch (error) { next(error); }
+  });
 
   app.use("/api/external", registration.requireConnectorKey.bind(registration));
   app.get("/api/external/accounts", (req, res, next) => {
@@ -434,6 +448,21 @@ export function createApp(options = {}) {
 
   app.get("/api/microsoft-registration/config", (_req, res) => {
     res.json(microsoftRegistration.configuration(publicBaseUrl));
+  });
+  app.get("/api/microsoft-registration/runner", (_req, res) => {
+    res.json(microsoftRegistrationRunner.configuration());
+  });
+  app.put("/api/microsoft-registration/runner/config", (req, res, next) => {
+    try { res.json(microsoftRegistrationRunner.saveConfiguration(req.body || {})); } catch (error) { next(error); }
+  });
+  app.post("/api/microsoft-registration/runner/start", async (_req, res, next) => {
+    try { res.status(202).json({ run: await microsoftRegistrationRunner.start(publicBaseUrl) }); } catch (error) { next(error); }
+  });
+  app.post("/api/microsoft-registration/runner/stop", (req, res, next) => {
+    try { res.json(microsoftRegistrationRunner.stop(req.body || {})); } catch (error) { next(error); }
+  });
+  app.get("/api/microsoft-registration/runner/logs", (req, res, next) => {
+    try { res.json(microsoftRegistrationRunner.logs(req.query)); } catch (error) { next(error); }
   });
   app.post("/api/microsoft-registration/webhook-token", (_req, res, next) => {
     try { res.status(201).json(microsoftRegistration.rotateWebhookToken(publicBaseUrl)); } catch (error) { next(error); }
@@ -1276,7 +1305,7 @@ export function createApp(options = {}) {
     if (PUBLIC_AGENT_IDENTITY_ERROR_CODES.has(error?.code)) body.code = error.code;
     res.status(status).json(body);
   });
-  return { app, db, graph, gmail, icloud, inbox, extension, jobs, registration, nfapi, microsoftRegistration };
+  return { app, db, graph, gmail, icloud, inbox, extension, jobs, registration, nfapi, microsoftRegistration, microsoftRegistrationRunner };
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
@@ -1288,6 +1317,7 @@ if (isMain) {
   const server = runtime.app.listen(port, host, () => console.log(`AliasHub listening on http://${host}:${port}`));
   const shutdown = async () => {
     server.close();
+    await runtime.microsoftRegistrationRunner.stopForShutdown();
     runtime.db.close();
     process.exit(0);
   };

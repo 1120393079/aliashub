@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AlertTriangle, CheckCircle2, Copy, Download, Eye, KeyRound, MailPlus, RefreshCw, RotateCw, Server, ShieldCheck, Trash2, UserPlus } from "lucide-react";
-import { api, appUrl } from "../api.js";
+import { Activity, AlertTriangle, CheckCircle2, Copy, Eye, KeyRound, MailPlus, Play, RefreshCw, Save, Server, Square, Terminal, Trash2, UserPlus } from "lucide-react";
+import { api } from "../api.js";
 import { Button, ConfirmDialog, EmptyState, FormField, IconButton, LoadingBlock, Modal, Pagination, StatusBadge, useToast } from "../components.jsx";
 import { copyText, formatDate } from "../utils.js";
 
@@ -11,8 +11,36 @@ const statusMeta = {
   unknown: { label: "待识别", badge: "inactive" },
 };
 
+const runnerStatusMeta = {
+  starting: { label: "正在启动", badge: "warning" },
+  running: { label: "正在注册", badge: "active" },
+  stopping: { label: "正在停止", badge: "warning" },
+  completed: { label: "已完成", badge: "active" },
+  cancelled: { label: "已停止", badge: "inactive" },
+  interrupted: { label: "已中断", badge: "failed" },
+  failed: { label: "运行失败", badge: "failed" },
+};
+
+const defaultRunnerForm = {
+  captcha_type: "3",
+  captcha_key: "",
+  proxy_mode: "list",
+  proxy_value: "",
+  account_format: "aaaaa11111111",
+  password_format: "aaaaa11111111",
+  quantity: 1,
+  concurrency: 1,
+  oauth_mode: "3",
+  chrome_version: "143",
+};
+
 function RegistrationStatus({ status }) {
   const meta = statusMeta[status] || statusMeta.unknown;
+  return <StatusBadge status={meta.badge}>{meta.label}</StatusBadge>;
+}
+
+function RunnerStatus({ run }) {
+  const meta = runnerStatusMeta[run?.status] || { label: "等待配置", badge: "inactive" };
   return <StatusBadge status={meta.badge}>{meta.label}</StatusBadge>;
 }
 
@@ -36,17 +64,22 @@ function CredentialModal({ credentials, onClose, onCopy }) {
 export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, onNavigate }) {
   const [config, setConfig] = useState(null);
   const [accounts, setAccounts] = useState(null);
+  const [runner, setRunner] = useState(null);
+  const [runnerForm, setRunnerForm] = useState(defaultRunnerForm);
+  const [runnerLogs, setRunnerLogs] = useState([]);
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("");
   const [page, setPage] = useState(1);
-  const [provisioned, setProvisioned] = useState(null);
-  const [rotating, setRotating] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [savingRunner, setSavingRunner] = useState(false);
+  const [startingRunner, setStartingRunner] = useState(false);
+  const [stoppingRunner, setStoppingRunner] = useState(false);
   const [credentials, setCredentials] = useState(null);
   const [pendingDelete, setPendingDelete] = useState(null);
   const [addingSourceId, setAddingSourceId] = useState(null);
   const [deleting, setDeleting] = useState(false);
   const loadRequest = useRef(0);
+  const runnerFormInitialized = useRef(false);
   const toast = useToast();
 
   const copy = async (value, message) => {
@@ -58,8 +91,6 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
     }
   };
 
-  const downloadTool = () => { window.location.href = appUrl("/api/microsoft-registration/download"); };
-
   const load = useCallback(async () => {
     const requestId = ++loadRequest.current;
     setLoading(true);
@@ -67,13 +98,34 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
       const params = new URLSearchParams({ page: String(page), limit: "50" });
       if (query.trim()) params.set("q", query.trim());
       if (status) params.set("status", status);
-      const [nextConfig, nextAccounts] = await Promise.all([
+      const [nextConfig, nextAccounts, nextRunner] = await Promise.all([
         api("/api/microsoft-registration/config"),
         api(`/api/microsoft-registration/accounts?${params.toString()}`),
+        api("/api/microsoft-registration/runner"),
       ]);
+      const run = nextRunner.current_run || nextRunner.run;
+      const nextLogs = run?.id
+        ? await api(`/api/microsoft-registration/runner/logs?runId=${run.id}&limit=80`)
+        : { items: [] };
       if (requestId !== loadRequest.current) return;
       setConfig(nextConfig);
       setAccounts(nextAccounts);
+      setRunner(nextRunner);
+      setRunnerLogs(nextLogs.items || []);
+      if (!runnerFormInitialized.current) {
+        runnerFormInitialized.current = true;
+        setRunnerForm({
+          ...defaultRunnerForm,
+          captcha_type: nextRunner.captcha_type || defaultRunnerForm.captcha_type,
+          proxy_mode: nextRunner.proxy?.mode || defaultRunnerForm.proxy_mode,
+          account_format: nextRunner.account_format || defaultRunnerForm.account_format,
+          password_format: nextRunner.password_format || defaultRunnerForm.password_format,
+          quantity: nextRunner.quantity || defaultRunnerForm.quantity,
+          concurrency: nextRunner.concurrency || defaultRunnerForm.concurrency,
+          oauth_mode: nextRunner.oauth_mode || defaultRunnerForm.oauth_mode,
+          chrome_version: nextRunner.chrome_version || defaultRunnerForm.chrome_version,
+        });
+      }
     } catch (error) {
       if (requestId === loadRequest.current) toast(error.message, "error");
     } finally {
@@ -83,23 +135,75 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
 
   useEffect(() => { load(); }, [load, refreshKey]);
   useEffect(() => () => { loadRequest.current += 1; }, []);
+  const runnerActive = ["starting", "running", "stopping"].includes(runner?.current_run?.status);
   useEffect(() => {
-    if (!config?.webhook_configured) return undefined;
-    const timer = window.setInterval(() => load(), 12_000);
+    if (!runnerActive) return undefined;
+    const timer = window.setInterval(() => load(), 3_000);
     return () => window.clearInterval(timer);
-  }, [config?.webhook_configured, load]);
+  }, [runnerActive, load]);
 
-  const rotateWebhook = async () => {
-    setRotating(true);
+  const updateRunner = (key, value) => setRunnerForm((current) => ({ ...current, [key]: value }));
+
+  const saveRunnerConfiguration = async ({ silent = false } = {}) => {
+    const payload = { ...runnerForm };
+    if (!payload.captcha_key.trim() && runner?.captcha_key_configured) delete payload.captcha_key;
+    if (!payload.proxy_value.trim() && runner?.proxy?.configured && runner.proxy.mode === payload.proxy_mode) delete payload.proxy_value;
+    const saved = await api("/api/microsoft-registration/runner/config", { method: "PUT", body: payload });
+    setRunner(saved);
+    setRunnerForm((current) => ({
+      ...current,
+      captcha_key: "",
+      proxy_value: "",
+      captcha_type: saved.captcha_type,
+      proxy_mode: saved.proxy?.mode || current.proxy_mode,
+      account_format: saved.account_format,
+      password_format: saved.password_format,
+      quantity: saved.quantity,
+      concurrency: saved.concurrency,
+      oauth_mode: saved.oauth_mode,
+      chrome_version: saved.chrome_version,
+    }));
+    if (!silent) toast("服务器注册配置已保存");
+    return saved;
+  };
+
+  const saveRunner = async () => {
+    setSavingRunner(true);
     try {
-      const result = await api("/api/microsoft-registration/webhook-token", { method: "POST" });
-      setProvisioned(result);
-      setConfig(result);
-      toast("回传地址已生成，请立即复制到 Windows 注册机的 mail.toml");
+      await saveRunnerConfiguration();
     } catch (error) {
       toast(error.message, "error");
     } finally {
-      setRotating(false);
+      setSavingRunner(false);
+    }
+  };
+
+  const startRunner = async () => {
+    setStartingRunner(true);
+    try {
+      await saveRunnerConfiguration({ silent: true });
+      const result = await api("/api/microsoft-registration/runner/start", { method: "POST" });
+      setRunner((current) => ({ ...current, run: result.run, current_run: result.run, configured: true }));
+      toast("服务器注册机已启动，结果会自动显示在下方");
+      await load();
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      setStartingRunner(false);
+    }
+  };
+
+  const stopRunner = async () => {
+    setStoppingRunner(true);
+    try {
+      const result = await api("/api/microsoft-registration/runner/stop", { method: "POST" });
+      setRunner((current) => ({ ...current, run: result.run || current?.run, current_run: null }));
+      toast(result.stopped ? "服务器注册机已停止" : "当前没有运行中的注册任务");
+      await load();
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      setStoppingRunner(false);
     }
   };
 
@@ -143,24 +247,35 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
     setPage(1);
   };
 
-  if (!config || !accounts) return <div className="page-stack"><LoadingBlock rows={9} /></div>;
-  const configLine = provisioned ? `server_upload_url = "${provisioned.ingest_url}"` : "";
+  if (!config || !accounts || !runner) return <div className="page-stack"><LoadingBlock rows={9} /></div>;
+  const activeRun = runner.current_run;
+  const visibleRun = activeRun || runner.run;
 
   return <div className="page-stack microsoft-registration-page">
-    <section className="panel microsoft-registration-webhook">
-      <header className="panel-header"><div><h2>微软邮箱注册</h2><p>按下面 3 步操作即可；注册结果会自动回到本页。</p></div><StatusBadge status={config.webhook_configured ? "active" : "inactive"}>{provisioned ? "配置已生成" : config.webhook_configured ? "已设置" : "未设置"}</StatusBadge></header>
-      {!config.encryption_ready && <div className="inline-alert error"><AlertTriangle size={16} /><span>服务端尚未配置 DATA_ENCRYPTION_KEY，不能接收并加密保存注册凭据。</span></div>}
-      <div className="microsoft-registration-webhook-body">
-        <div className="microsoft-registration-step-grid">
-          <article className="microsoft-registration-step is-ready"><span>1</span><div><b>下载并解压</b><small>下载后解压到 Windows 任意文件夹。</small><Button icon={Download} onClick={downloadTool}>下载注册机</Button></div></article>
-          <article className={`microsoft-registration-step ${provisioned ? "is-done" : "is-ready"}`}><span>2</span><div><b>{provisioned ? "配置已生成" : config.webhook_configured ? "重新生成配置" : "生成配置"}</b><small>{provisioned ? "复制下面的一行配置即可。" : config.webhook_configured ? "需要新配置时点击；旧配置会自动失效。" : "点击一次，系统会生成需要填入的配置。"}</small><Button variant="primary" icon={config.webhook_configured ? RotateCw : KeyRound} loading={rotating} disabled={!config.encryption_ready} onClick={rotateWebhook}>{config.webhook_configured ? "重新生成配置" : "生成配置"}</Button></div></article>
-          <article className={`microsoft-registration-step ${provisioned ? "is-ready" : "is-waiting"}`}><span>3</span><div><b>双击开始注册</b><small>先双击 <code>go授权服务</code>，再双击 <code>go-ms</code>。</small></div></article>
-        </div>
-        {provisioned ? <div className="microsoft-registration-config-ready">
-          <header><span><ShieldCheck size={19} /></span><div><b>现在只需要复制一行</b><small>打开解压后的 <code>mail.toml</code>，找到 <code>server_upload_url = ""</code>，整行替换后保存。</small></div></header>
-          <FormField label="第 2 步：一键复制配置"><div className="copy-input"><input readOnly value={configLine} /><Button variant="primary" icon={Copy} onClick={() => copy(configLine, "配置已复制，现在粘贴到 mail.toml")}>复制配置</Button></div></FormField>
-          <div className="microsoft-registration-launch-note"><CheckCircle2 size={16} /><span>保存后：先启动 <b>go授权服务-v1.0.5.exe</b>，再启动 <b>go-ms-v9.2.8.exe</b>。成功账号会自动显示在下方。</span></div>
-        </div> : <div className="microsoft-registration-next-hint"><KeyRound size={18} /><span>{config.webhook_configured ? "需要再次查看配置时，点击第 2 步“重新生成配置”；旧配置会自动失效。" : "先完成第 1 步，再点击“生成配置”；不需要手动填写网站地址。"}</span></div>}
+    <section className="panel microsoft-registration-runner">
+      <header className="panel-header"><div><h2>服务器直接注册</h2><p>不用下载或打开 Windows 程序；保存配置后直接点击开始注册。</p></div><RunnerStatus run={visibleRun} /></header>
+      {!runner.available && <div className="inline-alert error"><AlertTriangle size={16} /><span>{!runner.encryption_ready ? "服务器加密配置未完成，暂时不能保存注册参数。" : "服务器注册机尚未部署完成。"}</span></div>}
+      <div className="microsoft-registration-runner-layout">
+        <section className="microsoft-registration-runner-form">
+          <header><span><Server size={19} /></span><div><b>填写一次，后面直接开始</b><small>打码 Key 与代理会加密保存；再次使用时可以留空。</small></div></header>
+          <div className="form-grid two">
+            <FormField label="打码平台"><select value={runnerForm.captcha_type} onChange={(event) => updateRunner("captcha_type", event.target.value)}><option value="3">CaptchaRun Two</option><option value="1">CaptchaRun</option><option value="2">EZ-Captcha</option></select></FormField>
+            <FormField label="打码 Key" hint={runner.captcha_key_configured ? "已保存；留空不会覆盖原 Key。" : "注册机必须填写。"}><input type="password" autoComplete="new-password" value={runnerForm.captcha_key} onChange={(event) => updateRunner("captcha_key", event.target.value)} placeholder={runner.captcha_key_configured ? "已保存" : "粘贴打码平台 Key"} /></FormField>
+          </div>
+          <FormField label="代理方式"><select value={runnerForm.proxy_mode} onChange={(event) => updateRunner("proxy_mode", event.target.value)}><option value="list">账号密码代理列表</option><option value="api">动态代理 API</option></select></FormField>
+          {runnerForm.proxy_mode === "list" ? <FormField label="账号密码代理" hint={runner.proxy?.configured ? `已保存 ${runner.proxy.count} 条；留空继续使用。` : "每行一个：username:password@host:port"}><textarea value={runnerForm.proxy_value} onChange={(event) => updateRunner("proxy_value", event.target.value)} rows={5} placeholder={runner.proxy?.configured ? "需要替换代理时再粘贴新列表" : "username:password@host:port"} /></FormField> : <FormField label="动态代理 API" hint={runner.proxy?.configured ? "已保存；留空继续使用。" : "填写代理平台 API 地址。"}><input value={runnerForm.proxy_value} onChange={(event) => updateRunner("proxy_value", event.target.value)} placeholder={runner.proxy?.configured ? "需要替换时再填写" : "https://..."} /></FormField>}
+          <div className="form-grid three">
+            <FormField label="账号格式" hint="a=小写、A=大写、1=数字"><input value={runnerForm.account_format} onChange={(event) => updateRunner("account_format", event.target.value)} /></FormField>
+            <FormField label="注册数量"><input type="number" min="1" max="10000" value={runnerForm.quantity} onChange={(event) => updateRunner("quantity", event.target.value)} /></FormField>
+            <FormField label="并发数"><input type="number" min="1" max="100" value={runnerForm.concurrency} onChange={(event) => updateRunner("concurrency", event.target.value)} /></FormField>
+          </div>
+          <div className="microsoft-registration-runner-actions"><Button icon={Save} loading={savingRunner} disabled={!runner.available || runnerActive} onClick={saveRunner}>保存配置</Button>{runnerActive ? <Button variant="danger" icon={Square} loading={stoppingRunner} onClick={stopRunner}>停止注册</Button> : <Button variant="primary" icon={Play} loading={startingRunner} disabled={!runner.available} onClick={startRunner}>保存并开始注册</Button>}</div>
+        </section>
+        <aside className="microsoft-registration-runner-status">
+          <header><span><Activity size={18} /></span><div><b>{visibleRun ? `任务 #${visibleRun.id}` : "还没有任务"}</b><small>{visibleRun?.message || "保存配置后，点击“保存并开始注册”。"}</small></div><RunnerStatus run={visibleRun} /></header>
+          {visibleRun && <dl><div><dt>计划注册</dt><dd>{visibleRun.quantity} 个</dd></div><div><dt>已回传</dt><dd>{visibleRun.received_count} 个</dd></div><div><dt>代理</dt><dd>{visibleRun.proxy_count || 0} 条</dd></div><div><dt>并发</dt><dd>{visibleRun.concurrency || 1}</dd></div></dl>}
+          <div className="microsoft-registration-runner-log"><div><Terminal size={15} /><b>运行日志</b></div>{runnerLogs.length ? <pre>{runnerLogs.slice(-8).map((item) => `[${item.stream}] ${item.message}`).join("\n")}</pre> : <p>启动后会在这里显示服务器注册机状态。</p>}</div>
+        </aside>
       </div>
     </section>
 
@@ -191,7 +306,7 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
         </tr>)}</tbody></table></div>
         <div className="microsoft-registration-mobile-list">{accounts.items.map((item) => <article key={item.id}><header><span><b>{item.email}</b><small>{item.display_name || item.source_label}</small></span><RegistrationStatus status={item.status} /></header><p>{item.proxy_label || "未提供代理"} · {formatDate(item.last_seen_at)}</p><footer><span className="microsoft-registration-flags">{item.has_password && <i>密码</i>}{item.has_refresh_token && <i>Refresh</i>}{item.has_access_token && <i>Access</i>}</span><span className="row-actions"><IconButton icon={Eye} label="查看凭据" disabled={!item.has_password && !item.has_refresh_token && !item.has_access_token} onClick={() => revealCredentials(item.id)} />{item.source_account_id ? <IconButton icon={MailPlus} label="打开源头邮箱" onClick={() => onNavigate("sources", { accountId: item.source_account_id })} /> : <IconButton icon={UserPlus} label="加入源头邮箱" disabled={addingSourceId === item.id} onClick={() => addSource(item.id)} />}<IconButton icon={Trash2} label="删除" variant="danger" onClick={() => setPendingDelete(item)} /></span></footer></article>)}</div>
         <div className="table-footer"><span>共 {accounts.total} 个注册邮箱</span><Pagination page={accounts.page} pages={accounts.pages} onChange={setPage} /></div>
-      </> : <EmptyState icon={MailPlus} title="还没有微软注册记录" description="生成回传地址并写入 Go 注册机的 mail.toml 后，注册结果会自动显示在这里。" action={!config.webhook_configured && config.encryption_ready ? <Button variant="primary" icon={KeyRound} onClick={rotateWebhook}>生成回传地址</Button> : undefined} />}
+      </> : <EmptyState icon={MailPlus} title="还没有微软注册记录" description="启动上方的服务器注册机后，成功或失败的结果会自动显示在这里。" action={!runnerActive && runner.available ? <Button variant="primary" icon={Play} onClick={startRunner}>开始注册</Button> : undefined} />}
     </section>
 
     <CredentialModal credentials={credentials} onClose={() => setCredentials(null)} onCopy={(value) => copy(value, "凭据已复制")} />

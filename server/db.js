@@ -344,6 +344,64 @@ const schema = `
   CREATE INDEX IF NOT EXISTS idx_microsoft_registration_accounts_source
     ON microsoft_registration_accounts(source_account_id, last_seen_at DESC);
 
+  CREATE TABLE IF NOT EXISTS microsoft_registration_runner_config (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    secret_payload_encrypted TEXT NOT NULL DEFAULT '',
+    captcha_key_configured INTEGER NOT NULL DEFAULT 0,
+    proxy_mode TEXT NOT NULL DEFAULT 'list' CHECK(proxy_mode IN ('list', 'api')),
+    proxy_count INTEGER NOT NULL DEFAULT 0,
+    account_format TEXT NOT NULL DEFAULT 'aaaaa11111111',
+    password_format TEXT NOT NULL DEFAULT 'aaaaa11111111',
+    quantity INTEGER NOT NULL DEFAULT 1,
+    concurrency INTEGER NOT NULL DEFAULT 1,
+    captcha_type TEXT NOT NULL DEFAULT '3',
+    oauth_mode TEXT NOT NULL DEFAULT '3',
+    chrome_version TEXT NOT NULL DEFAULT '143',
+    updated_at TEXT NOT NULL DEFAULT ''
+  );
+
+  CREATE TABLE IF NOT EXISTS microsoft_registration_runner_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    status TEXT NOT NULL CHECK(status IN ('starting', 'running', 'stopping', 'completed', 'failed', 'cancelled', 'interrupted')),
+    phase TEXT NOT NULL DEFAULT '',
+    account_format TEXT NOT NULL DEFAULT '',
+    quantity INTEGER NOT NULL DEFAULT 1,
+    concurrency INTEGER NOT NULL DEFAULT 1,
+    proxy_mode TEXT NOT NULL DEFAULT '',
+    proxy_count INTEGER NOT NULL DEFAULT 0,
+    auth_pid INTEGER,
+    runner_pid INTEGER,
+    callback_token_hash TEXT NOT NULL DEFAULT '',
+    callback_expires_at TEXT NOT NULL DEFAULT '',
+    received_count INTEGER NOT NULL DEFAULT 0,
+    last_received_at TEXT NOT NULL DEFAULT '',
+    stop_requested INTEGER NOT NULL DEFAULT 0,
+    message TEXT NOT NULL DEFAULT '',
+    exit_code INTEGER,
+    started_at TEXT,
+    finished_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_microsoft_registration_runner_active
+    ON microsoft_registration_runner_runs(status)
+    WHERE status IN ('starting', 'running', 'stopping');
+  CREATE INDEX IF NOT EXISTS idx_microsoft_registration_runner_runs_created
+    ON microsoft_registration_runner_runs(created_at DESC);
+
+  CREATE TABLE IF NOT EXISTS microsoft_registration_runner_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES microsoft_registration_runner_runs(id) ON DELETE CASCADE,
+    stream TEXT NOT NULL CHECK(stream IN ('system', 'auth', 'registrar')),
+    level TEXT NOT NULL CHECK(level IN ('info', 'error')),
+    message TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_microsoft_registration_runner_logs_run
+    ON microsoft_registration_runner_logs(run_id, id);
+
   CREATE TABLE IF NOT EXISTS nfapi_oauth_import_sessions (
     id TEXT PRIMARY KEY,
     external_account_id INTEGER NOT NULL CHECK(external_account_id > 0),
