@@ -15,6 +15,12 @@ class FakeChild extends EventEmitter {
     this.pid = pid;
     this.stdout = new EventEmitter();
     this.stderr = new EventEmitter();
+    this.stdin = {
+      text: "",
+      closed: false,
+      write: (value) => { this.stdin.text += String(value); },
+      end: () => { this.stdin.closed = true; },
+    };
     this.killed = false;
   }
 
@@ -81,7 +87,12 @@ test("server Microsoft registrar stores config encrypted, starts both Wine proce
   assert.equal(started.status, "running");
   assert.equal(calls.length, 2);
   assert.match(calls[0].args.at(-1), /go授权服务-v1\.0\.5\.exe$/);
-  assert.match(calls[1].args.at(-1), /go-ms-v9\.2\.8\.exe$/);
+  assert.equal(calls[1].command, "script");
+  assert.match(calls[1].args[3], /go-ms-v9\.2\.8\.exe/);
+  const prompts = Buffer.from("请输入并发数: (1)\n请输入注册最大数量: (3)\n请选择国家:\n请选择US的邮箱后缀:\n");
+  children[1].stdout.emit("data", prompts.subarray(0, 5));
+  children[1].stdout.emit("data", prompts.subarray(5));
+  assert.equal(children[1].stdin.text, "1\n3\n\n\n");
   const runDir = calls[0].options.cwd;
   const mailToml = fs.readFileSync(path.join(runDir, "mail.toml"), "utf8");
   assert.match(mailToml, /server_upload_url = "https:\/\/aliashub\.test\/alias-hub\/api\/integrations\/microsoft-register\/v1\/runner\//);

@@ -45,6 +45,10 @@ function toml(value) {
   return JSON.stringify(String(value ?? ""));
 }
 
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", "'\"'\"'")}'`;
+}
+
 function publicRun(row) {
   if (!row) return null;
   return {
@@ -101,6 +105,10 @@ function redact(value, secrets = []) {
   return output.slice(0, 4_000);
 }
 
+function stripAnsi(value) {
+  return String(value || "").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replaceAll("\r", "");
+}
+
 function callbackUrl(publicBaseUrl, runId, token) {
   const root = String(publicBaseUrl || "").replace(/\/+$/, "");
   return `${root}/api/integrations/microsoft-register/v1/runner/${runId}/${token}`;
@@ -129,6 +137,7 @@ export class MicrosoftRegistrationRunnerService {
     toolDir,
     wineBinary = process.env.MICROSOFT_REGISTRATION_WINE_BINARY || "wine",
     xvfbBinary = process.env.MICROSOFT_REGISTRATION_XVFB_BINARY || "xvfb-run",
+    scriptBinary = process.env.MICROSOFT_REGISTRATION_SCRIPT_BINARY || "script",
     spawnFn = nodeSpawn,
     waitForPort,
   } = {}) {
@@ -141,6 +150,7 @@ export class MicrosoftRegistrationRunnerService {
     this.toolDir = path.resolve(toolDir || process.env.MICROSOFT_REGISTRATION_RUNNER_DIR || path.join(process.cwd(), "release", "microsoft-registration-runner"));
     this.wineBinary = wineBinary;
     this.xvfbBinary = xvfbBinary;
+    this.scriptBinary = scriptBinary;
     this.spawn = spawnFn;
     this.waitForPort = waitForPort || this.waitForLocalPort.bind(this);
     this.processes = new Map();
@@ -232,9 +242,23 @@ export class MicrosoftRegistrationRunnerService {
   }
 
   configSecrets(row) {
-    if (!row?.secret_payload_encrypted) return defaultConfig();
-    const payload = this.decrypt(row.secret_payload_encrypted);
-    return { ...defaultConfig(), ...payload };
+    if (!row?.secret_payload_encrypted) return {};
+    return this.decrypt(row.secret_payload_encrypted);
+  }
+
+  storedConfiguration(row) {
+    const stored = row ? {
+      captcha_type: row.captcha_type,
+      proxy_mode: row.proxy_mode,
+      proxy_count: Number(row.proxy_count),
+      account_format: row.account_format,
+      password_format: row.password_format,
+      quantity: Number(row.quantity),
+      concurrency: Number(row.concurrency),
+      oauth_mode: row.oauth_mode,
+      chrome_version: row.chrome_version,
+    } : {};
+    return { ...defaultConfig(), ...stored, ...this.configSecrets(row) };
   }
 
   normalizeConfiguration(input = {}, existing = defaultConfig()) {
@@ -288,7 +312,7 @@ export class MicrosoftRegistrationRunnerService {
   saveConfiguration(input = {}) {
     this.requireEncryption();
     const current = this.db.prepare("SELECT * FROM microsoft_registration_runner_config WHERE id = 1").get();
-    const normalized = this.normalizeConfiguration(input, this.configSecrets(current));
+    const normalized = this.normalizeConfiguration(input, this.storedConfiguration(current));
     const timestamp = nowIso();
     this.db.prepare(`
       INSERT INTO microsoft_registration_runner_config (
@@ -340,7 +364,7 @@ export class MicrosoftRegistrationRunnerService {
     if (!row?.secret_payload_encrypted || !row.captcha_key_configured || !row.proxy_count) {
       throw failure("请先填写并保存打码 Key 与代理配置", 409, "MICROSOFT_RUNNER_CONFIG_REQUIRED");
     }
-    return { row, config: { ...row, ...this.configSecrets(row) } };
+    return { row, config: this.storedConfiguration(row) };
   }
 
   ensureRunDirectory(runId) {
@@ -439,8 +463,47 @@ export class MicrosoftRegistrationRunnerService {
     read(child.stderr, "error");
   }
 
-  spawnWindowsProcess(executable, runDir, environment) {
-    return this.spawn(this.xvfbBinary, ["-a", "-f", path.join(runDir, "Xauthority"), "-e", path.join(runDir, "xvfb.log"), this.wineBinary, executable], {
+  driveInteractivePrompts(child, config) {
+    if (!child?.stdout?.on || !child?.stdin?.write) return;
+    const answered = new Set();
+    const decoder = new StringDecoder("utf8");
+    let pending = "";
+    const answer = (name, value) => {
+      if (answered.has(name)) return;
+      answered.add(name);
+      try { child.stdin.write(`${value}\n`); } catch { /* the registrar already exited */ }
+    };
+    const processChunk = (chunk) => {
+      const text = Buffer.isBuffer(chunk) ? decoder.write(chunk) : String(chunk || "");
+      pending = stripAnsi(`${pending}${text}`).slice(-8_000);
+      if (/请输入并发数\s*:/.test(pending)) answer("concurrency", config.concurrency);
+      if (/请输入注册最大数量\s*:/.test(pending)) answer("quantity", config.quantity);
+      if (/请选择国家\s*:/.test(pending)) answer("country", "");
+      if (/请选择.*邮箱后缀\s*:/.test(pending)) answer("domain", "");
+    };
+    child.stdout.on("data", processChunk);
+    child.stdout.once("end", () => processChunk(decoder.end()));
+  }
+
+  spawnWindowsProcess(executable, runDir, environment, { interactive = false } = {}) {
+    const xvfbArguments = ["-a", "-f", path.join(runDir, "Xauthority"), "-e", path.join(runDir, "xvfb.log")];
+    if (interactive) {
+      const command = [
+        shellQuote(this.xvfbBinary),
+        ...xvfbArguments.map(shellQuote),
+        shellQuote(this.wineBinary),
+        shellQuote(executable),
+      ].join(" ");
+      return this.spawn(this.scriptBinary, ["-q", "-e", "-c", command, "/dev/null"], {
+        cwd: runDir,
+        env: environment,
+        detached: process.platform !== "win32",
+        windowsHide: true,
+        shell: false,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    }
+    return this.spawn(this.xvfbBinary, [...xvfbArguments, this.wineBinary, executable], {
       cwd: runDir,
       env: environment,
       detached: process.platform !== "win32",
@@ -503,6 +566,8 @@ export class MicrosoftRegistrationRunnerService {
     `).run(status, status, message, exitCode, timestamp, timestamp, runId);
     const processInfo = this.processes.get(runId);
     this.processes.delete(runId);
+    this.killChild(processInfo?.registrar);
+    this.killChild(processInfo?.auth);
     if (processInfo?.runDir) {
       const cleanup = () => fs.rmSync(processInfo.runDir, { recursive: true, force: true });
       const timer = setTimeout(cleanup, 60_000);
@@ -579,10 +644,11 @@ export class MicrosoftRegistrationRunnerService {
       if (!activeStatus(active.status)) return publicRun(active);
       if (!ready) throw failure("授权服务启动超时", 500, "MICROSOFT_RUNNER_AUTH_TIMEOUT");
       this.appendLog(runId, "system", "授权服务已就绪，正在启动注册机", "info", secrets);
-      const registrar = this.spawnWindowsProcess(this.registrarExecutable, runDir, environment);
+      const registrar = this.spawnWindowsProcess(this.registrarExecutable, runDir, environment, { interactive: true });
       const info = this.processes.get(runId);
       if (info) info.registrar = registrar;
       this.watchChild(runId, registrar, "registrar", secrets);
+      this.driveInteractivePrompts(registrar, config);
       this.updateRun(runId, {
         status: "running",
         phase: "registrar",
