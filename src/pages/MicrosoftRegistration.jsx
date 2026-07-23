@@ -136,6 +136,8 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
   useEffect(() => { load(); }, [load, refreshKey]);
   useEffect(() => () => { loadRequest.current += 1; }, []);
   const runnerActive = ["starting", "running", "stopping"].includes(runner?.current_run?.status);
+  const savedProxyMatchesForm = Boolean(runner?.proxy?.configured && runner.proxy.mode === runnerForm.proxy_mode);
+  const captchaRunTwoNeedsList = runnerForm.captcha_type === "3" && runnerForm.proxy_mode !== "list";
   useEffect(() => {
     if (!runnerActive) return undefined;
     const timer = window.setInterval(() => load(), 3_000);
@@ -263,13 +265,14 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
             <FormField label="打码 Key" hint={runner.captcha_key_configured ? "已保存；留空不会覆盖原 Key。" : "注册机必须填写。"}><input type="password" autoComplete="new-password" value={runnerForm.captcha_key} onChange={(event) => updateRunner("captcha_key", event.target.value)} placeholder={runner.captcha_key_configured ? "已保存" : "粘贴打码平台 Key"} /></FormField>
           </div>
           <FormField label="代理方式"><select value={runnerForm.proxy_mode} onChange={(event) => updateRunner("proxy_mode", event.target.value)}><option value="list">账号密码代理列表</option><option value="api">动态代理 API</option></select></FormField>
-          {runnerForm.proxy_mode === "list" ? <FormField label="账号密码代理" hint={runner.proxy?.configured ? `已保存 ${runner.proxy.count} 条；留空继续使用。` : "每行一个：username:password@host:port"}><textarea value={runnerForm.proxy_value} onChange={(event) => updateRunner("proxy_value", event.target.value)} rows={5} placeholder={runner.proxy?.configured ? "需要替换代理时再粘贴新列表" : "username:password@host:port"} /></FormField> : <FormField label="动态代理 API" hint={runner.proxy?.configured ? "已保存；留空继续使用。" : "填写代理平台 API 地址。"}><input value={runnerForm.proxy_value} onChange={(event) => updateRunner("proxy_value", event.target.value)} placeholder={runner.proxy?.configured ? "需要替换时再填写" : "https://..."} /></FormField>}
+          {captchaRunTwoNeedsList && <div className="inline-alert error"><AlertTriangle size={16} /><span>CaptchaRun Two 只能使用账号密码代理列表；请切换后粘贴 username:password@host:port。</span></div>}
+          {runnerForm.proxy_mode === "list" ? <FormField label="账号密码代理" hint={savedProxyMatchesForm ? `已保存 ${runner.proxy.count} 条；留空继续使用。` : "每行一个：username:password@host:port"}><textarea value={runnerForm.proxy_value} onChange={(event) => updateRunner("proxy_value", event.target.value)} rows={5} placeholder={savedProxyMatchesForm ? "需要替换代理时再粘贴新列表" : "username:password@host:port"} /></FormField> : <FormField label="动态代理 API" hint={savedProxyMatchesForm ? "已保存；留空继续使用。" : "填写代理平台 API 地址。"}><input value={runnerForm.proxy_value} onChange={(event) => updateRunner("proxy_value", event.target.value)} placeholder={savedProxyMatchesForm ? "需要替换时再填写" : "https://..."} /></FormField>}
           <div className="form-grid three">
             <FormField label="账号格式" hint="a=小写、A=大写、1=数字"><input value={runnerForm.account_format} onChange={(event) => updateRunner("account_format", event.target.value)} /></FormField>
             <FormField label="注册数量"><input type="number" min="1" max="10000" value={runnerForm.quantity} onChange={(event) => updateRunner("quantity", event.target.value)} /></FormField>
             <FormField label="并发数"><input type="number" min="1" max="100" value={runnerForm.concurrency} onChange={(event) => updateRunner("concurrency", event.target.value)} /></FormField>
           </div>
-          <div className="microsoft-registration-runner-actions"><Button icon={Save} loading={savingRunner} disabled={!runner.available || runnerActive} onClick={saveRunner}>保存配置</Button>{runnerActive ? <Button variant="danger" icon={Square} loading={stoppingRunner} onClick={stopRunner}>停止注册</Button> : <Button variant="primary" icon={Play} loading={startingRunner} disabled={!runner.available} onClick={startRunner}>保存并开始注册</Button>}</div>
+          <div className="microsoft-registration-runner-actions"><Button icon={Save} loading={savingRunner} disabled={!runner.available || runnerActive} onClick={saveRunner}>保存配置</Button>{runnerActive ? <Button variant="danger" icon={Square} loading={stoppingRunner} onClick={stopRunner}>停止注册</Button> : <Button variant="primary" icon={Play} loading={startingRunner} disabled={!runner.available || captchaRunTwoNeedsList} onClick={startRunner}>保存并开始注册</Button>}</div>
         </section>
         <aside className="microsoft-registration-runner-status">
           <header><span><Activity size={18} /></span><div><b>{visibleRun ? `任务 #${visibleRun.id}` : "还没有任务"}</b><small>{visibleRun?.message || "保存配置后，点击“保存并开始注册”。"}</small></div><RunnerStatus run={visibleRun} /></header>
