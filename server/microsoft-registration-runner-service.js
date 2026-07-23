@@ -622,7 +622,7 @@ export class MicrosoftRegistrationRunnerService {
       if (/请输入注册最大数量\s*:/.test(pending)) answer("quantity", config.quantity);
       if (/请选择国家\s*:/.test(pending)) answer("country", "");
       if (/请选择.*邮箱后缀\s*:/.test(pending)) answer("domain", "");
-      if (/按压验证失败|打码平台\s*打码失败|重试次数达到上限/.test(pending)) terminalFailure = true;
+      if (/按压验证失败|打码平台\s*打码失败|重试次数达到上限|注册失败|获取代理失败|代理.*解析失败|Invalid format|\[ERROR\]/i.test(pending)) terminalFailure = true;
       if (/程序执行结果汇总/.test(pending) && /程序运行时长/.test(pending)) {
         this.scheduleTerminalFinish(
           runId,
