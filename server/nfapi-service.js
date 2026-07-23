@@ -9,6 +9,11 @@ const DEFAULT_OAUTH_SESSION_TTL_MS = 25 * 60_000;
 const DEFAULT_AGENT_IDENTITY_PENDING_TTL_MS = 30 * 60_000;
 const MAX_CALLBACK_URL_LENGTH = 16_384;
 const OAUTH_SESSION_PAYLOAD_VERSION = 2;
+export const PUBLIC_AGENT_IDENTITY_ERROR_CODES = new Set([
+  "OPENAI_AGENT_IDENTITY_UNAUTHORIZED",
+  "OPENAI_AGENT_IDENTITY_FORBIDDEN",
+  "OPENAI_AGENT_IDENTITY_UPSTREAM_CHALLENGE",
+]);
 const DEFAULT_MODEL_MAPPING = {
   "gpt-5.5": "gpt-5.5",
   "gpt-5.6-sol": "gpt-5.6-sol",
@@ -1491,7 +1496,12 @@ export class NfapiService {
         });
       }
       const status = Number(error?.status);
-      throw errorWithStatus(message, Number.isInteger(status) && status >= 400 && status <= 504 ? status : 502);
+      const publicError = errorWithStatus(
+        message,
+        Number.isInteger(status) && status >= 400 && status <= 504 ? status : 502,
+      );
+      if (PUBLIC_AGENT_IDENTITY_ERROR_CODES.has(error?.code)) publicError.code = error.code;
+      throw publicError;
     }
   }
 

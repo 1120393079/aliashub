@@ -323,6 +323,15 @@ test("Agent Identity API route forwards one path account and returns the exact p
         if (input.options === null) {
           throw Object.assign(new Error("NFapi Agent Identity 导入设置格式无效"), { status: 400 });
         }
+        if (input.id === "403") {
+          throw Object.assign(
+            new Error("OpenAI 拒绝当前账号的 Agent Identity 注册 (HTTP 403)，请改用 OAuth 导入"),
+            { status: 409, code: "OPENAI_AGENT_IDENTITY_FORBIDDEN" },
+          );
+        }
+        if (input.id === "private-code") {
+          throw Object.assign(new Error("普通导入错误"), { status: 409, code: "INTERNAL_ONLY_CODE" });
+        }
         return {
           auth_mode: "agentIdentity",
           action: "created",
@@ -384,6 +393,25 @@ test("Agent Identity API route forwards one path account and returns the exact p
     );
     assert.equal(invalidOptions.response.status, 400);
     assert.equal(calls[2].options, null);
+
+    const forbidden = await jsonRequest(
+      runtime.app,
+      "/api/registration/accounts/403/nfapi-agent-identity/import",
+      { method: "POST", body: JSON.stringify({}) },
+    );
+    assert.equal(forbidden.response.status, 409);
+    assert.deepEqual(forbidden.body, {
+      error: "OpenAI 拒绝当前账号的 Agent Identity 注册 (HTTP 403)，请改用 OAuth 导入",
+      code: "OPENAI_AGENT_IDENTITY_FORBIDDEN",
+    });
+
+    const privateCode = await jsonRequest(
+      runtime.app,
+      "/api/registration/accounts/private-code/nfapi-agent-identity/import",
+      { method: "POST", body: JSON.stringify({}) },
+    );
+    assert.equal(privateCode.response.status, 409);
+    assert.deepEqual(privateCode.body, { error: "普通导入错误" });
 
     const legacy = await jsonRequest(runtime.app, "/api/registration/accounts/import-nfapi", {
       method: "POST",

@@ -87,6 +87,11 @@ const definitiveUnavailableCodes = new Set([
   "ACCOUNT_DISABLED", "ACCOUNT_BANNED", "ACCOUNT_DEACTIVATED", "ACCOUNT_DELETED", "ACCOUNT_SUSPENDED",
   "USER_DISABLED", "USER_BANNED", "USER_DEACTIVATED", "USER_DELETED", "USER_SUSPENDED",
 ]);
+const agentIdentityOAuthFallbackCodes = new Set([
+  "OPENAI_AGENT_IDENTITY_UNAUTHORIZED",
+  "OPENAI_AGENT_IDENTITY_FORBIDDEN",
+  "OPENAI_AGENT_IDENTITY_UPSTREAM_CHALLENGE",
+]);
 const nfapiImportDefaults = {
   name_prefix: "",
   account_name: "",
@@ -635,6 +640,7 @@ export default function RegistrationPage({ refreshKey }) {
   const [nfapiOptions, setNfapiOptions] = useState(null);
   const [nfapiForm, setNfapiForm] = useState(nfapiImportDefaults);
   const [nfapiImportMode, setNfapiImportMode] = useState("agent_identity");
+  const [nfapiAgentIdentityFallback, setNfapiAgentIdentityFallback] = useState("");
   const [loadingNfapiOptions, setLoadingNfapiOptions] = useState(false);
   const [importingNfapi, setImportingNfapi] = useState(false);
   const [nfapiBatchProgress, setNfapiBatchProgress] = useState(null);
@@ -1180,6 +1186,7 @@ export default function RegistrationPage({ refreshKey }) {
     setNfapiBatchResult(null);
     setNfapiBatchProgress(null);
     setNfapiImportMode("agent_identity");
+    setNfapiAgentIdentityFallback("");
     setNfapiOAuthSession(null);
     setNfapiCallbackUrl("");
     resetNfapiMailbox();
@@ -1208,6 +1215,7 @@ export default function RegistrationPage({ refreshKey }) {
     setNfapiBatchProgress(null);
     setNfapiAccountSnapshot(null);
     setNfapiImportMode("agent_identity");
+    setNfapiAgentIdentityFallback("");
     setNfapiOAuthSession(null);
     setNfapiCallbackUrl("");
     resetNfapiMailbox();
@@ -1225,6 +1233,7 @@ export default function RegistrationPage({ refreshKey }) {
       return;
     }
     setNfapiImportMode(mode);
+    setNfapiAgentIdentityFallback("");
     setNfapiOAuthSession(null);
     setNfapiCallbackUrl("");
     resetNfapiMailbox();
@@ -1374,7 +1383,16 @@ export default function RegistrationPage({ refreshKey }) {
         toast(agentIdentityResultMessage(result));
         await loadAccounts();
       } catch (error) {
-        toast(error.message, "error");
+        if (!isBatch && agentIdentityOAuthFallbackCodes.has(error?.code)) {
+          setNfapiAgentIdentityFallback(error.code);
+          setNfapiImportMode("oauth");
+          setNfapiOAuthSession(null);
+          setNfapiCallbackUrl("");
+          resetNfapiMailbox();
+          toast("OpenAI 当前不允许该账号创建 Agent Identity，已切换到 OAuth 导入。", "error");
+        } else {
+          toast(error.message, "error");
+        }
       } finally {
         setImportingNfapi(false);
         setNfapiBatchProgress(null);
@@ -1807,6 +1825,7 @@ export default function RegistrationPage({ refreshKey }) {
         {loadingNfapiOptions ? <LoadingBlock rows={9} /> : nfapiOptions && <div className={`nfapi-import-form${importingNfapi ? " is-importing" : ""}`} inert={importingNfapi ? "" : undefined}>
           <div className={`nfapi-import-connection ${nfapiConnected ? "connected" : "failed"}`}><Cable size={18} /><span><b>{nfapiConnected ? "NFapi 已连接" : "NFapi 当前不可用"}</b><small>{nfapiOptions.connection?.base_url || nfapiOptions.connection?.url || nfapiOptions.error || "请先到系统设置配置地址与管理员 API Key"}</small></span><StatusBadge status={nfapiConnected ? "active" : "failed"}>{nfapiConnected ? "可以导入" : "请检查连接"}</StatusBadge></div>
           {nfapiOptions.error && <div className="inline-alert error"><AlertTriangle size={15} /><span>{nfapiOptions.error}</span></div>}
+          {!isBatchNfapiImport && nfapiAgentIdentityFallback && !nfapiImportResult && <div className="inline-alert error" role="status"><AlertTriangle size={15} /><span>OpenAI 拒绝此账号创建 Agent Identity。已切换到 OAuth 导入；点击“生成 OAuth 授权链接”继续。</span></div>}
           {isBatchNfapiImport ? <>
             <div className="inline-alert"><Fingerprint size={15} /><span>已选择 {nfapiBatchPlan.total} 个账号，其中 {nfapiBatchActionableCount} 个可直接导入。批量导入将使用同一套配置，并按顺序执行。</span></div>
             {nfapiBatchPlan.blocked.length > 0 && <div className="inline-alert error"><AlertTriangle size={15} /><span>{nfapiBatchPlan.blocked.slice(0, 3).map((item) => `${item.item?.email || `账号 #${item.id}`}：${item.reason}`).join("；")}{nfapiBatchPlan.blocked.length > 3 ? `；另有 ${nfapiBatchPlan.blocked.length - 3} 个需处理` : ""}</span></div>}

@@ -1,8 +1,10 @@
 import crypto from "node:crypto";
+import os from "node:os";
 
 const AGENT_IDENTITY_REGISTER_URL = "https://auth.openai.com/api/accounts/v1/agent/register";
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_AGENT_VERSION = "0.144.0";
+const DEFAULT_ORIGINATOR = "codex_cli_rs";
 const MAX_REGISTER_ATTEMPTS = 3;
 const MAX_RESPONSE_BYTES = 64 * 1024;
 
@@ -68,6 +70,52 @@ function platformName(value = process.platform) {
   return value || "linux";
 }
 
+function platformLabel(value = process.platform) {
+  if (value === "darwin") return "Mac OS";
+  if (value === "win32") return "Windows";
+  if (value === "linux") return "Linux";
+  return String(value || "unknown").slice(0, 80);
+}
+
+function safeHeaderText(value, fallback, maximum = 512) {
+  const text = String(value ?? "")
+    .replace(/[^\x20-\x7e]/g, "_")
+    .trim()
+    .slice(0, maximum);
+  return text || fallback;
+}
+
+function codexUserAgent({ originator, agentVersion, runtimePlatform, runtimeRelease, runtimeArch, terminal }) {
+  const effectiveOriginator = safeHeaderText(originator, DEFAULT_ORIGINATOR, 80)
+    .replace(/[^a-z0-9_.-]/gi, "_");
+  const effectiveVersion = safeHeaderText(agentVersion, DEFAULT_AGENT_VERSION, 80);
+  const effectivePlatform = safeHeaderText(platformLabel(runtimePlatform), "Linux", 80);
+  const effectiveRelease = safeHeaderText(runtimeRelease, "unknown", 160);
+  const effectiveArch = safeHeaderText(runtimeArch, "unknown", 80);
+  const effectiveTerminal = safeHeaderText(terminal, "unknown", 160);
+  return `${effectiveOriginator}/${effectiveVersion} (${effectivePlatform} ${effectiveRelease}; ${effectiveArch}) ${effectiveTerminal}`;
+}
+
+function agentRegistrationError(response) {
+  const statusCode = Number(response?.status) || 0;
+  const challenge = statusCode === 403
+    && /challenge/i.test(String(response?.headers?.get?.("cf-mitigated") || ""));
+  const code = challenge
+    ? "OPENAI_AGENT_IDENTITY_UPSTREAM_CHALLENGE"
+    : statusCode === 401 ? "OPENAI_AGENT_IDENTITY_UNAUTHORIZED"
+      : statusCode === 403 ? "OPENAI_AGENT_IDENTITY_FORBIDDEN"
+        : "";
+  const message = challenge
+    ? "OpenAI Agent Identity 注册被上游验证拦截 (HTTP 403)，请改用 OAuth 导入或稍后重试"
+    : statusCode === 401
+      ? "OpenAI 拒绝当前账号凭据的 Agent Identity 注册 (HTTP 401)，请改用 OAuth 导入"
+      : statusCode === 403
+        ? "OpenAI 拒绝当前账号的 Agent Identity 注册 (HTTP 403)，请改用 OAuth 导入"
+        : `OpenAI Agent Identity 注册失败 (HTTP ${statusCode || "unknown"})`;
+  const status = statusCode === 401 || statusCode === 403 ? 409 : 502;
+  return Object.assign(errorWithStatus(message, status), code ? { code } : {});
+}
+
 function retryDelayMs(response, attempt) {
   const exponential = Math.min(1_000, 250 * (2 ** (attempt - 1)));
   const value = String(response?.headers?.get?.("retry-after") || "").trim();
@@ -90,7 +138,12 @@ export async function registerOpenAiAgentIdentity({
   fetchFn = globalThis.fetch,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   agentVersion = process.env.CODEX_AGENT_VERSION || DEFAULT_AGENT_VERSION,
+  originator = DEFAULT_ORIGINATOR,
+  userAgent,
   runtimePlatform = process.platform,
+  runtimeRelease = os.release(),
+  runtimeArch = process.arch,
+  terminal = process.env.TERM_PROGRAM || process.env.TERM || "unknown",
   sleepFn = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
 } = {}) {
   const token = nonEmptyText(accessToken, "注册账号 access token", 100_000);
@@ -100,6 +153,20 @@ export async function registerOpenAiAgentIdentity({
 
   const keyMaterial = generateAgentIdentityKeyMaterial();
   const effectiveTimeoutMs = Math.max(1_000, Number(timeoutMs) || DEFAULT_TIMEOUT_MS);
+  const effectiveOriginator = safeHeaderText(originator, DEFAULT_ORIGINATOR, 80)
+    .replace(/[^a-z0-9_.-]/gi, "_");
+  const effectiveAgentVersion = safeHeaderText(agentVersion, DEFAULT_AGENT_VERSION, 80);
+  const effectiveUserAgent = safeHeaderText(
+    userAgent || codexUserAgent({
+      originator: effectiveOriginator,
+      agentVersion: effectiveAgentVersion,
+      runtimePlatform,
+      runtimeRelease,
+      runtimeArch,
+      terminal,
+    }),
+    `${DEFAULT_ORIGINATOR}/${DEFAULT_AGENT_VERSION}`,
+  );
   for (let attempt = 1; attempt <= MAX_REGISTER_ATTEMPTS; attempt += 1) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), effectiveTimeoutMs);
@@ -113,11 +180,13 @@ export async function registerOpenAiAgentIdentity({
           Accept: "application/json",
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
+          originator: effectiveOriginator,
+          "User-Agent": effectiveUserAgent,
           ...(fedRamp ? { "X-OpenAI-Fedramp": "true" } : {}),
         },
         body: JSON.stringify({
           abom: {
-            agent_version: String(agentVersion || DEFAULT_AGENT_VERSION),
+            agent_version: effectiveAgentVersion,
             agent_harness_id: "codex-cli",
             running_location: `cli-${platformName(runtimePlatform)}`,
           },
@@ -133,9 +202,10 @@ export async function registerOpenAiAgentIdentity({
           await sleepFn(retryDelayMs(response, attempt));
           continue;
         }
-        const status = response.status === 401 || response.status === 403 ? 409
-          : retryable ? 503 : 502;
-        throw errorWithStatus(`OpenAI Agent Identity 注册失败 (HTTP ${response.status})`, status);
+        if (retryable) {
+          throw errorWithStatus(`OpenAI Agent Identity 注册失败 (HTTP ${response.status})`, 503);
+        }
+        throw agentRegistrationError(response);
       }
 
       const raw = await limitedResponseText(response);

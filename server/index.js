@@ -11,7 +11,7 @@ import { ExtensionService } from "./extension-service.js";
 import { GoogleGmailClient } from "./google-gmail.js";
 import { ICloudImapClient, icloudImapConfiguration } from "./icloud-imap.js";
 import { MicrosoftGraphClient } from "./microsoft-graph.js";
-import { NfapiService } from "./nfapi-service.js";
+import { NfapiService, PUBLIC_AGENT_IDENTITY_ERROR_CODES } from "./nfapi-service.js";
 import { RegistrationClient } from "./registration-client.js";
 import { RegistrationService } from "./registration-service.js";
 
@@ -1223,7 +1223,9 @@ export function createApp(options = {}) {
   app.use((error, _req, res, _next) => {
     const status = Number(error.status) || (String(error.message).includes("UNIQUE constraint") ? 409 : 500);
     if (status >= 500) console.error(error);
-    res.status(status).json({ error: status >= 500 ? "服务器处理请求失败" : error.message });
+    const body = { error: status >= 500 ? "服务器处理请求失败" : error.message };
+    if (PUBLIC_AGENT_IDENTITY_ERROR_CODES.has(error?.code)) body.code = error.code;
+    res.status(status).json(body);
   });
   return { app, db, graph, gmail, icloud, inbox, extension, jobs, registration, nfapi };
 }
