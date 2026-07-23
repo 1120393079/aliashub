@@ -354,7 +354,7 @@ export function createApp(options = {}) {
   });
   const microsoftRegistration = options.microsoftRegistration || new MicrosoftRegistrationService({
     db,
-    encryptionKey: options.dataEncryptionKey || process.env.DATA_ENCRYPTION_KEY,
+    encryptionKey: options.dataEncryptionKey ?? process.env.DATA_ENCRYPTION_KEY,
   });
   const auth = createAuth({
     username: process.env.ADMIN_USERNAME ?? "admin",
