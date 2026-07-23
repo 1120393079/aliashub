@@ -253,7 +253,7 @@ function defaultConfig() {
     password_format: "aaaaa11111111",
     quantity: 1,
     concurrency: 1,
-    oauth_mode: "3",
+    oauth_mode: "1",
     chrome_version: "143",
   };
 }
@@ -422,6 +422,9 @@ export class MicrosoftRegistrationRunnerService {
     const concurrency = integer(has("concurrency") ? input.concurrency : existing.concurrency, 1, 1, 100);
     const oauthMode = has("oauth_mode") ? trimText(input.oauth_mode, 1) : existing.oauth_mode;
     if (!["1", "2", "3"].includes(oauthMode)) throw failure("注册后处理模式无效");
+    if (captchaType === "3" && proxyMode !== "list") {
+      throw failure("CaptchaRun Two 只支持账号密码代理列表，请使用 username:password@host:port");
+    }
     const chromeVersion = integer(has("chrome_version") ? input.chrome_version : existing.chrome_version, 143, 128, 144);
     return {
       captcha_type: captchaType,
@@ -493,7 +496,11 @@ export class MicrosoftRegistrationRunnerService {
     if (!row?.secret_payload_encrypted || !row.captcha_key_configured || !row.proxy_count) {
       throw failure("请先填写并保存打码 Key 与代理配置", 409, "MICROSOFT_RUNNER_CONFIG_REQUIRED");
     }
-    return { row, config: this.storedConfiguration(row) };
+    const config = this.storedConfiguration(row);
+    if (config.captcha_type === "3" && config.proxy_mode !== "list") {
+      throw failure("CaptchaRun Two 只支持账号密码代理列表，请使用 username:password@host:port", 409, "MICROSOFT_RUNNER_PROXY_MODE_REQUIRED");
+    }
+    return { row, config };
   }
 
   ensureRunDirectory(runId) {

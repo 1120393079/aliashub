@@ -355,7 +355,7 @@ const schema = `
     quantity INTEGER NOT NULL DEFAULT 1,
     concurrency INTEGER NOT NULL DEFAULT 1,
     captcha_type TEXT NOT NULL DEFAULT '3',
-    oauth_mode TEXT NOT NULL DEFAULT '3',
+    oauth_mode TEXT NOT NULL DEFAULT '1',
     chrome_version TEXT NOT NULL DEFAULT '143',
     updated_at TEXT NOT NULL DEFAULT ''
   );

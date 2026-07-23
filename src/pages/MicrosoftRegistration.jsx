@@ -30,7 +30,7 @@ const defaultRunnerForm = {
   password_format: "aaaaa11111111",
   quantity: 1,
   concurrency: 1,
-  oauth_mode: "3",
+  oauth_mode: "1",
   chrome_version: "143",
 };
 

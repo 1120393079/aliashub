@@ -101,6 +101,7 @@ test("server Microsoft registrar stores config encrypted, starts both Wine proce
   const runDir = calls[0].options.cwd;
   const mailToml = fs.readFileSync(path.join(runDir, "mail.toml"), "utf8");
   assert.match(mailToml, /server_upload_url = "https:\/\/aliashub\.test\/alias-hub\/api\/integrations\/microsoft-register\/v1\/runner\//);
+  assert.match(mailToml, /imap_and_oauth_enabled = "1"/);
   assert.equal(fs.readFileSync(path.join(runDir, "proxyList.txt"), "utf8").trim(), proxy);
   const continuationPrefix = "runner-continuation-token-prefix";
   const continuationSuffix = "runner-continuation-token-suffix";
