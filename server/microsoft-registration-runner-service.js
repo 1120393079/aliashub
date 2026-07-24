@@ -14,6 +14,7 @@ const CALLBACK_TTL_MS = 24 * 60 * 60 * 1000;
 const AUTH_PORT = 8081;
 const PROXY_SOURCE_MANUAL = "manual";
 const PROXY_SOURCE_SAVED_POOL = "saved_pool";
+const DIRECT_PROXY_HEADER_LIMIT = 64 * 1024;
 const COUNTRY_PROMPT_LABELS = {
   JP: "日本",
   US: "美国",
@@ -154,6 +155,30 @@ function splitLines(value) {
   return String(value || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
 }
 
+function parseProxyConnectDestination(value) {
+  const authority = trimText(value, 1_000);
+  if (!authority || /\s/.test(authority)) return null;
+  try {
+    const parsed = new URL(`http://${authority}`);
+    const port = Number(parsed.port || 443);
+    if (!parsed.hostname || parsed.username || parsed.password || !Number.isInteger(port) || port < 1 || port > 65_535) return null;
+    return { host: parsed.hostname, port };
+  } catch {
+    return null;
+  }
+}
+
+function parseProxyHttpDestination(value) {
+  try {
+    const parsed = new URL(String(value || ""));
+    const port = Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80));
+    if (parsed.protocol !== "http:" || !parsed.hostname || !Number.isInteger(port) || port < 1 || port > 65_535) return null;
+    return { host: parsed.hostname, port, path: `${parsed.pathname || "/"}${parsed.search || ""}` };
+  } catch {
+    return null;
+  }
+}
+
 function plainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -176,11 +201,46 @@ function withRunMetadata(body, row, source) {
 function normalizeProxyLine(value) {
   const text = trimText(value, 1_000);
   if (!text || /\s/.test(text)) return "";
+  if (/^http:\/\//i.test(text)) {
+    try {
+      const parsed = new URL(text);
+      const hostname = String(parsed.hostname || "").replace(/^\[|\]$/g, "");
+      if (parsed.protocol !== "http:" || !parsed.username || !parsed.password || !parsed.port
+        || (parsed.pathname && parsed.pathname !== "/") || parsed.search || parsed.hash || hostname.includes(":")) return "";
+      const username = decodeURIComponent(parsed.username);
+      const password = decodeURIComponent(parsed.password);
+      if (!username || !password || /[\s:@]/.test(username) || /[\s@]/.test(password)) return "";
+      return `${username}:${password}@${hostname}:${parsed.port}`;
+    } catch {
+      return "";
+    }
+  }
   const existing = /^([^:@\s]+):([^@\s]+)@([^:@\s]+):(\d{1,5})$/.exec(text);
   const colonSeparated = /^([^:@\s]+):([^:@\s]+):([^:@\s]+):(\d{1,5})$/.exec(text);
   const match = existing || colonSeparated;
   if (!match || Number(match[4]) < 1 || Number(match[4]) > 65_535) return "";
   return `${match[1]}:${match[2]}@${match[3]}:${match[4]}`;
+}
+
+function normalizeOptionalProxyInput(value) {
+  const text = trimText(value, MAX_PROXY_TEXT);
+  if (!text) return { mode: "direct", value: "", count: 0 };
+  const lines = splitLines(text);
+  const proxies = lines.map(normalizeProxyLine);
+  if (proxies.length && proxies.every(Boolean)) {
+    if (proxies.length > MAX_PROXY_LINES) throw failure(`代理列表最多支持 ${MAX_PROXY_LINES} 条`);
+    return { mode: "list", value: proxies.join("\n"), count: proxies.length };
+  }
+  if (lines.length !== 1) {
+    throw failure("代理格式错误：每行填写 username:password@host:port，或只填写一条动态代理 API 地址");
+  }
+  try {
+    const parsed = new URL(text);
+    if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("unsupported");
+  } catch {
+    throw failure("代理格式错误：请填写账号密码代理，或有效的 http/https 动态代理 API 地址");
+  }
+  return { mode: "api", value: text, count: 1 };
 }
 
 function normalizeCountryCode(value) {
@@ -406,7 +466,7 @@ function defaultConfig() {
   return {
     captcha_type: "3",
     captcha_key: "",
-    proxy_mode: "list",
+    proxy_mode: "direct",
     proxy_source: PROXY_SOURCE_MANUAL,
     saved_proxy_selection: "auto",
     proxy_value: "",
@@ -526,9 +586,11 @@ export class MicrosoftRegistrationRunnerService {
     if (config.proxy_source !== PROXY_SOURCE_SAVED_POOL) {
       return {
         ...config,
-        proxy_label: config.proxy_mode === "api"
-          ? "手动动态代理 API"
-          : `手动代理列表（${config.proxy_count} 条）`,
+        proxy_label: config.proxy_mode === "direct"
+          ? "直连（未使用代理）"
+          : config.proxy_mode === "api"
+            ? "手动动态代理 API"
+            : `手动代理列表（${config.proxy_count} 条）`,
       };
     }
     const saved = this.resolveSavedProxySelection(config.saved_proxy_selection);
@@ -599,7 +661,7 @@ export class MicrosoftRegistrationRunnerService {
     const current = this.currentRun();
     const toolReady = this.toolReady();
     let config = defaultConfig();
-    let effective = config;
+    let effective = this.effectiveConfiguration(config);
     let configurationError = "";
     let detectedCountryCode = "";
     if (row?.secret_payload_encrypted) {
@@ -614,7 +676,13 @@ export class MicrosoftRegistrationRunnerService {
     }
     const savedProxyPool = this.publicSavedProxyPool();
     const proxyCount = Number(effective.proxy_count) || 0;
-    const proxyConfigured = Boolean(row?.secret_payload_encrypted && row?.captcha_key_configured && proxyCount && !configurationError);
+    const proxySaved = Boolean(row?.secret_payload_encrypted && config.proxy_mode !== "direct");
+    const proxyConfigured = Boolean(
+      row?.secret_payload_encrypted
+      && row?.captcha_key_configured
+      && (effective.proxy_mode === "direct" || proxyCount)
+      && !configurationError,
+    );
     return {
       available: this.encryptionReady && toolReady,
       encryption_ready: this.encryptionReady,
@@ -623,7 +691,8 @@ export class MicrosoftRegistrationRunnerService {
       captcha_key_configured: Boolean(row?.captcha_key_configured),
       proxy: {
         configured: proxyConfigured,
-        mode: effective.proxy_mode || row?.proxy_mode || "list",
+        saved: proxySaved,
+        mode: effective.proxy_mode || row?.proxy_mode || "direct",
         count: proxyCount,
         source: config.proxy_source,
         selection: config.proxy_source === PROXY_SOURCE_SAVED_POOL ? config.saved_proxy_selection : "",
@@ -680,21 +749,33 @@ export class MicrosoftRegistrationRunnerService {
     if (!["1", "2", "3"].includes(captchaType)) throw failure("打码平台类型无效");
     const captchaKey = has("captcha_key") ? trimText(input.captcha_key, 2_000) : existing.captcha_key;
     if (!captchaKey) throw failure("请填写打码平台 Key");
-    const proxySource = normalizeProxySource(has("proxy_source") ? input.proxy_source : existing.proxy_source);
+    const usesSimpleProxyInput = has("proxy_input");
+    let proxySource = normalizeProxySource(has("proxy_source") ? input.proxy_source : existing.proxy_source);
     let proxyMode = has("proxy_mode") ? trimText(input.proxy_mode, 10) : existing.proxy_mode;
-    if (!["list", "api"].includes(proxyMode)) throw failure("代理类型无效");
-    const savedProxySelection = proxySource === PROXY_SOURCE_SAVED_POOL
+    if (!["direct", "list", "api"].includes(proxyMode)) throw failure("代理类型无效");
+    let savedProxySelection = proxySource === PROXY_SOURCE_SAVED_POOL
       ? normalizeSavedProxySelection(has("saved_proxy_selection") ? input.saved_proxy_selection : existing.saved_proxy_selection)
       : "auto";
     let proxyValue = has("proxy_value") ? trimText(input.proxy_value, MAX_PROXY_TEXT) : existing.proxy_value;
     let proxyCount = 0;
     let effectiveProxyValue = proxyValue;
-    if (proxySource === PROXY_SOURCE_SAVED_POOL) {
-      if (proxyMode !== "list") throw failure("已保存 IP/代理池只支持账号密码代理列表");
+    if (usesSimpleProxyInput) {
+      const detected = normalizeOptionalProxyInput(input.proxy_input);
+      proxySource = PROXY_SOURCE_MANUAL;
+      savedProxySelection = "auto";
+      proxyMode = detected.mode;
+      proxyValue = detected.value;
+      proxyCount = detected.count;
+      effectiveProxyValue = proxyValue;
+    } else if (proxySource === PROXY_SOURCE_SAVED_POOL) {
       const saved = this.resolveSavedProxySelection(savedProxySelection);
       proxyMode = "list";
       effectiveProxyValue = saved.proxy_value;
       proxyCount = saved.proxy_count;
+    } else if (proxyMode === "direct") {
+      proxyValue = "";
+      proxyCount = 0;
+      effectiveProxyValue = "";
     } else if (!proxyValue) {
       throw failure(proxyMode === "list" ? "请粘贴账号密码代理列表" : "请填写动态代理 API 地址");
     } else if (proxyMode === "list") {
@@ -719,9 +800,6 @@ export class MicrosoftRegistrationRunnerService {
     const concurrency = integer(has("concurrency") ? input.concurrency : existing.concurrency, 1, 1, 100);
     const oauthMode = has("oauth_mode") ? trimText(input.oauth_mode, 1) : existing.oauth_mode;
     if (!["1", "2", "3"].includes(oauthMode)) throw failure("注册后处理模式无效");
-    if (captchaType === "3" && proxyMode !== "list") {
-      throw failure("CaptchaRun Two 只支持账号密码代理列表，请使用 username:password@host:port");
-    }
     const chromeVersion = integer(has("chrome_version") ? input.chrome_version : existing.chrome_version, 143, 128, 144);
     const countryCode = normalizeCountryCode(has("country_code") ? input.country_code : existing.country_code);
     const normalized = {
@@ -770,12 +848,13 @@ export class MicrosoftRegistrationRunnerService {
     `).run(
       this.encrypt({
         captcha_key: normalized.captcha_key,
+        proxy_mode: normalized.proxy_mode,
         proxy_value: normalized.proxy_value,
         proxy_source: normalized.proxy_source,
         saved_proxy_selection: normalized.saved_proxy_selection,
         country_code: normalized.country_code,
       }),
-      normalized.proxy_mode,
+      normalized.proxy_mode === "direct" ? "list" : normalized.proxy_mode,
       normalized.proxy_count,
       normalized.account_format,
       normalized.password_format,
@@ -798,6 +877,12 @@ export class MicrosoftRegistrationRunnerService {
     return this.configuration();
   }
 
+  clearProxyConfiguration() {
+    const current = this.db.prepare("SELECT * FROM microsoft_registration_runner_config WHERE id = 1").get();
+    if (!current?.secret_payload_encrypted) return this.configuration();
+    return this.saveConfiguration({ proxy_input: "" });
+  }
+
   requireTool() {
     if (!this.toolReady()) throw failure("服务器注册机文件未就绪", 409, "MICROSOFT_RUNNER_TOOL_NOT_READY");
   }
@@ -806,14 +891,11 @@ export class MicrosoftRegistrationRunnerService {
     this.requireEncryption();
     const row = this.db.prepare("SELECT * FROM microsoft_registration_runner_config WHERE id = 1").get();
     if (!row?.secret_payload_encrypted || !row.captcha_key_configured) {
-      throw failure("请先填写并保存打码 Key 与代理配置", 409, "MICROSOFT_RUNNER_CONFIG_REQUIRED");
+      throw failure("请先填写并保存打码 Key", 409, "MICROSOFT_RUNNER_CONFIG_REQUIRED");
     }
     const config = this.effectiveConfiguration(this.storedConfiguration(row));
-    if (!config.proxy_count || !config.proxy_value) {
-      throw failure("请先填写并保存打码 Key 与代理配置", 409, "MICROSOFT_RUNNER_CONFIG_REQUIRED");
-    }
-    if (config.captcha_type === "3" && config.proxy_mode !== "list") {
-      throw failure("CaptchaRun Two 只支持账号密码代理列表，请使用 username:password@host:port", 409, "MICROSOFT_RUNNER_PROXY_MODE_REQUIRED");
+    if (config.proxy_mode !== "direct" && (!config.proxy_count || !config.proxy_value)) {
+      throw failure("已保存的代理配置不完整", 409, "MICROSOFT_RUNNER_CONFIG_REQUIRED");
     }
     this.ensureCountryMatchesProxy(config);
     return { row, config };
@@ -826,9 +908,12 @@ export class MicrosoftRegistrationRunnerService {
     return runDir;
   }
 
-  writeRunFiles(runDir, config, runId, callback) {
-    const proxyType = config.proxy_mode === "list" ? "1" : "2";
-    const scopeProxyType = proxyType;
+  writeRunFiles(runDir, config, runId, callback, directProxyBridge = null) {
+    if (config.proxy_mode === "direct" && !directProxyBridge?.proxyLine) {
+      throw failure("直连代理桥未就绪", 500, "MICROSOFT_RUNNER_DIRECT_PROXY_FAILED");
+    }
+    const proxyType = config.proxy_mode === "api" ? "2" : "1";
+    const scopeProxyType = config.proxy_mode === "direct" ? "0" : proxyType;
     const captchaProxyType = config.proxy_mode === "list" ? "2" : "1";
     const contents = [
       `px_captcha_type = ${toml(config.captcha_type)}`,
@@ -862,7 +947,8 @@ export class MicrosoftRegistrationRunnerService {
       "",
     ].join("\n");
     fs.writeFileSync(path.join(runDir, "mail.toml"), contents, { mode: 0o600 });
-    fs.writeFileSync(path.join(runDir, "proxyList.txt"), config.proxy_mode === "list" ? `${config.proxy_value}\n` : "", { mode: 0o600 });
+    const proxyList = config.proxy_mode === "direct" ? directProxyBridge.proxyLine : config.proxy_value;
+    fs.writeFileSync(path.join(runDir, "proxyList.txt"), proxyType === "1" ? `${proxyList}\n` : "", { mode: 0o600 });
     fs.writeFileSync(path.join(runDir, "mail.txt"), "", { mode: 0o600 });
   }
 
@@ -886,6 +972,126 @@ export class MicrosoftRegistrationRunnerService {
       XDG_DATA_HOME: data,
       XDG_RUNTIME_DIR: runtime,
     };
+  }
+
+  async createDirectProxyBridge() {
+    const username = `direct-${crypto.randomBytes(12).toString("base64url")}`;
+    const password = crypto.randomBytes(24).toString("base64url");
+    const expectedAuthorization = `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`;
+    const sockets = new Set();
+    const server = net.createServer((client) => {
+      sockets.add(client);
+      let upstream = null;
+      let pending = Buffer.alloc(0);
+      const closeUpstream = () => {
+        try { upstream?.destroy(); } catch { /* socket already closed */ }
+      };
+      client.once("close", () => {
+        sockets.delete(client);
+        closeUpstream();
+      });
+      client.once("error", closeUpstream);
+
+      const send = (status, headers = "") => {
+        if (!client.destroyed) client.end(`HTTP/1.1 ${status}\r\nConnection: close\r\n${headers}\r\n`);
+      };
+      const openTunnel = (destination, initial, response = "") => {
+        upstream = net.createConnection({ host: destination.host, port: destination.port });
+        let connected = false;
+        upstream.once("error", () => {
+          if (!connected) send("502 Bad Gateway");
+          else client.destroy();
+        });
+        upstream.once("connect", () => {
+          connected = true;
+          if (response && !client.destroyed) client.write(response);
+          if (initial.length) upstream.write(initial);
+          client.pipe(upstream);
+          upstream.pipe(client);
+        });
+      };
+      const onData = (chunk) => {
+        pending = Buffer.concat([pending, Buffer.from(chunk)]);
+        if (pending.length > DIRECT_PROXY_HEADER_LIMIT) {
+          client.off("data", onData);
+          send("431 Request Header Fields Too Large");
+          return;
+        }
+        const headerEnd = pending.indexOf("\r\n\r\n");
+        if (headerEnd < 0) return;
+        client.off("data", onData);
+        const header = pending.subarray(0, headerEnd).toString("latin1");
+        const remainder = pending.subarray(headerEnd + 4);
+        const [requestLine, ...headerLines] = header.split("\r\n");
+        const request = /^(\S+)\s+(\S+)\s+(HTTP\/\d\.\d)$/i.exec(requestLine || "");
+        const authorization = headerLines.find((line) => /^proxy-authorization\s*:/i.test(line))?.replace(/^[^:]*:\s*/, "") || "";
+        if (!request) {
+          send("400 Bad Request");
+          return;
+        }
+        if (!safeEqual(authorization, expectedAuthorization)) {
+          send("407 Proxy Authentication Required", "Proxy-Authenticate: Basic realm=\"AliasHub\"\r\n");
+          return;
+        }
+        const [, method, target, version] = request;
+        if (method.toUpperCase() === "CONNECT") {
+          const destination = parseProxyConnectDestination(target);
+          if (!destination) {
+            send("400 Bad Request");
+            return;
+          }
+          openTunnel(destination, remainder, "HTTP/1.1 200 Connection Established\r\n\r\n");
+          return;
+        }
+        const destination = parseProxyHttpDestination(target);
+        if (!destination) {
+          send("400 Bad Request");
+          return;
+        }
+        const forwardedHeaders = headerLines.filter((line) => !/^proxy-(?:authorization|connection)\s*:/i.test(line));
+        const forwarded = Buffer.concat([
+          Buffer.from(`${method} ${destination.path} ${version}\r\n${forwardedHeaders.join("\r\n")}\r\n\r\n`, "latin1"),
+          remainder,
+        ]);
+        openTunnel(destination, forwarded);
+      };
+      client.on("data", onData);
+    });
+    server.on("error", () => {});
+    return new Promise((resolve, reject) => {
+      const fail = (error) => reject(failure(`直连代理桥启动失败: ${error.message}`, 500, "MICROSOFT_RUNNER_DIRECT_PROXY_FAILED"));
+      server.once("error", fail);
+      server.listen(0, "127.0.0.1", () => {
+        server.removeListener("error", fail);
+        server.unref?.();
+        const address = server.address();
+        const port = typeof address === "object" && address ? address.port : 0;
+        if (!port) {
+          try { server.close(); } catch { /* server already closed */ }
+          reject(failure("直连代理桥未分配端口", 500, "MICROSOFT_RUNNER_DIRECT_PROXY_FAILED"));
+          return;
+        }
+        resolve({
+          server,
+          sockets,
+          port,
+          username,
+          password,
+          proxyLine: `${username}:${password}@127.0.0.1:${port}`,
+          close() {
+            sockets.forEach((socket) => {
+              try { socket.destroy(); } catch { /* socket already closed */ }
+            });
+            sockets.clear();
+            try { server.close(); } catch { /* server already closed */ }
+          },
+        });
+      });
+    });
+  }
+
+  closeDirectProxyBridge(bridge) {
+    try { bridge?.close?.(); } catch { /* bridge already closed */ }
   }
 
   appendLog(runId, stream, message, level = "info", secrets = []) {
@@ -1084,6 +1290,7 @@ export class MicrosoftRegistrationRunnerService {
     if (processInfo?.terminalTimer) clearTimeout(processInfo.terminalTimer);
     this.killChild(processInfo?.registrar);
     this.killChild(processInfo?.auth);
+    this.closeDirectProxyBridge(processInfo?.directProxyBridge);
     if (processInfo?.runDir) {
       const cleanup = () => fs.rmSync(processInfo.runDir, { recursive: true, force: true });
       const timer = setTimeout(cleanup, 60_000);
@@ -1173,13 +1380,18 @@ export class MicrosoftRegistrationRunnerService {
     const runId = Number(inserted.lastInsertRowid);
     const runDir = this.ensureRunDirectory(runId);
     const callback = callbackUrl(runnerCallbackBaseUrl(publicBaseUrl), runId, token);
-    const secrets = [config.captcha_key, config.proxy_value, token, callback];
+    let directProxyBridge = null;
+    let secrets = [config.captcha_key, config.proxy_value, token, callback];
     try {
-      this.writeRunFiles(runDir, config, runId, callback);
+      if (config.proxy_mode === "direct") {
+        directProxyBridge = await this.createDirectProxyBridge();
+        secrets = [...secrets, directProxyBridge.username, directProxyBridge.password, directProxyBridge.proxyLine];
+      }
+      this.writeRunFiles(runDir, config, runId, callback, directProxyBridge);
       const environment = this.runnerEnvironment(runDir);
       this.appendLog(runId, "system", "正在启动服务器授权服务", "info", secrets);
       const auth = this.spawnWindowsProcess(this.authExecutable, runDir, environment);
-      this.processes.set(runId, { runDir, auth, registrar: null, secrets, terminalTimer: null });
+      this.processes.set(runId, { runDir, auth, registrar: null, directProxyBridge, secrets, terminalTimer: null });
       this.watchChild(runId, auth, "auth", secrets);
       this.updateRun(runId, { auth_pid: Number(auth.pid) || null });
       const ready = await this.waitForPort(AUTH_PORT, 20_000);
@@ -1213,6 +1425,7 @@ export class MicrosoftRegistrationRunnerService {
       const info = this.processes.get(runId);
       this.killChild(info?.registrar);
       this.killChild(info?.auth);
+      this.closeDirectProxyBridge(info?.directProxyBridge || directProxyBridge);
       this.appendLog(runId, "system", error.message, "error", secrets);
       this.finish(runId, "failed", { message: error.message });
       throw error;

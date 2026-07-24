@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -67,6 +68,67 @@ function fixture(t) {
     fs.rmSync(directory, { recursive: true, force: true });
   });
   return { directory, db, runner, calls, children, savedResultImports };
+}
+
+function listen(server) {
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.removeListener("error", reject);
+      resolve(server.address().port);
+    });
+  });
+}
+
+function connectThroughBridge(bridge, targetPort) {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection({ host: "127.0.0.1", port: bridge.port });
+    const authorization = Buffer.from(`${bridge.username}:${bridge.password}`).toString("base64");
+    let stage = "connect";
+    let output = "";
+    const fail = (error) => {
+      socket.destroy();
+      reject(error);
+    };
+    socket.setTimeout(5_000, () => fail(new Error("bridge timeout")));
+    socket.once("error", fail);
+    socket.on("connect", () => {
+      socket.write(`CONNECT 127.0.0.1:${targetPort} HTTP/1.1\r\nHost: 127.0.0.1:${targetPort}\r\nProxy-Authorization: Basic ${authorization}\r\n\r\n`);
+    });
+    socket.on("data", (chunk) => {
+      output += chunk.toString("utf8");
+      if (stage === "connect") {
+        const boundary = output.indexOf("\r\n\r\n");
+        if (boundary < 0) return;
+        if (!output.startsWith("HTTP/1.1 200")) {
+          fail(new Error(`bridge CONNECT failed: ${output}`));
+          return;
+        }
+        output = output.slice(boundary + 4);
+        stage = "request";
+        socket.write("GET / HTTP/1.1\r\nHost: target.test\r\nConnection: close\r\n\r\n");
+      }
+      if (stage === "request" && output.includes("\r\n\r\nok")) {
+        socket.end();
+        resolve(output);
+      }
+    });
+  });
+}
+
+function bridgeResponseWithoutCredentials(bridge, targetPort) {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection({ host: "127.0.0.1", port: bridge.port });
+    let output = "";
+    socket.setTimeout(5_000, () => {
+      socket.destroy();
+      reject(new Error("bridge authentication timeout"));
+    });
+    socket.once("error", reject);
+    socket.on("connect", () => socket.write(`CONNECT 127.0.0.1:${targetPort} HTTP/1.1\r\nHost: 127.0.0.1:${targetPort}\r\n\r\n`));
+    socket.on("data", (chunk) => { output += chunk.toString("utf8"); });
+    socket.on("end", () => resolve(output));
+  });
 }
 
 test("server Microsoft registrar stores config encrypted, starts both Wine processes, and keeps callback credentials private", async (t) => {
@@ -147,6 +209,75 @@ test("server Microsoft registrar stores config encrypted, starts both Wine proce
   assert.equal(children[1].killed, true);
 });
 
+test("runner treats an empty optional proxy as direct while using a private loopback bridge for the registrar", async (t) => {
+  const { runner, calls } = fixture(t);
+  const saved = runner.saveConfiguration({
+    captcha_key: "runner-direct-captcha-key",
+    proxy_input: "",
+  });
+  assert.equal(saved.configured, true);
+  assert.equal(saved.proxy.mode, "direct");
+  assert.equal(saved.proxy.count, 0);
+  assert.equal(saved.proxy.label, "直连（未使用代理）");
+  assert.equal(JSON.stringify(saved).includes("runner-direct-captcha-key"), false);
+
+  const target = net.createServer((socket) => {
+    socket.once("data", () => socket.end("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"));
+  });
+  const targetPort = await listen(target);
+  t.after(() => target.close());
+
+  const started = await runner.start("https://aliashub.test/alias-hub");
+  assert.equal(started.proxy_mode, "direct");
+  assert.equal(started.proxy_count, 0);
+  assert.equal(started.proxy_label, "直连（未使用代理）");
+  const bridge = runner.processes.get(started.id).directProxyBridge;
+  assert.ok(bridge?.server.listening);
+  const runDir = calls[0].options.cwd;
+  const mailToml = fs.readFileSync(path.join(runDir, "mail.toml"), "utf8");
+  const proxyList = fs.readFileSync(path.join(runDir, "proxyList.txt"), "utf8").trim();
+  assert.match(mailToml, /proxy_type = "1"/);
+  assert.match(mailToml, /scope_proxy_type = "0"/);
+  assert.match(proxyList, /^direct-[A-Za-z0-9_-]+:[A-Za-z0-9_-]+@127\.0\.0\.1:\d+$/);
+  assert.equal(mailToml.includes(bridge.password), false);
+  assert.equal(JSON.stringify(runner.configuration()).includes(bridge.username), false);
+  assert.equal(JSON.stringify(runner.configuration()).includes(bridge.password), false);
+  assert.match(await bridgeResponseWithoutCredentials(bridge, targetPort), /^HTTP\/1\.1 407 Proxy Authentication Required/);
+  const response = await connectThroughBridge(bridge, targetPort);
+  assert.match(response, /^HTTP\/1\.1 200 OK/);
+  runner.stop();
+  assert.equal(bridge.server.listening, false);
+});
+
+test("runner auto-detects optional proxy input and clears it without exposing credentials", async (t) => {
+  const { db, runner, calls } = fixture(t);
+  const listProxy = "runner-list-user:runner-list-password:198.51.100.60:9700";
+  const list = runner.saveConfiguration({ captcha_key: "runner-simple-proxy-key", proxy_input: listProxy });
+  assert.equal(list.proxy.mode, "list");
+  assert.equal(list.proxy.count, 1);
+  assert.equal(JSON.stringify(list).includes("runner-list-password"), false);
+
+  const dynamicApi = "https://proxy-api.example/v1/get?token=runner-dynamic-api-secret";
+  const dynamic = runner.saveConfiguration({ proxy_input: dynamicApi });
+  assert.equal(dynamic.proxy.mode, "api");
+  assert.equal(dynamic.proxy.count, 1);
+  assert.equal(JSON.stringify(dynamic).includes("runner-dynamic-api-secret"), false);
+  const stored = db.prepare("SELECT secret_payload_encrypted FROM microsoft_registration_runner_config WHERE id = 1").get();
+  assert.equal(stored.secret_payload_encrypted.includes("runner-dynamic-api-secret"), false);
+  const started = await runner.start("https://aliashub.test/alias-hub");
+  const mailToml = fs.readFileSync(path.join(calls[0].options.cwd, "mail.toml"), "utf8");
+  assert.equal(started.proxy_mode, "api");
+  assert.match(mailToml, /proxy_type = "2"/);
+  assert.match(mailToml, /captcharun_need_proxy_type = "1"/);
+  runner.stop();
+
+  const cleared = runner.clearProxyConfiguration();
+  assert.equal(cleared.proxy.mode, "direct");
+  assert.equal(cleared.proxy.count, 0);
+  assert.equal(cleared.proxy.label, "直连（未使用代理）");
+  assert.equal(JSON.stringify(cleared).includes("runner-dynamic-api-secret"), false);
+});
+
 test("runner APIs require a complete saved config and expose only masked configuration", async (t) => {
   const { db, runner } = fixture(t);
   const runtime = createApp({
@@ -179,6 +310,12 @@ test("runner APIs require a complete saved config and expose only masked configu
   const stopped = await jsonRequest(runtime.app, "/api/microsoft-registration/runner/stop", { method: "POST" });
   assert.equal(stopped.response.status, 200);
   assert.equal(stopped.body.run.status, "cancelled");
+  const cleared = await jsonRequest(runtime.app, "/api/microsoft-registration/runner/proxy", { method: "DELETE" });
+  assert.equal(cleared.response.status, 200);
+  assert.equal(cleared.body.proxy.mode, "direct");
+  assert.equal(cleared.body.proxy.count, 0);
+  assert.equal(cleared.body.proxy.label, "直连（未使用代理）");
+  assert.equal(JSON.stringify(cleared.body).includes("api-password"), false);
 });
 
 test("runner selects the Chinese country label from explicit or uniformly tagged proxy regions", async (t) => {

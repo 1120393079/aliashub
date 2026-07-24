@@ -458,6 +458,9 @@ export function createApp(options = {}) {
   app.put("/api/microsoft-registration/runner/config", (req, res, next) => {
     try { res.json(microsoftRegistrationRunner.saveConfiguration(req.body || {})); } catch (error) { next(error); }
   });
+  app.delete("/api/microsoft-registration/runner/proxy", (_req, res, next) => {
+    try { res.json(microsoftRegistrationRunner.clearProxyConfiguration()); } catch (error) { next(error); }
+  });
   app.post("/api/microsoft-registration/runner/start", async (_req, res, next) => {
     try { res.status(202).json({ run: await microsoftRegistrationRunner.start(publicBaseUrl) }); } catch (error) { next(error); }
   });
