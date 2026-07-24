@@ -7,6 +7,7 @@ import test from "node:test";
 import { createDatabase, setSetting } from "../db.js";
 import { createApp } from "../index.js";
 import { MicrosoftRegistrationRunnerService } from "../microsoft-registration-runner-service.js";
+import { MicrosoftRegistrationService } from "../microsoft-registration-service.js";
 import { jsonRequest } from "./http-harness.js";
 
 class FakeChild extends EventEmitter {
@@ -47,8 +48,8 @@ function fixture(t) {
     encryptionKey: "runner-test-encryption-key",
     waitForPort: async () => true,
     registrationService: {
-      ingestTrusted(payload) {
-        savedResultImports.push(payload);
+      ingestTrusted(payload, options) {
+        savedResultImports.push({ payload, options });
         return { accepted: payload.data.length, updated: 0 };
       },
     },
@@ -296,6 +297,45 @@ test("runner API resolves selected saved IPs from the RegistrationService pool",
   runner.stop();
 });
 
+test("runner applies its safe proxy label to callback accounts without overriding a reported proxy", async (t) => {
+  const { db, runner, calls } = fixture(t);
+  const registrationService = new MicrosoftRegistrationService({ db, encryptionKey: "runner-callback-proxy-label-key" });
+  runner.saveConfiguration({
+    captcha_key: "runner-callback-proxy-label-captcha",
+    proxy_mode: "list",
+    proxy_value: "runner-user:runner-password@198.51.100.54:9680",
+  });
+  const started = await runner.start("https://aliashub.test/alias-hub");
+  const runDir = calls[0].options.cwd;
+  const mailToml = fs.readFileSync(path.join(runDir, "mail.toml"), "utf8");
+  assert.match(mailToml, /runner_proxy_label = "手动代理列表（1 条）"/);
+  assert.match(mailToml, /runner_proxy_source = "manual"/);
+  assert.equal(mailToml.includes("runner-password"), false);
+
+  const callback = new URL(mailToml.match(/server_upload_url = "([^"]+)"/)[1]);
+  const parts = callback.pathname.split("/");
+  runner.ingest(parts.at(-2), parts.at(-1), {
+    data: { email: "callback-fallback@outlook.com", password: "callback-fallback-password", status: "success" },
+  }, registrationService);
+  runner.ingest(parts.at(-2), parts.at(-1), {
+    data: {
+      email: "callback-reported@outlook.com",
+      password: "callback-reported-password",
+      proxy_label: "reported-user:reported-password@203.0.113.54:9780",
+      status: "success",
+    },
+  }, registrationService);
+
+  const accounts = registrationService.listAccounts({ limit: 10 }).items;
+  const fallback = accounts.find((item) => item.email === "callback-fallback@outlook.com");
+  const reported = accounts.find((item) => item.email === "callback-reported@outlook.com");
+  assert.equal(fallback.proxy_label, "手动代理列表（1 条）");
+  assert.equal(reported.proxy_label, "203.0.113.54:9780");
+  assert.equal(JSON.stringify(accounts).includes("runner-password"), false);
+  assert.equal(JSON.stringify(accounts).includes("reported-password"), false);
+  runner.stop();
+});
+
 test("runner imports saved successful registrations when the executable misses its callback", async (t) => {
   const { runner, calls, savedResultImports } = fixture(t);
   runner.saveConfiguration({
@@ -309,8 +349,16 @@ test("runner imports saved successful registrations when the executable misses i
   assert.equal(completed.received_count, 1);
   assert.match(completed.message, /已从结果文件导入 1 条注册邮箱/);
   assert.deepEqual(savedResultImports, [{
-    data: [{ email: "saved-result@outlook.com", password: "saved-result-password", status: "success", runner_run_id: String(started.id) }],
-    server_upload_other: { source: "go-ms-server-runner-file", runner_run_id: String(started.id) },
+    payload: {
+      data: [{ email: "saved-result@outlook.com", password: "saved-result-password", status: "success", runner_run_id: String(started.id) }],
+      server_upload_other: {
+        source: "go-ms-server-runner-file",
+        runner_run_id: String(started.id),
+        runner_proxy_label: "手动代理列表（1 条）",
+        runner_proxy_source: "manual",
+      },
+    },
+    options: { fallbackProxyLabel: "手动代理列表（1 条）" },
   }]);
 });
 

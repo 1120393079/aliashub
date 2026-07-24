@@ -117,6 +117,14 @@ function maskProxy(value) {
   }
 }
 
+function trustedFallbackProxyLabel(value) {
+  const label = cleanText(value, 255).replace(/\s+/g, " ");
+  if (!label) return "";
+  return label
+    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^@/\s]+@/gi, "$1***@")
+    .replace(/(^|[\s(])[^@\s:]+:[^@\s]+@/g, "$1***@");
+}
+
 function uploadItems(body) {
   const parsedData = parseEmbeddedJson(body?.data ?? body);
   if (Array.isArray(parsedData)) return parsedData.map(parseEmbeddedJson).filter(plainObject);
@@ -272,11 +280,11 @@ export class MicrosoftRegistrationService {
     return this.ingestPayload(body);
   }
 
-  ingestTrusted(body) {
-    return this.ingestPayload(body);
+  ingestTrusted(body, { fallbackProxyLabel } = {}) {
+    return this.ingestPayload(body, { fallbackProxyLabel: trustedFallbackProxyLabel(fallbackProxyLabel) });
   }
 
-  ingestPayload(body) {
+  ingestPayload(body, { fallbackProxyLabel = "" } = {}) {
     this.requireEncryption();
     if (!plainObject(body) && !Array.isArray(body)) {
       throw errorWithStatus("回传数据必须为 JSON 对象或数组", 400, "MICROSOFT_REGISTRATION_INVALID_PAYLOAD");
@@ -348,7 +356,7 @@ export class MicrosoftRegistrationService {
           updateAccount.run(
             extracted.displayName || existing.display_name,
             extracted.status === "unknown" ? existing.status : extracted.status,
-            extracted.proxyLabel || existing.proxy_label,
+            extracted.proxyLabel || fallbackProxyLabel || existing.proxy_label,
             sourceLabel,
             encryptedCredentials || existing.credential_payload_encrypted,
             encryptedSource,
@@ -368,7 +376,7 @@ export class MicrosoftRegistrationService {
             extracted.email,
             extracted.displayName,
             extracted.status,
-            extracted.proxyLabel,
+            extracted.proxyLabel || fallbackProxyLabel,
             sourceLabel,
             encryptedCredentials,
             encryptedSource,

@@ -154,6 +154,25 @@ function splitLines(value) {
   return String(value || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
 }
 
+function plainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function withRunMetadata(body, row, source) {
+  const payload = plainObject(body) ? body : { data: body };
+  const uploaded = plainObject(payload.server_upload_other) ? payload.server_upload_other : {};
+  return {
+    ...payload,
+    server_upload_other: {
+      ...uploaded,
+      source: trimText(uploaded.source, 120) || source,
+      runner_run_id: String(row.id),
+      runner_proxy_label: trimText(row.proxy_label, 255),
+      runner_proxy_source: trimText(row.proxy_source, 32) || PROXY_SOURCE_MANUAL,
+    },
+  };
+}
+
 function normalizeProxyLine(value) {
   const text = trimText(value, 1_000);
   if (!text || /\s/.test(text)) return "";
@@ -838,6 +857,8 @@ export class MicrosoftRegistrationRunnerService {
       "[server_upload_other]",
       'source = "aliashub-server-runner"',
       `runner_run_id = ${toml(runId)}`,
+      `runner_proxy_label = ${toml(config.proxy_label)}`,
+      `runner_proxy_source = ${toml(config.proxy_source)}`,
       "",
     ].join("\n");
     fs.writeFileSync(path.join(runDir, "mail.toml"), contents, { mode: 0o600 });
@@ -1013,6 +1034,7 @@ export class MicrosoftRegistrationRunnerService {
   importSavedResults(runId, runDir) {
     if (!this.registrationService?.ingestTrusted || !runDir) return { received: 0 };
     try {
+      const row = this.run(runId);
       const file = path.join(runDir, "注册成功(总).txt");
       if (!fs.existsSync(file)) return { received: 0 };
       const items = splitLines(fs.readFileSync(file, "utf8"))
@@ -1027,9 +1049,12 @@ export class MicrosoftRegistrationRunnerService {
         .filter(Boolean)
         .slice(0, 100);
       if (!items.length) return { received: 0 };
-      const result = this.registrationService.ingestTrusted({
+      const payload = withRunMetadata({
         data: items,
         server_upload_other: { source: "go-ms-server-runner-file", runner_run_id: String(runId) },
+      }, row, "go-ms-server-runner-file");
+      const result = this.registrationService.ingestTrusted(payload, {
+        fallbackProxyLabel: row.proxy_label,
       });
       const received = Number(result.accepted || 0) + Number(result.updated || 0);
       if (received) this.appendLog(runId, "system", `已从注册机结果文件导入 ${received} 条注册邮箱`, "info");
@@ -1225,7 +1250,10 @@ export class MicrosoftRegistrationRunnerService {
   ingest(runId, token, body, registrationService) {
     const row = this.authorizeCallback(runId, token);
     if (!registrationService?.ingestTrusted) throw failure("微软注册回传服务不可用", 500, "MICROSOFT_RUNNER_INGEST_UNAVAILABLE");
-    const result = registrationService.ingestTrusted(body);
+    const result = registrationService.ingestTrusted(
+      withRunMetadata(body, row, "aliashub-server-runner"),
+      { fallbackProxyLabel: row.proxy_label },
+    );
     const received = Number(result.accepted || 0) + Number(result.updated || 0);
     this.updateRun(row.id, {
       received_count: Number(row.received_count || 0) + received,
