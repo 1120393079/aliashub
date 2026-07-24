@@ -122,7 +122,8 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .sidebar-nav button.featured.active { border-color: rgba(82,216,164,0.74); background: linear-gradient(90deg, rgba(51,197,143,0.32), rgba(51,197,143,0.14)); }
 .sidebar-nav button.featured svg { color: #52d8a4; filter: drop-shadow(0 0 5px rgba(51,197,143,0.28)); }
 .sidebar-nav button.featured::after { content: ""; flex: 0 0 6px; width: 6px; height: 6px; border-radius: 50%; background: #52d8a4; box-shadow: 0 0 0 3px rgba(51,197,143,0.12); }
-.sidebar-nav button span { flex: 1; }
+.sidebar-nav button > .provider-mark { flex: 0 0 var(--mark-size); }
+.sidebar-nav button > span:not(.provider-mark) { flex: 1; }
 .sidebar-nav button b { display: grid; place-items: center; min-width: 20px; height: 20px; padding: 0 5px; border-radius: 10px; background: #d25852; color: white; font-size: 11px; }
 .sidebar-provider { display: flex; align-items: center; gap: 6px; margin: auto 11px 12px; padding: 11px 8px; border: 1px solid rgba(255,255,255,0.08); border-radius: 7px; background: rgba(255,255,255,0.03); }
 .sidebar-provider-copy { display: grid; min-width: 0; flex: 1; }
