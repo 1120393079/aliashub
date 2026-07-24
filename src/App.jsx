@@ -103,9 +103,6 @@ export default function App() {
     if (emailWorkspacePageKeys.includes(target)) setEmailWorkspaceOpen(true);
     setPage(target); setRouteState(state); setMobileNav(false); window.location.hash = target;
   };
-  useEffect(() => {
-    if (emailWorkspacePageKeys.includes(page)) setEmailWorkspaceOpen(true);
-  }, [page]);
   const changed = () => setRefreshKey((value) => value + 1);
   const logout = async () => { await api("/api/auth/logout", { method: "POST" }); setAuth({ authenticated: false, authEnabled: true }); };
   const content = useMemo(() => {
@@ -151,7 +148,7 @@ export default function App() {
               <span>邮箱工作台</span>
               <ChevronDown className={emailWorkspaceOpen ? "expanded" : ""} size={17} aria-hidden="true" />
             </button>
-            <div id="email-workspace-navigation" className="sidebar-nav-children" hidden={!emailWorkspaceOpen}>
+            <div id="email-workspace-navigation" className={`sidebar-nav-children${emailWorkspaceOpen ? " open" : ""}`} aria-hidden={!emailWorkspaceOpen}>
               {emailWorkspacePageKeys.map((key) => {
                 const item = pages[key];
                 const Icon = item.icon;
