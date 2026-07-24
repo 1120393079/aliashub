@@ -25,6 +25,7 @@ const defaultRunnerForm = {
   captcha_type: "3",
   captcha_key: "",
   proxy_input: "",
+  saved_proxy_selection: "",
   account_format: "aaaaa11111111",
   password_format: "aaaaa11111111",
   quantity: 1,
@@ -128,6 +129,7 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
           oauth_mode: nextRunner.oauth_mode || defaultRunnerForm.oauth_mode,
           chrome_version: nextRunner.chrome_version || defaultRunnerForm.chrome_version,
           country_code: nextRunner.country_code || defaultRunnerForm.country_code,
+          saved_proxy_selection: nextRunner.proxy?.source === "saved_pool" ? (nextRunner.proxy.selection || "auto") : "",
         });
       }
     } catch (error) {
@@ -156,7 +158,16 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
   const saveRunnerConfiguration = async ({ silent = false } = {}) => {
     const payload = { ...runnerForm };
     if (!payload.captcha_key.trim() && runner?.captcha_key_configured) delete payload.captcha_key;
-    if (!proxyInputDirty) delete payload.proxy_input;
+    if (payload.saved_proxy_selection) {
+      payload.proxy_source = "saved_pool";
+      delete payload.proxy_input;
+    } else {
+      payload.proxy_source = "manual";
+      delete payload.saved_proxy_selection;
+      // Leaving a saved IP must explicitly switch the runner back to direct
+      // when the proxy input has not been edited.
+      if (!proxyInputDirty && runner?.proxy?.source !== "saved_pool") delete payload.proxy_input;
+    }
     const saved = await api("/api/microsoft-registration/runner/config", { method: "PUT", body: payload });
     setRunner(saved);
     setRunnerForm((current) => ({
@@ -164,6 +175,7 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
       captcha_key: "",
       captcha_type: saved.captcha_type,
       proxy_input: "",
+      saved_proxy_selection: saved.proxy?.source === "saved_pool" ? (saved.proxy.selection || "auto") : "",
       account_format: saved.account_format,
       password_format: saved.password_format,
       quantity: saved.quantity,
@@ -182,9 +194,9 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
     try {
       const saved = await api("/api/microsoft-registration/runner/proxy", { method: "DELETE" });
       setRunner(saved);
-      setRunnerForm((current) => ({ ...current, proxy_input: "" }));
+      setRunnerForm((current) => ({ ...current, proxy_input: "", saved_proxy_selection: "" }));
       setProxyInputDirty(false);
-      toast("已删除保存的代理，后续注册使用本机直连出口");
+      toast("已清除当前注册代理，后续使用本机直连出口");
     } catch (error) {
       toast(error.message, "error");
     } finally {
@@ -275,6 +287,15 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
   if (!config || !accounts || !runner) return <div className="page-stack"><LoadingBlock rows={9} /></div>;
   const activeRun = runner.current_run;
   const visibleRun = activeRun || runner.run;
+  const savedProxyPool = runner.saved_proxy_pool || { compatible_count: 0, options: [] };
+  const savedProxyOptions = savedProxyPool.options || [];
+  const selectedSavedProxy = savedProxyOptions.find((item) => item.id === runnerForm.saved_proxy_selection);
+  const usesSavedProxy = Boolean(runnerForm.saved_proxy_selection);
+  const savedProxyHint = usesSavedProxy
+    ? runnerForm.saved_proxy_selection === "auto"
+      ? `自动轮换 ${savedProxyPool.compatible_count || 0} 个可用已保存 IP。`
+      : `使用 ${selectedSavedProxy?.label || "所选已保存 IP"} 注册。`
+    : "不选时使用上方输入的代理；上方也留空则使用本机直连出口。";
 
   return <div className="page-stack microsoft-registration-page">
     <section className="panel microsoft-registration-runner">
@@ -291,17 +312,30 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
           <FormField label="代理（可选）" hint="每行一个账号密码代理，或只填一条动态代理 API。输入后会加密保存；不填时使用本机直连出口。">
             <textarea value={runnerForm.proxy_input} onChange={(event) => updateProxyInput(event.target.value)} rows={4} placeholder={"username:password@host:port\nusername:password:host:port\n或 https://代理平台 API"} />
           </FormField>
+          <div className="form-grid two">
+            <FormField label="注册 IP（已保存）" hint={savedProxyHint}>
+              <select value={runnerForm.saved_proxy_selection} onChange={(event) => updateRunner("saved_proxy_selection", event.target.value)}>
+                <option value="">使用上方代理 / 本机直连</option>
+                {savedProxyPool.compatible_count > 0 && <option value="auto">自动轮换已保存 IP（{savedProxyPool.compatible_count} 个）</option>}
+                {savedProxyOptions.map((item) => <option key={item.id} value={item.id} disabled={!item.compatible}>{item.label}{item.compatible ? "" : `（不可用：${item.reason}）`}</option>)}
+              </select>
+            </FormField>
+            <FormField label="注册地区" hint={runnerForm.country_code === "auto" ? runner.detected_country_code ? `自动匹配：${countryLabels[runner.detected_country_code] || runner.detected_country_code}` : "仅识别代理账号中明确的 region-JP / region-US 标识；未识别时使用注册机默认美国。" : "会按所选地区启动注册机。"}><select value={runnerForm.country_code} onChange={(event) => updateRunner("country_code", event.target.value)}><option value="auto">自动（推荐）</option><option value="JP">日本</option><option value="US">美国</option></select></FormField>
+          </div>
           <div className={`inline-alert ${savedProxyConfigured ? "success" : ""}`}>
-            <span>{proxyInputDirty
+            <span>{usesSavedProxy
+              ? `${savedProxyHint} 上方代理输入不会覆盖或删除，切换回“使用上方代理 / 本机直连”后才会使用它。`
+              : proxyInputDirty
               ? (runnerForm.proxy_input.trim() ? "保存后将自动识别并替换当前代理。" : "保存后将删除当前代理，注册使用本机直连出口。")
               : savedProxyConfigured
                 ? runner.proxy.error
                   ? "已保存的代理当前不可用；可输入新代理替换，或直接删除后使用本机直连出口。"
-                  : `已保存：${runner.proxy.label || "代理"}。为保护凭据不会回显；输入新代理可替换。`
+                  : runner.proxy?.source === "saved_pool"
+                    ? "保存后将切换为上方代理 / 本机直连；已保存 IP 不会被删除。"
+                    : `已保存：${runner.proxy.label || "代理"}。为保护凭据不会回显；输入新代理可替换。`
                 : "当前未配置外部代理，注册使用本机直连出口。"}</span>
           </div>
           {savedProxyConfigured && <Button variant="danger" icon={Trash2} loading={clearingProxy} disabled={runnerActive} onClick={clearSavedProxy}>删除已保存代理</Button>}
-          <FormField label="注册地区" hint={runnerForm.country_code === "auto" ? runner.detected_country_code ? `自动匹配：${countryLabels[runner.detected_country_code] || runner.detected_country_code}` : "仅识别代理账号中明确的 region-JP / region-US 标识；未识别时使用注册机默认美国。" : "会按所选地区启动注册机。"}><select value={runnerForm.country_code} onChange={(event) => updateRunner("country_code", event.target.value)}><option value="auto">自动（推荐）</option><option value="JP">日本</option><option value="US">美国</option></select></FormField>
           <div className="form-grid three">
             <FormField label="账号格式" hint="a=小写、A=大写、1=数字"><input value={runnerForm.account_format} onChange={(event) => updateRunner("account_format", event.target.value)} /></FormField>
             <FormField label="注册数量"><input type="number" min="1" max="10000" value={runnerForm.quantity} onChange={(event) => updateRunner("quantity", event.target.value)} /></FormField>
