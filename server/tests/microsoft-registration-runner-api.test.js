@@ -218,6 +218,7 @@ test("runner treats an empty optional proxy as direct while using a private loop
   assert.equal(saved.configured, true);
   assert.equal(saved.proxy.mode, "direct");
   assert.equal(saved.proxy.count, 0);
+  assert.equal(saved.proxy.saved, false);
   assert.equal(saved.proxy.label, "直连（未使用代理）");
   assert.equal(JSON.stringify(saved).includes("runner-direct-captcha-key"), false);
 
@@ -255,6 +256,7 @@ test("runner auto-detects optional proxy input and clears it without exposing cr
   const list = runner.saveConfiguration({ captcha_key: "runner-simple-proxy-key", proxy_input: listProxy });
   assert.equal(list.proxy.mode, "list");
   assert.equal(list.proxy.count, 1);
+  assert.equal(list.proxy.saved, true);
   assert.equal(JSON.stringify(list).includes("runner-list-password"), false);
 
   const dynamicApi = "https://proxy-api.example/v1/get?token=runner-dynamic-api-secret";
@@ -274,6 +276,7 @@ test("runner auto-detects optional proxy input and clears it without exposing cr
   const cleared = runner.clearProxyConfiguration();
   assert.equal(cleared.proxy.mode, "direct");
   assert.equal(cleared.proxy.count, 0);
+  assert.equal(cleared.proxy.saved, false);
   assert.equal(cleared.proxy.label, "直连（未使用代理）");
   assert.equal(JSON.stringify(cleared).includes("runner-dynamic-api-secret"), false);
 });
