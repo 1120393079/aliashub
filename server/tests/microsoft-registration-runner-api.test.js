@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { createDatabase } from "../db.js";
+import { createDatabase, setSetting } from "../db.js";
 import { createApp } from "../index.js";
 import { MicrosoftRegistrationRunnerService } from "../microsoft-registration-runner-service.js";
 import { jsonRequest } from "./http-harness.js";
@@ -197,7 +197,11 @@ test("runner selects the Chinese country label from explicit or uniformly tagged
   assert.equal(children[1].stdin.text, "1\n1\n日本\n\n");
   runner.stop();
 
-  const explicit = runner.saveConfiguration({ country_code: "US" });
+  assert.throws(() => runner.saveConfiguration({ country_code: "US" }), /所选代理统一为日本/);
+  const explicit = runner.saveConfiguration({
+    country_code: "US",
+    proxy_value: "runner-region-US-user:runner-password@198.51.100.28:9500",
+  });
   assert.equal(explicit.country_code, "US");
   const explicitRun = await runner.start("https://aliashub.test/alias-hub");
   children[3].stdout.emit("data", Buffer.from("请输入并发数: (1)\n请输入注册最大数量: (1)\n请选择国家:\n请选择US的邮箱后缀:\n"));
@@ -207,6 +211,89 @@ test("runner selects the Chinese country label from explicit or uniformly tagged
   assert.throws(() => runner.saveConfiguration({ country_code: "DE" }), /注册地区/);
   assert.equal(automaticRun.status, "running");
   assert.equal(explicitRun.status, "running");
+});
+
+test("runner uses a selected saved proxy pool without returning credentials and snapshots the run source", async (t) => {
+  const { db, runner, calls } = fixture(t);
+  const first = "http://runner-region-JP-first:first-password@198.51.100.41:9610";
+  const fixed = "http://runner-region-JP-fixed:fixed-password@198.51.100.42:9620";
+  let pool = [first, fixed, "socks5://198.51.100.43:9630"];
+  runner.setProxyProvider(() => pool);
+
+  const publicPool = runner.configuration().saved_proxy_pool;
+  assert.equal(publicPool.total, 3);
+  assert.equal(publicPool.compatible_count, 2);
+  assert.equal(JSON.stringify(publicPool).includes("first-password"), false);
+  assert.equal(JSON.stringify(publicPool).includes("fixed-password"), false);
+  const fixedOption = publicPool.options.find((item) => item.label.includes("198.51.100.42"));
+  assert.ok(fixedOption?.compatible);
+
+  const configured = runner.saveConfiguration({
+    captcha_key: "saved-pool-captcha-key",
+    proxy_source: "saved_pool",
+    saved_proxy_selection: fixedOption.id,
+    country_code: "auto",
+  });
+  assert.equal(configured.proxy.source, "saved_pool");
+  assert.equal(configured.proxy.selection, fixedOption.id);
+  assert.equal(configured.proxy.count, 1);
+  assert.equal(JSON.stringify(configured).includes("fixed-password"), false);
+  const stored = db.prepare("SELECT secret_payload_encrypted FROM microsoft_registration_runner_config WHERE id = 1").get();
+  assert.equal(stored.secret_payload_encrypted.includes("fixed-password"), false);
+
+  const fixedRun = await runner.start("https://aliashub.test/alias-hub");
+  assert.equal(fixedRun.proxy_source, "saved_pool");
+  assert.equal(fixedRun.proxy_selection, fixedOption.id);
+  assert.match(fixedRun.proxy_label, /198\.51\.100\.42/);
+  assert.equal(fixedRun.proxy_label.includes("fixed-password"), false);
+  assert.equal(fs.readFileSync(path.join(calls[0].options.cwd, "proxyList.txt"), "utf8").trim(), "runner-region-JP-fixed:fixed-password@198.51.100.42:9620");
+  runner.stop();
+
+  runner.saveConfiguration({ proxy_source: "saved_pool", saved_proxy_selection: "auto" });
+  pool = ["http://runner-region-JP-latest:latest-password@198.51.100.44:9640"];
+  const automaticRun = await runner.start("https://aliashub.test/alias-hub");
+  assert.equal(automaticRun.proxy_source, "saved_pool");
+  assert.equal(automaticRun.proxy_selection, "auto");
+  assert.equal(automaticRun.proxy_count, 1);
+  assert.equal(automaticRun.proxy_label, "已保存 IP池自动轮换（1 条）");
+  assert.equal(fs.readFileSync(path.join(calls[2].options.cwd, "proxyList.txt"), "utf8").trim(), "runner-region-JP-latest:latest-password@198.51.100.44:9640");
+  runner.stop();
+});
+
+test("runner API resolves selected saved IPs from the RegistrationService pool", async (t) => {
+  const { db, runner, calls } = fixture(t);
+  const sourceProxy = "http://runner-region-JP-api:api-password@198.51.100.51:9650";
+  setSetting(db, "registration_proxy_pool", JSON.stringify([sourceProxy]));
+  const runtime = createApp({
+    db,
+    dataEncryptionKey: "runner-api-saved-pool-key",
+    publicBaseUrl: "https://aliashub.test/alias-hub",
+    microsoftRegistrationRunner: runner,
+  });
+  const available = await jsonRequest(runtime.app, "/api/microsoft-registration/runner");
+  assert.equal(available.response.status, 200);
+  const option = available.body.saved_proxy_pool.options[0];
+  assert.equal(option.compatible, true);
+  assert.equal(JSON.stringify(available.body).includes("api-password"), false);
+
+  const configured = await jsonRequest(runtime.app, "/api/microsoft-registration/runner/config", {
+    method: "PUT",
+    body: JSON.stringify({
+      captcha_key: "runner-api-saved-pool-captcha",
+      proxy_source: "saved_pool",
+      saved_proxy_selection: option.id,
+      country_code: "auto",
+    }),
+  });
+  assert.equal(configured.response.status, 200);
+  assert.equal(configured.body.proxy.source, "saved_pool");
+  assert.equal(configured.body.proxy.count, 1);
+
+  const started = await jsonRequest(runtime.app, "/api/microsoft-registration/runner/start", { method: "POST" });
+  assert.equal(started.response.status, 202);
+  assert.equal(started.body.run.proxy_label.includes("api-password"), false);
+  assert.equal(fs.readFileSync(path.join(calls[0].options.cwd, "proxyList.txt"), "utf8").trim(), "runner-region-JP-api:api-password@198.51.100.51:9650");
+  runner.stop();
 });
 
 test("runner imports saved successful registrations when the executable misses its callback", async (t) => {

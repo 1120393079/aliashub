@@ -365,9 +365,11 @@ export function createApp(options = {}) {
     wineBinary: options.microsoftRegistrationWineBinary,
     xvfbBinary: options.microsoftRegistrationXvfbBinary,
     registrationService: microsoftRegistration,
+    proxyProvider: () => registration.getProxyPool(),
     spawnFn: options.microsoftRegistrationSpawnFn,
     waitForPort: options.microsoftRegistrationWaitForPort,
   });
+  microsoftRegistrationRunner.setProxyProvider?.(() => registration.getProxyPool());
   const auth = createAuth({
     username: process.env.ADMIN_USERNAME ?? "admin",
     password: process.env.ADMIN_PASSWORD || "",

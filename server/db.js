@@ -369,6 +369,9 @@ const schema = `
     concurrency INTEGER NOT NULL DEFAULT 1,
     proxy_mode TEXT NOT NULL DEFAULT '',
     proxy_count INTEGER NOT NULL DEFAULT 0,
+    proxy_source TEXT NOT NULL DEFAULT 'manual',
+    proxy_selection TEXT NOT NULL DEFAULT '',
+    proxy_label TEXT NOT NULL DEFAULT '',
     auth_pid INTEGER,
     runner_pid INTEGER,
     callback_token_hash TEXT NOT NULL DEFAULT '',
@@ -667,6 +670,16 @@ export function createDatabase({ filename, seedDemo = false } = {}) {
   }
   if (!registrationColumns.includes("failure_reason")) {
     db.exec("ALTER TABLE registration_jobs ADD COLUMN failure_reason TEXT NOT NULL DEFAULT ''");
+  }
+  const microsoftRunnerRunColumns = db.pragma("table_info(microsoft_registration_runner_runs)").map((column) => column.name);
+  if (!microsoftRunnerRunColumns.includes("proxy_source")) {
+    db.exec("ALTER TABLE microsoft_registration_runner_runs ADD COLUMN proxy_source TEXT NOT NULL DEFAULT 'manual'");
+  }
+  if (!microsoftRunnerRunColumns.includes("proxy_selection")) {
+    db.exec("ALTER TABLE microsoft_registration_runner_runs ADD COLUMN proxy_selection TEXT NOT NULL DEFAULT ''");
+  }
+  if (!microsoftRunnerRunColumns.includes("proxy_label")) {
+    db.exec("ALTER TABLE microsoft_registration_runner_runs ADD COLUMN proxy_label TEXT NOT NULL DEFAULT ''");
   }
   migrateRegistrationJobHistory(db);
   db.exec("CREATE INDEX IF NOT EXISTS idx_registration_jobs_visible ON registration_jobs(deleted_at, created_at DESC)");

@@ -12,6 +12,8 @@ const MAX_PROXY_LINES = 10_000;
 const MAX_PROXY_TEXT = 2_000_000;
 const CALLBACK_TTL_MS = 24 * 60 * 60 * 1000;
 const AUTH_PORT = 8081;
+const PROXY_SOURCE_MANUAL = "manual";
+const PROXY_SOURCE_SAVED_POOL = "saved_pool";
 const COUNTRY_PROMPT_LABELS = {
   JP: "日本",
   US: "美国",
@@ -39,6 +41,72 @@ function sha256(value) {
   return crypto.createHash("sha256").update(String(value || "")).digest("hex");
 }
 
+function normalizeProxySource(value) {
+  const source = trimText(value, 32).toLowerCase() || PROXY_SOURCE_MANUAL;
+  if (![PROXY_SOURCE_MANUAL, PROXY_SOURCE_SAVED_POOL].includes(source)) {
+    throw failure("代理来源无效");
+  }
+  return source;
+}
+
+function normalizeSavedProxySelection(value) {
+  const selection = trimText(value, 80).toLowerCase() || "auto";
+  if (selection === "auto") return selection;
+  if (!/^saved:[a-f0-9]{64}$/.test(selection)) {
+    throw failure("已保存 IP 选择无效");
+  }
+  return selection;
+}
+
+function savedProxyId(value, referenceKey) {
+  return `saved:${crypto.createHmac("sha256", referenceKey).update(String(value || "")).digest("hex")}`;
+}
+
+function maskSavedProxy(parsed) {
+  const host = String(parsed.hostname || "").replace(/^\[|\]$/g, "");
+  const authority = parsed.username ? "***@" : "";
+  return `${parsed.protocol}//${authority}${host}${parsed.port ? `:${parsed.port}` : ""}`;
+}
+
+function savedProxyRunnerLine(value, index, referenceKey) {
+  const id = savedProxyId(value, referenceKey);
+  let parsed;
+  try {
+    parsed = new URL(String(value || ""));
+  } catch {
+    return { id, index, label: `已保存代理 ${index + 1}`, line: "", reason: "地址格式无效" };
+  }
+  const label = maskSavedProxy(parsed);
+  if (parsed.protocol !== "http:") {
+    return { id, index, label, line: "", reason: "服务器注册机仅支持 HTTP 账号密码代理" };
+  }
+  if (!parsed.username || !parsed.password || !parsed.port) {
+    return { id, index, label, line: "", reason: "缺少账号、密码或端口" };
+  }
+  const hostname = String(parsed.hostname || "").replace(/^\[|\]$/g, "");
+  if (!hostname || hostname.includes(":")) {
+    return { id, index, label, line: "", reason: "不支持 IPv6 代理地址" };
+  }
+  let username;
+  let password;
+  try {
+    username = decodeURIComponent(parsed.username);
+    password = decodeURIComponent(parsed.password);
+  } catch {
+    return { id, index, label, line: "", reason: "账号或密码编码无效" };
+  }
+  if (!username || !password || /[\s:@]/.test(username) || /[\s@]/.test(password)) {
+    return { id, index, label, line: "", reason: "账号或密码包含注册机不支持的字符" };
+  }
+  return {
+    id,
+    index,
+    label,
+    line: `${username}:${password}@${hostname}:${parsed.port}`,
+    reason: "",
+  };
+}
+
 function safeEqual(left, right) {
   const a = Buffer.from(String(left || ""));
   const b = Buffer.from(String(right || ""));
@@ -64,6 +132,9 @@ function publicRun(row) {
     concurrency: Number(row.concurrency) || 0,
     proxy_mode: row.proxy_mode,
     proxy_count: Number(row.proxy_count) || 0,
+    proxy_source: row.proxy_source || PROXY_SOURCE_MANUAL,
+    proxy_selection: row.proxy_selection || "",
+    proxy_label: row.proxy_label || "",
     received_count: Number(row.received_count) || 0,
     stop_requested: Boolean(row.stop_requested),
     message: row.message || "",
@@ -317,6 +388,8 @@ function defaultConfig() {
     captcha_type: "3",
     captcha_key: "",
     proxy_mode: "list",
+    proxy_source: PROXY_SOURCE_MANUAL,
+    saved_proxy_selection: "auto",
     proxy_value: "",
     account_format: "aaaaa11111111",
     password_format: "aaaaa11111111",
@@ -338,6 +411,7 @@ export class MicrosoftRegistrationRunnerService {
     xvfbBinary = process.env.MICROSOFT_REGISTRATION_XVFB_BINARY || "xvfb-run",
     scriptBinary = process.env.MICROSOFT_REGISTRATION_SCRIPT_BINARY || "script",
     registrationService,
+    proxyProvider,
     spawnFn = nodeSpawn,
     waitForPort,
   } = {}) {
@@ -345,6 +419,7 @@ export class MicrosoftRegistrationRunnerService {
     this.encryptionKey = encryptionKey
       ? crypto.createHash("sha256").update(String(encryptionKey)).digest()
       : null;
+    this.proxyReferenceKey = this.encryptionKey || crypto.randomBytes(32);
     this.dataDir = path.resolve(dataDir || path.join(process.cwd(), "data"));
     this.rootDir = path.join(this.dataDir, "microsoft-registration-runner");
     this.toolDir = path.resolve(toolDir || process.env.MICROSOFT_REGISTRATION_RUNNER_DIR || path.join(process.cwd(), "release", "microsoft-registration-runner"));
@@ -352,6 +427,7 @@ export class MicrosoftRegistrationRunnerService {
     this.xvfbBinary = xvfbBinary;
     this.scriptBinary = scriptBinary;
     this.registrationService = registrationService || null;
+    this.proxyProvider = typeof proxyProvider === "function" ? proxyProvider : null;
     this.spawn = spawnFn;
     this.waitForPort = waitForPort || this.waitForLocalPort.bind(this);
     this.processes = new Map();
@@ -368,6 +444,91 @@ export class MicrosoftRegistrationRunnerService {
 
   get registrarExecutable() {
     return path.join(this.toolDir, "go-ms-v9.2.8.exe");
+  }
+
+  setProxyProvider(proxyProvider) {
+    this.proxyProvider = typeof proxyProvider === "function" ? proxyProvider : null;
+  }
+
+  savedProxyEntries() {
+    let values = [];
+    try {
+      values = this.proxyProvider ? this.proxyProvider() : [];
+    } catch {
+      values = [];
+    }
+    if (!Array.isArray(values)) values = [];
+    return values.map((value, index) => savedProxyRunnerLine(value, index, this.proxyReferenceKey));
+  }
+
+  publicSavedProxyPool() {
+    const entries = this.savedProxyEntries();
+    const usable = entries.filter((item) => item.line);
+    return {
+      total: entries.length,
+      compatible_count: usable.length,
+      options: entries.map(({ id, index, label, line, reason }) => ({
+        id,
+        index,
+        label,
+        compatible: Boolean(line),
+        reason: line ? "" : reason,
+      })),
+    };
+  }
+
+  resolveSavedProxySelection(selection) {
+    const normalizedSelection = normalizeSavedProxySelection(selection);
+    const entries = this.savedProxyEntries();
+    const selected = normalizedSelection === "auto"
+      ? entries.filter((item) => item.line)
+      : entries.filter((item) => item.id === normalizedSelection);
+    if (!selected.length) {
+      throw failure(normalizedSelection === "auto"
+        ? "已保存 IP/代理池中没有可用于服务器注册机的 HTTP 账号密码代理"
+        : "所选保存 IP 已不存在，请重新选择");
+    }
+    const unsupported = selected.find((item) => !item.line);
+    if (unsupported) {
+      throw failure(`所选保存 IP 不可用于服务器注册机：${unsupported.reason}`);
+    }
+    return {
+      selection: normalizedSelection,
+      entries: selected,
+      proxy_value: selected.map((item) => item.line).join("\n"),
+      proxy_count: selected.length,
+      proxy_label: normalizedSelection === "auto"
+        ? `已保存 IP池自动轮换（${selected.length} 条）`
+        : `已保存 IP：${selected[0].label}`,
+    };
+  }
+
+  effectiveConfiguration(config) {
+    if (config.proxy_source !== PROXY_SOURCE_SAVED_POOL) {
+      return {
+        ...config,
+        proxy_label: config.proxy_mode === "api"
+          ? "手动动态代理 API"
+          : `手动代理列表（${config.proxy_count} 条）`,
+      };
+    }
+    const saved = this.resolveSavedProxySelection(config.saved_proxy_selection);
+    return {
+      ...config,
+      proxy_mode: "list",
+      proxy_value: saved.proxy_value,
+      proxy_count: saved.proxy_count,
+      saved_proxy_selection: saved.selection,
+      proxy_label: saved.proxy_label,
+    };
+  }
+
+  ensureCountryMatchesProxy(config) {
+    const configuredCountry = normalizeCountryCode(config?.country_code);
+    const detectedCountry = detectedProxyRegion(config);
+    if (configuredCountry !== "auto" && detectedCountry && configuredCountry !== detectedCountry) {
+      throw failure(`所选代理统一为${COUNTRY_PROMPT_LABELS[detectedCountry] || detectedCountry}，请把注册地区改为自动或${COUNTRY_PROMPT_LABELS[detectedCountry] || detectedCountry}`);
+    }
   }
 
   requireEncryption() {
@@ -418,28 +579,39 @@ export class MicrosoftRegistrationRunnerService {
     const latest = this.db.prepare("SELECT * FROM microsoft_registration_runner_runs ORDER BY id DESC LIMIT 1").get();
     const current = this.currentRun();
     const toolReady = this.toolReady();
-    let countryCode = defaultConfig().country_code;
+    let config = defaultConfig();
+    let effective = config;
+    let configurationError = "";
     let detectedCountryCode = "";
     if (row?.secret_payload_encrypted) {
       try {
-        const config = this.storedConfiguration(row);
-        countryCode = config.country_code;
-        detectedCountryCode = detectedProxyRegion(config);
-      } catch {
-        // Keep the masked configuration endpoint available if an old payload cannot be decrypted.
+        config = this.storedConfiguration(row);
+        effective = this.effectiveConfiguration(config);
+        this.ensureCountryMatchesProxy(effective);
+        detectedCountryCode = detectedProxyRegion(effective);
+      } catch (error) {
+        configurationError = error.message || "服务器注册配置不可用";
       }
     }
+    const savedProxyPool = this.publicSavedProxyPool();
+    const proxyCount = Number(effective.proxy_count) || 0;
+    const proxyConfigured = Boolean(row?.secret_payload_encrypted && row?.captcha_key_configured && proxyCount && !configurationError);
     return {
       available: this.encryptionReady && toolReady,
       encryption_ready: this.encryptionReady,
       tool_ready: toolReady,
-      configured: Boolean(row?.secret_payload_encrypted && row?.captcha_key_configured && row?.proxy_count),
+      configured: proxyConfigured,
       captcha_key_configured: Boolean(row?.captcha_key_configured),
       proxy: {
-        configured: Boolean(row?.proxy_count),
-        mode: row?.proxy_mode || "list",
-        count: Number(row?.proxy_count) || 0,
+        configured: proxyConfigured,
+        mode: effective.proxy_mode || row?.proxy_mode || "list",
+        count: proxyCount,
+        source: config.proxy_source,
+        selection: config.proxy_source === PROXY_SOURCE_SAVED_POOL ? config.saved_proxy_selection : "",
+        label: effective.proxy_label || "",
+        error: configurationError,
       },
+      saved_proxy_pool: savedProxyPool,
       account_format: row?.account_format || defaultConfig().account_format,
       password_format: row?.password_format || defaultConfig().password_format,
       quantity: Number(row?.quantity) || 1,
@@ -447,7 +619,7 @@ export class MicrosoftRegistrationRunnerService {
       captcha_type: row?.captcha_type || defaultConfig().captcha_type,
       oauth_mode: row?.oauth_mode || defaultConfig().oauth_mode,
       chrome_version: row?.chrome_version || defaultConfig().chrome_version,
-      country_code: countryCode,
+      country_code: config.country_code,
       detected_country_code: detectedCountryCode,
       updated_at: row?.updated_at || "",
       run: publicRun(current || latest),
@@ -472,7 +644,15 @@ export class MicrosoftRegistrationRunnerService {
       oauth_mode: row.oauth_mode,
       chrome_version: row.chrome_version,
     } : {};
-    return { ...defaultConfig(), ...stored, ...this.configSecrets(row) };
+    const secrets = this.configSecrets(row);
+    const legacyProxySource = secrets.proxy_source || (row ? PROXY_SOURCE_MANUAL : defaultConfig().proxy_source);
+    return {
+      ...defaultConfig(),
+      ...stored,
+      ...secrets,
+      proxy_source: normalizeProxySource(legacyProxySource),
+      saved_proxy_selection: normalizeSavedProxySelection(secrets.saved_proxy_selection),
+    };
   }
 
   normalizeConfiguration(input = {}, existing = defaultConfig()) {
@@ -481,12 +661,24 @@ export class MicrosoftRegistrationRunnerService {
     if (!["1", "2", "3"].includes(captchaType)) throw failure("打码平台类型无效");
     const captchaKey = has("captcha_key") ? trimText(input.captcha_key, 2_000) : existing.captcha_key;
     if (!captchaKey) throw failure("请填写打码平台 Key");
-    const proxyMode = has("proxy_mode") ? trimText(input.proxy_mode, 10) : existing.proxy_mode;
+    const proxySource = normalizeProxySource(has("proxy_source") ? input.proxy_source : existing.proxy_source);
+    let proxyMode = has("proxy_mode") ? trimText(input.proxy_mode, 10) : existing.proxy_mode;
     if (!["list", "api"].includes(proxyMode)) throw failure("代理类型无效");
+    const savedProxySelection = proxySource === PROXY_SOURCE_SAVED_POOL
+      ? normalizeSavedProxySelection(has("saved_proxy_selection") ? input.saved_proxy_selection : existing.saved_proxy_selection)
+      : "auto";
     let proxyValue = has("proxy_value") ? trimText(input.proxy_value, MAX_PROXY_TEXT) : existing.proxy_value;
-    if (!proxyValue) throw failure(proxyMode === "list" ? "请粘贴账号密码代理列表" : "请填写动态代理 API 地址");
     let proxyCount = 0;
-    if (proxyMode === "list") {
+    let effectiveProxyValue = proxyValue;
+    if (proxySource === PROXY_SOURCE_SAVED_POOL) {
+      if (proxyMode !== "list") throw failure("已保存 IP/代理池只支持账号密码代理列表");
+      const saved = this.resolveSavedProxySelection(savedProxySelection);
+      proxyMode = "list";
+      effectiveProxyValue = saved.proxy_value;
+      proxyCount = saved.proxy_count;
+    } else if (!proxyValue) {
+      throw failure(proxyMode === "list" ? "请粘贴账号密码代理列表" : "请填写动态代理 API 地址");
+    } else if (proxyMode === "list") {
       const proxies = splitLines(proxyValue).map(normalizeProxyLine);
       if (!proxies.length || proxies.length > MAX_PROXY_LINES || proxies.some((item) => !item)) {
         throw failure("代理列表格式错误，请使用 username:password@host:port 或 username:password:host:port，每行一个");
@@ -513,10 +705,12 @@ export class MicrosoftRegistrationRunnerService {
     }
     const chromeVersion = integer(has("chrome_version") ? input.chrome_version : existing.chrome_version, 143, 128, 144);
     const countryCode = normalizeCountryCode(has("country_code") ? input.country_code : existing.country_code);
-    return {
+    const normalized = {
       captcha_type: captchaType,
       captcha_key: captchaKey,
       proxy_mode: proxyMode,
+      proxy_source: proxySource,
+      saved_proxy_selection: savedProxySelection,
       proxy_value: proxyValue,
       proxy_count: proxyCount,
       account_format: accountFormat,
@@ -527,6 +721,8 @@ export class MicrosoftRegistrationRunnerService {
       chrome_version: String(chromeVersion),
       country_code: countryCode,
     };
+    this.ensureCountryMatchesProxy({ ...normalized, proxy_value: effectiveProxyValue });
+    return normalized;
   }
 
   saveConfiguration(input = {}) {
@@ -553,7 +749,13 @@ export class MicrosoftRegistrationRunnerService {
         chrome_version = excluded.chrome_version,
         updated_at = excluded.updated_at
     `).run(
-      this.encrypt({ captcha_key: normalized.captcha_key, proxy_value: normalized.proxy_value, country_code: normalized.country_code }),
+      this.encrypt({
+        captcha_key: normalized.captcha_key,
+        proxy_value: normalized.proxy_value,
+        proxy_source: normalized.proxy_source,
+        saved_proxy_selection: normalized.saved_proxy_selection,
+        country_code: normalized.country_code,
+      }),
       normalized.proxy_mode,
       normalized.proxy_count,
       normalized.account_format,
@@ -567,6 +769,8 @@ export class MicrosoftRegistrationRunnerService {
     );
     audit(this.db, null, "microsoft_registration_runner", "保存服务器注册机配置", "注册配置已加密保存", {
       proxyMode: normalized.proxy_mode,
+      proxySource: normalized.proxy_source,
+      savedProxySelection: normalized.proxy_source === PROXY_SOURCE_SAVED_POOL ? normalized.saved_proxy_selection : "",
       proxyCount: normalized.proxy_count,
       quantity: normalized.quantity,
       concurrency: normalized.concurrency,
@@ -582,13 +786,17 @@ export class MicrosoftRegistrationRunnerService {
   requireSavedConfiguration() {
     this.requireEncryption();
     const row = this.db.prepare("SELECT * FROM microsoft_registration_runner_config WHERE id = 1").get();
-    if (!row?.secret_payload_encrypted || !row.captcha_key_configured || !row.proxy_count) {
+    if (!row?.secret_payload_encrypted || !row.captcha_key_configured) {
       throw failure("请先填写并保存打码 Key 与代理配置", 409, "MICROSOFT_RUNNER_CONFIG_REQUIRED");
     }
-    const config = this.storedConfiguration(row);
+    const config = this.effectiveConfiguration(this.storedConfiguration(row));
+    if (!config.proxy_count || !config.proxy_value) {
+      throw failure("请先填写并保存打码 Key 与代理配置", 409, "MICROSOFT_RUNNER_CONFIG_REQUIRED");
+    }
     if (config.captcha_type === "3" && config.proxy_mode !== "list") {
       throw failure("CaptchaRun Two 只支持账号密码代理列表，请使用 username:password@host:port", 409, "MICROSOFT_RUNNER_PROXY_MODE_REQUIRED");
     }
+    this.ensureCountryMatchesProxy(config);
     return { row, config };
   }
 
@@ -920,9 +1128,23 @@ export class MicrosoftRegistrationRunnerService {
     const inserted = this.db.prepare(`
       INSERT INTO microsoft_registration_runner_runs (
         status, phase, account_format, quantity, concurrency, proxy_mode, proxy_count,
+        proxy_source, proxy_selection, proxy_label,
         callback_token_hash, callback_expires_at, created_at, updated_at
-      ) VALUES ('starting', 'authorization', ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(config.account_format, config.quantity, config.concurrency, config.proxy_mode, config.proxy_count, sha256(token), expiresAt, timestamp, timestamp);
+      ) VALUES ('starting', 'authorization', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      config.account_format,
+      config.quantity,
+      config.concurrency,
+      config.proxy_mode,
+      config.proxy_count,
+      config.proxy_source,
+      config.proxy_source === PROXY_SOURCE_SAVED_POOL ? config.saved_proxy_selection : "",
+      config.proxy_label,
+      sha256(token),
+      expiresAt,
+      timestamp,
+      timestamp,
+    );
     const runId = Number(inserted.lastInsertRowid);
     const runDir = this.ensureRunDirectory(runId);
     const callback = callbackUrl(runnerCallbackBaseUrl(publicBaseUrl), runId, token);
@@ -957,6 +1179,9 @@ export class MicrosoftRegistrationRunnerService {
         concurrency: config.concurrency,
         proxyMode: config.proxy_mode,
         proxyCount: config.proxy_count,
+        proxySource: config.proxy_source,
+        proxySelection: config.proxy_source === PROXY_SOURCE_SAVED_POOL ? config.saved_proxy_selection : "",
+        proxyLabel: config.proxy_label,
       });
       return publicRun(this.run(runId));
     } catch (error) {
