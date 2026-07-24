@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { Bell, BookOpen, Bot, Inbox, KeyRound, LayoutDashboard, LogOut, Mail, MailPlus, Menu, Moon, Plus, Settings, Sun, WandSparkles, X } from "lucide-react";
+import { Bell, BookOpen, Bot, Inbox, KeyRound, LayoutDashboard, LogOut, Mail, Menu, Moon, Plus, Settings, Sun, WandSparkles, X } from "lucide-react";
 import { api } from "./api.js";
-import { Button, IconButton, LoadingBlock, ProviderMark, useToast } from "./components.jsx";
+import { Button, IconButton, LoadingBlock, MicrosoftMark, ProviderMark, useToast } from "./components.jsx";
 import OverviewPage from "./pages/Overview.jsx";
 import SourcesPage from "./pages/Sources.jsx";
 import FactoryPage from "./pages/Factory.jsx";
@@ -19,8 +19,8 @@ const pages = {
   inbox: { label: "邮件中心", subtitle: "集中接收所有绑定邮箱的邮件", icon: Inbox },
   codes: { label: "验证码中心", subtitle: "集中查看所有源头号的验证码", icon: KeyRound },
   addresses: { label: "地址仓库", subtitle: "全部基础地址和分裂地址", icon: BookOpen },
+  "microsoft-registration": { label: "微软邮箱注册", subtitle: "Go 注册机回传与账号归档", icon: MicrosoftMark },
   registration: { label: "ChatGPT注册", subtitle: "自动注册与账号集中管理", icon: Bot, featured: true },
-  "microsoft-registration": { label: "微软邮箱注册", subtitle: "Go 注册机回传与账号归档", icon: MailPlus, featured: true },
   settings: { label: "系统设置", subtitle: "服务与数据配置", icon: Settings },
 };
 
