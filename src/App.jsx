@@ -25,7 +25,7 @@ const pages = {
 };
 
 const mobilePageKeys = ["overview", "sources", "inbox", "addresses", "registration"];
-const emailWorkspacePageKeys = ["sources", "factory", "inbox", "codes", "addresses"];
+const emailWorkspacePageKeys = ["sources", "factory", "inbox", "codes", "addresses", "microsoft-registration"];
 
 function LoginPage({ onAuthenticated }) {
   const [form, setForm] = useState({ username: "admin", password: "" });
