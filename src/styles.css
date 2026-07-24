@@ -99,7 +99,7 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .sidebar-brand strong { font-size: 16px; font-weight: 720; }
 .sidebar-brand span { margin-top: 2px; color: #929c97; font-size: 11px; }
 .sidebar-close { display: none !important; color: #cfd6d2 !important; }
-.sidebar-nav { display: grid; gap: 4px; padding: 18px 10px; }
+.sidebar-nav { display: grid; flex: 1; min-height: 0; gap: 4px; overflow-y: auto; padding: 18px 10px; }
 .sidebar-nav button {
   position: relative;
   display: flex;
@@ -117,6 +117,13 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .sidebar-nav button:hover { color: #f2f6f4; background: rgba(255,255,255,0.05); }
 .sidebar-nav button.active { color: #ffffff; background: #29312d; }
 .sidebar-nav button.active::before { content: ""; position: absolute; left: 0; width: 3px; height: 19px; border-radius: 0 3px 3px 0; background: #33c58f; }
+.sidebar-nav-group { display: grid; gap: 3px; }
+.sidebar-nav-group-toggle.active-group { color: #dffbef; background: rgba(51,197,143,0.08); }
+.sidebar-nav-group-toggle > svg:last-child { flex: 0 0 auto; color: #7f8b85; transition: transform 0.16s ease, color 0.16s ease; }
+.sidebar-nav-group-toggle.active-group > svg:last-child { color: #52d8a4; }
+.sidebar-nav-group-toggle > svg:last-child.expanded { transform: rotate(180deg); }
+.sidebar-nav-children { display: grid; gap: 2px; padding-left: 12px; }
+.sidebar-nav-children button { height: 38px; padding-left: 16px; }
 .sidebar-nav button.featured { margin-top: 3px; border: 1px solid rgba(51,197,143,0.42); background: linear-gradient(90deg, rgba(51,197,143,0.17), rgba(51,197,143,0.07)); color: #dffbef; font-weight: 720; box-shadow: inset 0 0 0 1px rgba(51,197,143,0.05); }
 .sidebar-nav button.featured:hover { border-color: rgba(82,216,164,0.62); background: linear-gradient(90deg, rgba(51,197,143,0.24), rgba(51,197,143,0.1)); }
 .sidebar-nav button.featured.active { border-color: rgba(82,216,164,0.74); background: linear-gradient(90deg, rgba(51,197,143,0.32), rgba(51,197,143,0.14)); }

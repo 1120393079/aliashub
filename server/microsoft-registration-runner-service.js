@@ -63,10 +63,22 @@ function savedProxyId(value, referenceKey) {
   return `saved:${crypto.createHmac("sha256", referenceKey).update(String(value || "")).digest("hex")}`;
 }
 
-function maskSavedProxy(parsed) {
+function explicitUrlPort(value, parsed) {
+  if (parsed?.port) return String(parsed.port);
+  const authority = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i.exec(String(value || "").trim())?.[1] || "";
+  const hostPort = authority.slice(authority.lastIndexOf("@") + 1);
+  const match = hostPort.startsWith("[")
+    ? /^\[[^\]]+\]:(\d{1,5})$/.exec(hostPort)
+    : /:(\d{1,5})$/.exec(hostPort);
+  const port = Number(match?.[1]);
+  return Number.isInteger(port) && port >= 1 && port <= 65_535 ? String(port) : "";
+}
+
+function maskSavedProxy(parsed, value = "") {
   const host = String(parsed.hostname || "").replace(/^\[|\]$/g, "");
   const authority = parsed.username ? "***@" : "";
-  return `${parsed.protocol}//${authority}${host}${parsed.port ? `:${parsed.port}` : ""}`;
+  const port = explicitUrlPort(value, parsed);
+  return `${parsed.protocol}//${authority}${host}${port ? `:${port}` : ""}`;
 }
 
 function savedProxyRunnerLine(value, index, referenceKey) {
@@ -77,11 +89,12 @@ function savedProxyRunnerLine(value, index, referenceKey) {
   } catch {
     return { id, index, label: `已保存代理 ${index + 1}`, line: "", reason: "地址格式无效" };
   }
-  const label = maskSavedProxy(parsed);
+  const label = maskSavedProxy(parsed, value);
+  const port = explicitUrlPort(value, parsed);
   if (parsed.protocol !== "http:") {
     return { id, index, label, line: "", reason: "服务器注册机仅支持 HTTP 账号密码代理" };
   }
-  if (!parsed.username || !parsed.password || !parsed.port) {
+  if (!parsed.username || !parsed.password || !port) {
     return { id, index, label, line: "", reason: "缺少账号、密码或端口" };
   }
   const hostname = String(parsed.hostname || "").replace(/^\[|\]$/g, "");
@@ -103,7 +116,7 @@ function savedProxyRunnerLine(value, index, referenceKey) {
     id,
     index,
     label,
-    line: `${username}:${password}@${hostname}:${parsed.port}`,
+    line: `${username}:${password}@${hostname}:${port}`,
     reason: "",
   };
 }
@@ -205,12 +218,13 @@ function normalizeProxyLine(value) {
     try {
       const parsed = new URL(text);
       const hostname = String(parsed.hostname || "").replace(/^\[|\]$/g, "");
-      if (parsed.protocol !== "http:" || !parsed.username || !parsed.password || !parsed.port
+      const port = explicitUrlPort(text, parsed);
+      if (parsed.protocol !== "http:" || !parsed.username || !parsed.password || !port
         || (parsed.pathname && parsed.pathname !== "/") || parsed.search || parsed.hash || hostname.includes(":")) return "";
       const username = decodeURIComponent(parsed.username);
       const password = decodeURIComponent(parsed.password);
       if (!username || !password || /[\s:@]/.test(username) || /[\s@]/.test(password)) return "";
-      return `${username}:${password}@${hostname}:${parsed.port}`;
+      return `${username}:${password}@${hostname}:${port}`;
     } catch {
       return "";
     }
@@ -259,10 +273,10 @@ function normalizeSavedProxyInput(value) {
   const [, username, password, host, port] = match;
   const stored = `http://${encodeURIComponent(username)}:${encodeURIComponent(password)}@${host}:${port}`;
   const verified = savedProxyRunnerLine(stored, 0, crypto.randomBytes(32));
-  if (!verified.line || verified.line !== line) {
+  if (!verified.line) {
     throw failure("保存 IP 仅支持服务器注册机兼容的 HTTP 账号密码代理");
   }
-  return { line, stored };
+  return { line: verified.line, stored };
 }
 
 function normalizeCountryCode(value) {

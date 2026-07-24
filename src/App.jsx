@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Bell, BookOpen, Bot, Inbox, KeyRound, LayoutDashboard, LogOut, Mail, Menu, Moon, Plus, Settings, Sun, WandSparkles, X } from "lucide-react";
+import { Bell, BookOpen, Bot, ChevronDown, Inbox, KeyRound, Layers, LayoutDashboard, LogOut, Mail, Menu, Moon, Plus, Settings, Sun, WandSparkles, X } from "lucide-react";
 import { api } from "./api.js";
 import { Button, IconButton, LoadingBlock, MicrosoftMark, ProviderMark, useToast } from "./components.jsx";
 import OverviewPage from "./pages/Overview.jsx";
@@ -25,6 +25,7 @@ const pages = {
 };
 
 const mobilePageKeys = ["overview", "sources", "inbox", "addresses", "registration"];
+const emailWorkspacePageKeys = ["sources", "factory", "inbox", "codes", "addresses"];
 
 function LoginPage({ onAuthenticated }) {
   const [form, setForm] = useState({ username: "admin", password: "" });
@@ -57,6 +58,7 @@ export default function App() {
   const [auth, setAuth] = useState(null);
   const [page, setPage] = useState(() => window.location.hash.replace("#", "") || "overview");
   const [mobileNav, setMobileNav] = useState(false);
+  const [emailWorkspaceOpen, setEmailWorkspaceOpen] = useState(() => emailWorkspacePageKeys.includes(page));
   const [theme, setTheme] = useState(() => localStorage.getItem("aliashub-theme") || "light");
   const [overview, setOverview] = useState(null);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -86,6 +88,7 @@ export default function App() {
       const target = window.location.hash.replace("#", "");
       if (!pages[target]) return;
       if (target === "factory") setFactoryMounted(true);
+      if (emailWorkspacePageKeys.includes(target)) setEmailWorkspaceOpen(true);
       setPage(target);
     };
     window.addEventListener("hashchange", onHash);
@@ -97,8 +100,12 @@ export default function App() {
       setFactoryMounted(true);
       setFactoryRouteState((current) => ({ ...state, navigationKey: current.navigationKey + 1 }));
     }
+    if (emailWorkspacePageKeys.includes(target)) setEmailWorkspaceOpen(true);
     setPage(target); setRouteState(state); setMobileNav(false); window.location.hash = target;
   };
+  useEffect(() => {
+    if (emailWorkspacePageKeys.includes(page)) setEmailWorkspaceOpen(true);
+  }, [page]);
   const changed = () => setRefreshKey((value) => value + 1);
   const logout = async () => { await api("/api/auth/logout", { method: "POST" }); setAuth({ authenticated: false, authEnabled: true }); };
   const content = useMemo(() => {
@@ -119,17 +126,44 @@ export default function App() {
   const current = pages[page] || pages.overview;
   const unusedCodes = overview?.metrics?.unusedCodes || 0;
   const actionRequired = overview?.metrics?.actionRequired || 0;
+  const isEmailWorkspacePage = emailWorkspacePageKeys.includes(page);
 
   return (
     <div className="app-shell">
       <aside className={`sidebar ${mobileNav ? "open" : ""}`}>
         <div className="sidebar-brand"><img src={`${import.meta.env.BASE_URL}aliashub-mark.svg`} alt="" /><div><strong>AliasHub</strong><span>邮箱别名中枢</span></div><IconButton className="sidebar-close" icon={X} label="关闭菜单" onClick={() => setMobileNav(false)} /></div>
         <nav className="sidebar-nav" aria-label="主导航">
-          {Object.entries(pages).map(([key, item]) => {
+          {Object.entries(pages).filter(([key]) => key === "overview").map(([key, item]) => {
             const Icon = item.icon;
             const badge = key === "codes" ? unusedCodes : key === "sources" ? actionRequired : 0;
             const className = [page === key ? "active" : "", item.featured ? "featured" : ""].filter(Boolean).join(" ");
             return <button key={key} className={className} onClick={() => navigate(key)}><Icon size={18} /><span>{item.label}</span>{badge > 0 && <b>{badge}</b>}</button>;
+          })}
+          <div className="sidebar-nav-group">
+            <button
+              type="button"
+              className={`sidebar-nav-group-toggle${isEmailWorkspacePage ? " active-group" : ""}`}
+              aria-expanded={emailWorkspaceOpen}
+              aria-controls="email-workspace-navigation"
+              onClick={() => setEmailWorkspaceOpen((open) => !open)}
+            >
+              <Layers size={18} />
+              <span>邮箱工作台</span>
+              <ChevronDown className={emailWorkspaceOpen ? "expanded" : ""} size={17} aria-hidden="true" />
+            </button>
+            <div id="email-workspace-navigation" className="sidebar-nav-children" hidden={!emailWorkspaceOpen}>
+              {emailWorkspacePageKeys.map((key) => {
+                const item = pages[key];
+                const Icon = item.icon;
+                const badge = key === "codes" ? unusedCodes : key === "sources" ? actionRequired : 0;
+                return <button key={key} className={page === key ? "active" : ""} onClick={() => navigate(key)}><Icon size={18} /><span>{item.label}</span>{badge > 0 && <b>{badge}</b>}</button>;
+              })}
+            </div>
+          </div>
+          {Object.entries(pages).filter(([key]) => key !== "overview" && !emailWorkspacePageKeys.includes(key)).map(([key, item]) => {
+            const Icon = item.icon;
+            const className = [page === key ? "active" : "", item.featured ? "featured" : ""].filter(Boolean).join(" ");
+            return <button key={key} className={className} onClick={() => navigate(key)}><Icon size={18} /><span>{item.label}</span></button>;
           })}
         </nav>
         <div className="sidebar-provider"><span className="provider-mark-stack"><ProviderMark provider="microsoft" size={25} /><ProviderMark provider="google" size={25} /><ProviderMark provider="icloud" size={25} /></span><span className="sidebar-provider-copy"><b>Microsoft + Google + iCloud</b><small>Outlook · Gmail · iCloud</small></span><i className="online-dot" /></div>

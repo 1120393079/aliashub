@@ -220,7 +220,7 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
       setRunner(saved);
       setRunnerForm((current) => ({ ...current, saved_proxy_selection: saved.added?.id || current.saved_proxy_selection }));
       setSavedProxyDraft("");
-      toast("IP 已保存并选中用于注册");
+      toast("IP 已保存并选中，点击“保存配置”后用于注册");
     } catch (error) {
       toast(error.message, "error");
     } finally {
@@ -333,8 +333,8 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
   const usesSavedProxy = Boolean(runnerForm.saved_proxy_selection);
   const savedProxyHint = usesSavedProxy
     ? runnerForm.saved_proxy_selection === "auto"
-      ? `自动轮换 ${savedProxyPool.compatible_count || 0} 个可用已保存 IP。`
-      : `使用 ${selectedSavedProxy?.label || "所选已保存 IP"} 注册。`
+      ? `保存配置后自动轮换 ${savedProxyPool.compatible_count || 0} 个可用已保存 IP。`
+      : `保存配置后使用 ${selectedSavedProxy?.label || "所选已保存 IP"} 注册。`
     : "不选时使用上方输入的代理；上方也留空则使用本机直连出口。";
 
   return <div className="page-stack microsoft-registration-page">

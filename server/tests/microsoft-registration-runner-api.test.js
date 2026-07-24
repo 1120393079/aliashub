@@ -445,7 +445,7 @@ test("runner API saves and deletes one compatible saved IP without exposing cred
     publicBaseUrl: "https://aliashub.test/alias-hub",
     microsoftRegistrationRunner: runner,
   });
-  const proxy = "runner-saved-user:runner-saved-password@198.51.100.58:9660";
+  const proxy = "runner-saved-user:runner-saved-password@198.51.100.58:80";
 
   const added = await jsonRequest(runtime.app, "/api/microsoft-registration/runner/saved-proxies", {
     method: "POST",
@@ -455,7 +455,7 @@ test("runner API saves and deletes one compatible saved IP without exposing cred
   assert.equal(added.body.added.created, true);
   assert.equal(added.body.added.compatible, true);
   assert.match(added.body.added.id, /^saved:[a-f0-9]{64}$/);
-  assert.match(added.body.added.label, /198\.51\.100\.58:9660/);
+  assert.match(added.body.added.label, /198\.51\.100\.58:80/);
   assert.equal(JSON.stringify(added.body).includes("runner-saved-user"), false);
   assert.equal(JSON.stringify(added.body).includes("runner-saved-password"), false);
   assert.equal(added.body.saved_proxy_pool.compatible_count, 1);
