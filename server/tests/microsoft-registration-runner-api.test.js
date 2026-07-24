@@ -437,6 +437,93 @@ test("runner API resolves selected saved IPs from the RegistrationService pool",
   runner.stop();
 });
 
+test("runner API saves and deletes one compatible saved IP without exposing credentials", async (t) => {
+  const { db, runner } = fixture(t);
+  const runtime = createApp({
+    db,
+    dataEncryptionKey: "runner-saved-ip-api-key",
+    publicBaseUrl: "https://aliashub.test/alias-hub",
+    microsoftRegistrationRunner: runner,
+  });
+  const proxy = "runner-saved-user:runner-saved-password@198.51.100.58:9660";
+
+  const added = await jsonRequest(runtime.app, "/api/microsoft-registration/runner/saved-proxies", {
+    method: "POST",
+    body: JSON.stringify({ proxy }),
+  });
+  assert.equal(added.response.status, 201);
+  assert.equal(added.body.added.created, true);
+  assert.equal(added.body.added.compatible, true);
+  assert.match(added.body.added.id, /^saved:[a-f0-9]{64}$/);
+  assert.match(added.body.added.label, /198\.51\.100\.58:9660/);
+  assert.equal(JSON.stringify(added.body).includes("runner-saved-user"), false);
+  assert.equal(JSON.stringify(added.body).includes("runner-saved-password"), false);
+  assert.equal(added.body.saved_proxy_pool.compatible_count, 1);
+
+  const duplicate = await jsonRequest(runtime.app, "/api/microsoft-registration/runner/saved-proxies", {
+    method: "POST",
+    body: JSON.stringify({ proxy }),
+  });
+  assert.equal(duplicate.response.status, 201);
+  assert.equal(duplicate.body.added.id, added.body.added.id);
+  assert.equal(duplicate.body.added.created, false);
+  assert.equal(duplicate.body.saved_proxy_pool.total, 1);
+
+  const invalid = await jsonRequest(runtime.app, "/api/microsoft-registration/runner/saved-proxies", {
+    method: "POST",
+    body: JSON.stringify({ proxy: "https://runner-api.example/v1/get?token=do-not-save" }),
+  });
+  assert.equal(invalid.response.status, 400);
+  assert.equal(JSON.stringify(invalid.body).includes("do-not-save"), false);
+
+  const configured = await jsonRequest(runtime.app, "/api/microsoft-registration/runner/config", {
+    method: "PUT",
+    body: JSON.stringify({
+      captcha_key: "runner-saved-ip-captcha",
+      proxy_source: "saved_pool",
+      saved_proxy_selection: added.body.added.id,
+    }),
+  });
+  assert.equal(configured.response.status, 200);
+  assert.equal(configured.body.proxy.source, "saved_pool");
+  assert.equal(configured.body.proxy.selection, added.body.added.id);
+
+  const deleted = await jsonRequest(runtime.app, `/api/microsoft-registration/runner/saved-proxies/${encodeURIComponent(added.body.added.id)}`, {
+    method: "DELETE",
+  });
+  assert.equal(deleted.response.status, 200);
+  assert.equal(deleted.body.deleted.id, added.body.added.id);
+  assert.equal(deleted.body.deleted.switched_to_direct, true);
+  assert.equal(deleted.body.proxy.mode, "direct");
+  assert.equal(deleted.body.proxy.source, "manual");
+  assert.equal(deleted.body.proxy.selection, "");
+  assert.equal(deleted.body.saved_proxy_pool.total, 0);
+  assert.equal(JSON.stringify(deleted.body).includes("runner-saved-password"), false);
+
+  const activeAdded = await jsonRequest(runtime.app, "/api/microsoft-registration/runner/saved-proxies", {
+    method: "POST",
+    body: JSON.stringify({ proxy: "http://runner-active-user:runner-active-password@198.51.100.59:9670" }),
+  });
+  assert.equal(activeAdded.response.status, 201);
+  const activeConfigured = await jsonRequest(runtime.app, "/api/microsoft-registration/runner/config", {
+    method: "PUT",
+    body: JSON.stringify({
+      proxy_source: "saved_pool",
+      saved_proxy_selection: activeAdded.body.added.id,
+    }),
+  });
+  assert.equal(activeConfigured.response.status, 200);
+  const started = await jsonRequest(runtime.app, "/api/microsoft-registration/runner/start", { method: "POST" });
+  assert.equal(started.response.status, 202);
+  const blocked = await jsonRequest(runtime.app, `/api/microsoft-registration/runner/saved-proxies/${encodeURIComponent(activeAdded.body.added.id)}`, {
+    method: "DELETE",
+  });
+  assert.equal(blocked.response.status, 409);
+  assert.equal(blocked.body.error, "服务器注册任务运行中，不能删除已保存 IP");
+  assert.equal(runner.configuration().saved_proxy_pool.total, 1);
+  runner.stop();
+});
+
 test("runner applies its safe proxy label to callback accounts without overriding a reported proxy", async (t) => {
   const { db, runner, calls } = fixture(t);
   const registrationService = new MicrosoftRegistrationService({ db, encryptionKey: "runner-callback-proxy-label-key" });

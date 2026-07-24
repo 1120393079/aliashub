@@ -35,8 +35,6 @@ const defaultRunnerForm = {
   country_code: "auto",
 };
 
-const countryLabels = { JP: "日本", US: "美国" };
-
 function RegistrationStatus({ status }) {
   const meta = statusMeta[status] || statusMeta.unknown;
   return <StatusBadge status={meta.badge}>{meta.label}</StatusBadge>;
@@ -76,6 +74,9 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
   const [loading, setLoading] = useState(false);
   const [savingRunner, setSavingRunner] = useState(false);
   const [clearingProxy, setClearingProxy] = useState(false);
+  const [savedProxyDraft, setSavedProxyDraft] = useState("");
+  const [savingSavedProxy, setSavingSavedProxy] = useState(false);
+  const [deletingSavedProxy, setDeletingSavedProxy] = useState(false);
   const [startingRunner, setStartingRunner] = useState(false);
   const [stoppingRunner, setStoppingRunner] = useState(false);
   const [credentials, setCredentials] = useState(null);
@@ -158,6 +159,7 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
   const saveRunnerConfiguration = async ({ silent = false } = {}) => {
     const payload = { ...runnerForm };
     if (!payload.captcha_key.trim() && runner?.captcha_key_configured) delete payload.captcha_key;
+    payload.country_code = "auto";
     if (payload.saved_proxy_selection) {
       payload.proxy_source = "saved_pool";
       delete payload.proxy_input;
@@ -201,6 +203,44 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
       toast(error.message, "error");
     } finally {
       setClearingProxy(false);
+    }
+  };
+
+  const saveSavedProxy = async () => {
+    if (!savedProxyDraft.trim()) {
+      toast("请先填写要保存的 IP 代理", "error");
+      return;
+    }
+    setSavingSavedProxy(true);
+    try {
+      const saved = await api("/api/microsoft-registration/runner/saved-proxies", {
+        method: "POST",
+        body: { proxy: savedProxyDraft },
+      });
+      setRunner(saved);
+      setRunnerForm((current) => ({ ...current, saved_proxy_selection: saved.added?.id || current.saved_proxy_selection }));
+      setSavedProxyDraft("");
+      toast("IP 已保存并选中用于注册");
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      setSavingSavedProxy(false);
+    }
+  };
+
+  const deleteSelectedSavedProxy = async () => {
+    if (!runnerForm.saved_proxy_selection || runnerForm.saved_proxy_selection === "auto") return;
+    setDeletingSavedProxy(true);
+    try {
+      const saved = await api(`/api/microsoft-registration/runner/saved-proxies/${encodeURIComponent(runnerForm.saved_proxy_selection)}`, { method: "DELETE" });
+      setRunner(saved);
+      setRunnerForm((current) => ({ ...current, saved_proxy_selection: "", proxy_input: "" }));
+      setProxyInputDirty(false);
+      toast("已删除所选 IP");
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      setDeletingSavedProxy(false);
     }
   };
 
@@ -313,14 +353,16 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
             <textarea value={runnerForm.proxy_input} onChange={(event) => updateProxyInput(event.target.value)} rows={4} placeholder={"username:password@host:port\nusername:password:host:port\n或 https://代理平台 API"} />
           </FormField>
           <div className="form-grid two">
-            <FormField label="注册 IP（已保存）" hint={savedProxyHint}>
+            <FormField label="注册 IP" hint={savedProxyHint}>
               <select value={runnerForm.saved_proxy_selection} onChange={(event) => updateRunner("saved_proxy_selection", event.target.value)}>
-                <option value="">使用上方代理 / 本机直连</option>
+                <option value="">本机直连 / 使用上方代理</option>
                 {savedProxyPool.compatible_count > 0 && <option value="auto">自动轮换已保存 IP（{savedProxyPool.compatible_count} 个）</option>}
                 {savedProxyOptions.map((item) => <option key={item.id} value={item.id} disabled={!item.compatible}>{item.label}{item.compatible ? "" : `（不可用：${item.reason}）`}</option>)}
               </select>
             </FormField>
-            <FormField label="注册地区" hint={runnerForm.country_code === "auto" ? runner.detected_country_code ? `自动匹配：${countryLabels[runner.detected_country_code] || runner.detected_country_code}` : "仅识别代理账号中明确的 region-JP / region-US 标识；未识别时使用注册机默认美国。" : "会按所选地区启动注册机。"}><select value={runnerForm.country_code} onChange={(event) => updateRunner("country_code", event.target.value)}><option value="auto">自动（推荐）</option><option value="JP">日本</option><option value="US">美国</option></select></FormField>
+            <FormField label="保存 IP" hint="仅保存账号密码 HTTP 代理：username:password@host:port">
+              <div className="copy-input"><input value={savedProxyDraft} onChange={(event) => setSavedProxyDraft(event.target.value)} placeholder="username:password@host:port" /><Button icon={Save} loading={savingSavedProxy} disabled={runnerActive} onClick={saveSavedProxy}>保存 IP</Button></div>
+            </FormField>
           </div>
           <div className={`inline-alert ${savedProxyConfigured ? "success" : ""}`}>
             <span>{usesSavedProxy
@@ -335,7 +377,8 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
                     : `已保存：${runner.proxy.label || "代理"}。为保护凭据不会回显；输入新代理可替换。`
                 : "当前未配置外部代理，注册使用本机直连出口。"}</span>
           </div>
-          {savedProxyConfigured && <Button variant="danger" icon={Trash2} loading={clearingProxy} disabled={runnerActive} onClick={clearSavedProxy}>删除已保存代理</Button>}
+          {selectedSavedProxy && <Button variant="danger" icon={Trash2} loading={deletingSavedProxy} disabled={runnerActive} onClick={deleteSelectedSavedProxy}>删除所选 IP</Button>}
+          {savedProxyConfigured && <Button variant="danger" icon={Trash2} loading={clearingProxy} disabled={runnerActive} onClick={clearSavedProxy}>清除当前注册代理</Button>}
           <div className="form-grid three">
             <FormField label="账号格式" hint="a=小写、A=大写、1=数字"><input value={runnerForm.account_format} onChange={(event) => updateRunner("account_format", event.target.value)} /></FormField>
             <FormField label="注册数量"><input type="number" min="1" max="10000" value={runnerForm.quantity} onChange={(event) => updateRunner("quantity", event.target.value)} /></FormField>

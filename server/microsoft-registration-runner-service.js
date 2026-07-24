@@ -243,6 +243,28 @@ function normalizeOptionalProxyInput(value) {
   return { mode: "api", value: text, count: 1 };
 }
 
+function normalizeSavedProxyInput(value) {
+  const text = trimText(value, 1_000);
+  if (!text || splitLines(text).length !== 1) {
+    throw failure("请填写一条 HTTP 账号密码代理");
+  }
+  const line = normalizeProxyLine(text);
+  if (!line) {
+    throw failure("保存 IP 仅支持 username:password@host:port 或 http://username:password@host:port");
+  }
+  const match = /^([^:@\s]+):([^@\s]+)@([^:@\s]+):(\d{1,5})$/.exec(line);
+  if (!match) {
+    throw failure("保存 IP 仅支持服务器注册机兼容的 HTTP 账号密码代理");
+  }
+  const [, username, password, host, port] = match;
+  const stored = `http://${encodeURIComponent(username)}:${encodeURIComponent(password)}@${host}:${port}`;
+  const verified = savedProxyRunnerLine(stored, 0, crypto.randomBytes(32));
+  if (!verified.line || verified.line !== line) {
+    throw failure("保存 IP 仅支持服务器注册机兼容的 HTTP 账号密码代理");
+  }
+  return { line, stored };
+}
+
 function normalizeCountryCode(value) {
   const code = trimText(value, 8).toUpperCase();
   if (!code || code === "AUTO") return "auto";
@@ -491,6 +513,7 @@ export class MicrosoftRegistrationRunnerService {
     scriptBinary = process.env.MICROSOFT_REGISTRATION_SCRIPT_BINARY || "script",
     registrationService,
     proxyProvider,
+    proxyPoolService,
     spawnFn = nodeSpawn,
     waitForPort,
   } = {}) {
@@ -507,6 +530,7 @@ export class MicrosoftRegistrationRunnerService {
     this.scriptBinary = scriptBinary;
     this.registrationService = registrationService || null;
     this.proxyProvider = typeof proxyProvider === "function" ? proxyProvider : null;
+    this.proxyPoolService = proxyPoolService || null;
     this.spawn = spawnFn;
     this.waitForPort = waitForPort || this.waitForLocalPort.bind(this);
     this.processes = new Map();
@@ -529,14 +553,35 @@ export class MicrosoftRegistrationRunnerService {
     this.proxyProvider = typeof proxyProvider === "function" ? proxyProvider : null;
   }
 
-  savedProxyEntries() {
+  setProxyPoolService(proxyPoolService) {
+    this.proxyPoolService = proxyPoolService || null;
+  }
+
+  proxyPoolValues({ strict = false } = {}) {
     let values = [];
     try {
-      values = this.proxyProvider ? this.proxyProvider() : [];
+      if (typeof this.proxyPoolService?.getProxyPool === "function") values = this.proxyPoolService.getProxyPool();
+      else if (this.proxyProvider) values = this.proxyProvider();
     } catch {
-      values = [];
+      if (strict) throw failure("读取已保存 IP 失败", 503, "MICROSOFT_RUNNER_PROXY_POOL_UNAVAILABLE");
+      return [];
     }
-    if (!Array.isArray(values)) values = [];
+    if (!Array.isArray(values)) {
+      if (strict) throw failure("读取已保存 IP 失败", 503, "MICROSOFT_RUNNER_PROXY_POOL_UNAVAILABLE");
+      return [];
+    }
+    return values;
+  }
+
+  requireProxyPoolService() {
+    if (typeof this.proxyPoolService?.getProxyPool !== "function"
+      || typeof this.proxyPoolService?.saveProxyPool !== "function") {
+      throw failure("保存 IP 服务不可用", 503, "MICROSOFT_RUNNER_PROXY_POOL_UNAVAILABLE");
+    }
+    return this.proxyPoolService;
+  }
+
+  savedProxyEntries(values = this.proxyPoolValues()) {
     return values.map((value, index) => savedProxyRunnerLine(value, index, this.proxyReferenceKey));
   }
 
@@ -554,6 +599,76 @@ export class MicrosoftRegistrationRunnerService {
         reason: line ? "" : reason,
       })),
     };
+  }
+
+  saveSavedProxy(input = {}) {
+    const proxy = plainObject(input) ? input.proxy : input;
+    const normalized = normalizeSavedProxyInput(proxy);
+    const proxyPool = this.requireProxyPoolService();
+    const values = this.proxyPoolValues({ strict: true });
+    let entry = this.savedProxyEntries(values).find((item) => item.line === normalized.line);
+    const created = !entry;
+    if (!entry) {
+      proxyPool.saveProxyPool([...values, normalized.stored]);
+      entry = this.savedProxyEntries(this.proxyPoolValues({ strict: true })).find((item) => item.line === normalized.line);
+      if (!entry?.line) {
+        throw failure("保存 IP 后无法读取", 500, "MICROSOFT_RUNNER_PROXY_POOL_SAVE_FAILED");
+      }
+    }
+    const added = {
+      id: entry.id,
+      label: entry.label,
+      compatible: true,
+      created,
+    };
+    audit(this.db, null, "microsoft_registration_runner", "保存服务器注册 IP", added.label, {
+      savedProxyId: added.id,
+      created: added.created,
+    });
+    return { ...this.configuration(), added };
+  }
+
+  deleteSavedProxy(id) {
+    if (this.currentRun()) {
+      throw failure("服务器注册任务运行中，不能删除已保存 IP", 409, "MICROSOFT_RUNNER_PROXY_POOL_ACTIVE");
+    }
+    const selection = normalizeSavedProxySelection(id);
+    if (selection === "auto") {
+      throw failure("请选择要删除的已保存 IP");
+    }
+    const proxyPool = this.requireProxyPoolService();
+    const values = this.proxyPoolValues({ strict: true });
+    const entries = this.savedProxyEntries(values);
+    const entry = entries.find((item) => item.id === selection);
+    if (!entry) {
+      throw failure("要删除的已保存 IP 不存在", 404, "MICROSOFT_RUNNER_SAVED_PROXY_NOT_FOUND");
+    }
+
+    const current = this.db.prepare("SELECT * FROM microsoft_registration_runner_config WHERE id = 1").get();
+    let switchToDirect = false;
+    if (current?.secret_payload_encrypted) {
+      let config;
+      try {
+        config = this.storedConfiguration(current);
+      } catch {
+        throw failure("当前注册配置无法读取，不能安全删除已保存 IP", 409, "MICROSOFT_RUNNER_CONFIG_UNAVAILABLE");
+      }
+      switchToDirect = config.proxy_source === PROXY_SOURCE_SAVED_POOL
+        && config.saved_proxy_selection === selection;
+      if (switchToDirect) this.saveConfiguration({ proxy_input: "" });
+    }
+
+    proxyPool.saveProxyPool(values.filter((_value, index) => index !== entry.index));
+    const deleted = {
+      id: entry.id,
+      label: entry.label,
+      switched_to_direct: switchToDirect,
+    };
+    audit(this.db, null, "microsoft_registration_runner", "删除服务器注册 IP", deleted.label, {
+      savedProxyId: deleted.id,
+      switchedToDirect: deleted.switched_to_direct,
+    });
+    return { ...this.configuration(), deleted };
   }
 
   resolveSavedProxySelection(selection) {

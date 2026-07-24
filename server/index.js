@@ -357,6 +357,7 @@ export function createApp(options = {}) {
     db,
     encryptionKey: options.dataEncryptionKey ?? process.env.DATA_ENCRYPTION_KEY,
   });
+  const microsoftRegistrationProxyPoolService = options.microsoftRegistrationProxyPoolService || options.proxyPoolService || registration;
   const microsoftRegistrationRunner = options.microsoftRegistrationRunner || new MicrosoftRegistrationRunnerService({
     db,
     dataDir,
@@ -366,10 +367,12 @@ export function createApp(options = {}) {
     xvfbBinary: options.microsoftRegistrationXvfbBinary,
     registrationService: microsoftRegistration,
     proxyProvider: () => registration.getProxyPool(),
+    proxyPoolService: microsoftRegistrationProxyPoolService,
     spawnFn: options.microsoftRegistrationSpawnFn,
     waitForPort: options.microsoftRegistrationWaitForPort,
   });
   microsoftRegistrationRunner.setProxyProvider?.(() => registration.getProxyPool());
+  microsoftRegistrationRunner.setProxyPoolService?.(microsoftRegistrationProxyPoolService);
   const auth = createAuth({
     username: process.env.ADMIN_USERNAME ?? "admin",
     password: process.env.ADMIN_PASSWORD || "",
@@ -460,6 +463,12 @@ export function createApp(options = {}) {
   });
   app.delete("/api/microsoft-registration/runner/proxy", (_req, res, next) => {
     try { res.json(microsoftRegistrationRunner.clearProxyConfiguration()); } catch (error) { next(error); }
+  });
+  app.post("/api/microsoft-registration/runner/saved-proxies", (req, res, next) => {
+    try { res.status(201).json(microsoftRegistrationRunner.saveSavedProxy(req.body || {})); } catch (error) { next(error); }
+  });
+  app.delete("/api/microsoft-registration/runner/saved-proxies/:id", (req, res, next) => {
+    try { res.json(microsoftRegistrationRunner.deleteSavedProxy(req.params.id)); } catch (error) { next(error); }
   });
   app.post("/api/microsoft-registration/runner/start", async (_req, res, next) => {
     try { res.status(202).json({ run: await microsoftRegistrationRunner.start(publicBaseUrl) }); } catch (error) { next(error); }
