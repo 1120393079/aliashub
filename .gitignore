@@ -6,8 +6,8 @@ deploy-backups/
 .env
 .env.*
 !.env.example
-data/*.db*
-data/*.sqlite*
+data/*
+!data/attachments/
 data/attachments/*
 !data/attachments/.gitkeep
 data/registration-worker/
