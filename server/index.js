@@ -353,6 +353,7 @@ export function createApp(options = {}) {
     baseUrl: options.nfapiBaseUrl || process.env.SUB2_BASE_URL || process.env.NFAPI_BASE_URL,
     apiKey: options.nfapiApiKey || process.env.SUB2_ADMIN_API_KEY || process.env.NFAPI_ADMIN_API_KEY,
   });
+  nfapi.clearFailedAgentIdentityLinks?.();
   const microsoftRegistration = options.microsoftRegistration || new MicrosoftRegistrationService({
     db,
     encryptionKey: options.dataEncryptionKey ?? process.env.DATA_ENCRYPTION_KEY,

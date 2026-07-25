@@ -1201,6 +1201,14 @@ export class NfapiService {
     );
   }
 
+  clearFailedAgentIdentityLinks() {
+    const result = this.db.prepare(`
+      DELETE FROM registered_account_nfapi_links
+      WHERE status = 'failed' AND last_action LIKE 'agent\\_identity\\_%' ESCAPE '\\'
+    `).run();
+    return Number(result.changes) || 0;
+  }
+
   clearPendingAgentIdentity(sourceId, expected = null) {
     const id = Number(sourceId || 0);
     const pending = this.pendingAgentIdentities.get(id);

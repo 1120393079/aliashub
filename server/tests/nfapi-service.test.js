@@ -199,6 +199,36 @@ function agentImportResult(action, accountId) {
   };
 }
 
+test("clearing retired Agent Identity failures keeps successful and OAuth link records", (t) => {
+  const db = testDatabase(t);
+  const now = nowIso();
+  const insert = db.prepare(`
+    INSERT INTO registered_account_nfapi_links
+      (external_account_id, email, nfapi_base_url, nfapi_account_id, status, short_lived,
+       last_action, last_error, config_json, created_at, updated_at)
+    VALUES (?, ?, 'https://nfapi.test', ?, ?, 0, ?, ?, '{}', ?, ?)
+  `);
+  insert.run("1", "failed-agent@example.com", 0, "failed", "agent_identity_import", "OpenAI 403", now, now);
+  insert.run("2", "successful-agent@example.com", 9002, "imported", "agent_identity_created", "", now, now);
+  insert.run("3", "failed-oauth@example.com", 0, "failed", "oauth_import", "OAuth failed", now, now);
+  insert.run("4", "lookalike@example.com", 0, "failed", "agentXidentity_import", "keep", now, now);
+
+  const service = createService({ db, accounts: [], nfapiClient: {} });
+  assert.equal(service.clearFailedAgentIdentityLinks(), 1);
+  assert.equal(service.clearFailedAgentIdentityLinks(), 0);
+
+  const rows = db.prepare(`
+    SELECT external_account_id, status, last_action
+    FROM registered_account_nfapi_links
+    ORDER BY external_account_id
+  `).all();
+  assert.deepEqual(rows, [
+    { external_account_id: "2", status: "imported", last_action: "agent_identity_created" },
+    { external_account_id: "3", status: "failed", last_action: "oauth_import" },
+    { external_account_id: "4", status: "failed", last_action: "agentXidentity_import" },
+  ]);
+});
+
 test("SUB2 compatible service is disabled by default without making requests", async (t) => {
   const db = testDatabase(t);
   const service = new NfapiService({
