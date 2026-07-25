@@ -30,26 +30,6 @@ function createTestApp(options) {
   }
 }
 
-test("application startup clears retired Agent Identity link failures once", (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "aliashub-agent-cleanup-api-test-"));
-  const db = createDatabase({ filename: path.join(directory, "test.db"), seedDemo: false });
-  const calls = [];
-  const runtime = createTestApp({
-    db,
-    nfapi: {
-      clearFailedAgentIdentityLinks() { calls.push("clear"); },
-    },
-  });
-
-  t.after(async () => {
-    await new Promise((resolve) => setImmediate(resolve));
-    runtime.db.close();
-    fs.rmSync(directory, { recursive: true, force: true });
-  });
-
-  assert.deepEqual(calls, ["clear"]);
-});
-
 test("SUB2 environment variables take priority while legacy NFAPI variables remain compatible", (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "aliashub-sub2-env-test-"));
   const keys = ["SUB2_BASE_URL", "SUB2_ADMIN_API_KEY", "NFAPI_BASE_URL", "NFAPI_ADMIN_API_KEY"];
