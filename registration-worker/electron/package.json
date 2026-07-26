@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "aBaiAutoplus - 多平台 AI 账号自动注册与管理工具",
   "main": "main.js",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "scripts": {
     "dev": "electron .",
     "build:backend": "bash build-backend.sh",
@@ -12,8 +15,8 @@
     "build:all": "electron-builder --mac --win --linux"
   },
   "devDependencies": {
-    "electron": "^33.0.0",
-    "electron-builder": "^25.0.0"
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3"
   },
   "dependencies": {
     "electron-updater": "^6.3.0"

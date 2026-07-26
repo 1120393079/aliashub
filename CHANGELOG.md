@@ -37,5 +37,7 @@ All notable changes to AliasHub are documented in this file.
 - Mailbox tokens, iCloud credentials, service API keys, and registration secrets
   remain server-side and encrypted at rest where persisted.
 - Public examples no longer contain deployment-specific hostnames or credentials.
+- Updated the web build chain, Electron runtime, and desktop packaging toolchain;
+  the main AliasHub dependency audit now reports no known vulnerabilities.
 
 [1.1.0]: https://github.com/1120393079/aliashub/releases/tag/v1.1.0
