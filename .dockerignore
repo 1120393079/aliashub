@@ -10,6 +10,7 @@ scripts/deploy-production.sh
 *.db*
 *.sqlite*
 *.sqlite3*
+*:memory:*
 *.pem
 *.p12
 *.pfx

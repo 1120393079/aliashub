@@ -198,6 +198,27 @@ as deployment secrets. Leave both empty by default.
 If no SUB2-compatible service is configured, only SUB2 import is unavailable.
 Do not use another installation's URL or administrator Key.
 
+## Optional Mail Pickup service
+
+Mail Pickup publishing is independent of mailbox providers, registration, and
+SUB2. It remains hidden in the registered-account toolbar until a service URL is
+configured in the uncommitted `.env` file:
+
+```dotenv
+PICKUP_SERVICE_URL=http://127.0.0.1:4190
+PICKUP_PUBLIC_URL=https://pickup.example.com
+PICKUP_ADMIN_USERNAME=admin
+PICKUP_ADMIN_PASSWORD=replace-with-the-pickup-admin-password
+```
+
+The service URL must be reachable from the AliasHub process or container. In a
+Compose deployment, `127.0.0.1` refers to the AliasHub container itself; use the
+pickup service's Compose service name when it runs in a different container.
+Keep its administrator endpoint on a private network or behind HTTPS. Leave
+`PICKUP_SERVICE_URL` empty to disable all account publishing. Always use a
+dedicated pickup-service password rather than the AliasHub administrator
+password.
+
 ## Microsoft and Google authorization
 
 Both providers use Authorization Code + PKCE. The callback is a loopback URL in

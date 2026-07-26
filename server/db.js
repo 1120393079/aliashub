@@ -708,6 +708,7 @@ export function createDatabase({ filename, seedDemo = false } = {}) {
     ON nfapi_oauth_import_sessions(external_account_id)
     WHERE external_account_id > 0 AND status IN ('pending', 'processing')
   `);
+  db.prepare("DELETE FROM registered_account_nfapi_links WHERE status <> 'imported'").run();
   const defaults = {
     site_name: "AliasHub",
     official_limit_default: "10",

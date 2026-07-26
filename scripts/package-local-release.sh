@@ -80,7 +80,7 @@ for script in check-public-release.sh package-extension.sh package-local-release
   cp -a "scripts/$script" "$PACKAGE_DIR/scripts/$script"
 done
 
-cp -a README.md LOCAL-DEPLOY.md "$PACKAGE_DIR/"
+cp -a README.md LOCAL-DEPLOY.md CHANGELOG.md "$PACKAGE_DIR/"
 for file in CONTRIBUTING.md SECURITY.md THIRD_PARTY_NOTICES.md; do
   [[ -f "$file" ]] && cp -a "$file" "$PACKAGE_DIR/$file"
 done

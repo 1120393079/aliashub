@@ -45,7 +45,7 @@ is_forbidden_path() {
   case "$relative" in
     .env|.env.*|*/.env|*/.env.*|.deploy-password|.deploy-password.*|*/.deploy-password|*/.deploy-password.*|\
     docker-compose.override.yml|*/docker-compose.override.yml|docker-compose.override.yaml|*/docker-compose.override.yaml|\
-    *.db|*.db-*|*.db.*|*.sqlite|*.sqlite-*|*.sqlite.*|*.sqlite3|*.sqlite3-*|*.sqlite3.*|*.pem|*.p12|*.pfx|*.jks|\
+    *.db|*.db-*|*.db.*|*.sqlite|*.sqlite-*|*.sqlite.*|*.sqlite3|*.sqlite3-*|*.sqlite3.*|*:memory:*|*.pem|*.p12|*.pfx|*.jks|\
     *.key|*.har|*.har.*|*.log|*.log.*|*.bak|*.backup|id_rsa|id_ed25519|credentials.json|\
     cookies.json|cookies-*.json|storage-state*.json|browser-profile/*|*/browser-profile/*|user-data/*|*/user-data/*|\
     .venv/*|*/.venv/*|node_modules/*|*/node_modules/*|tools/captures/*|*/tools/captures/*|\
@@ -101,7 +101,7 @@ for file in "${files[@]}"; do
 done
 
 # Split the project-private identifier so this scanner does not match itself.
-private_identifier_pattern='nfapi[.]natural''flower[.]cn|hsxhome[.]com|mail-api[.]yue''cheng[.]shop'
+private_identifier_pattern='nfapi[.]natural''flower[.]cn|pickup[.]natural''flower[.]cn|hsxhome[.]com|mail-api[.]yue''cheng[.]shop'
 secret_pattern='-----BEGIN ([A-Z0-9 ]+)?PRIVATE KEY-----|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|sk-(proj-)?[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{30,}|npm_[A-Za-z0-9]{20,}|sk_live_[A-Za-z0-9]{16,}|eca_tr_[A-Za-z0-9_-]{12,}'
 content_pattern="${private_identifier_pattern}|${secret_pattern}"
 

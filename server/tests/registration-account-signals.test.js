@@ -182,6 +182,67 @@ test("registered accounts require the same remote id and email and expose normal
   assert.equal(serialized.includes('"credentials"'), false);
 });
 
+test("registered account list exposes only completed NFapi imports", async (t) => {
+  const db = testDatabase(t);
+  const now = nowIso();
+  const fixtures = [
+    { id: 601, email: "nfapi-imported@example.com", status: "imported", nfapiId: 9601 },
+    { id: 602, email: "nfapi-failed@example.com", status: "failed", nfapiId: 0 },
+    { id: 603, email: "nfapi-pending@example.com", status: "pending", nfapiId: 0 },
+  ];
+  setSetting(db, "nfapi_base_url", "https://nfapi.test");
+  for (const fixture of fixtures) {
+    addCompletedRegistration(db, fixture.id, fixture.email);
+    db.prepare(`
+      INSERT INTO registered_account_nfapi_links
+        (external_account_id, email, nfapi_base_url, nfapi_account_id, status,
+         last_error, created_at, updated_at)
+      VALUES (?, ?, 'https://nfapi.test', ?, ?, ?, ?, ?)
+    `).run(
+      String(fixture.id), fixture.email, fixture.nfapiId, fixture.status,
+      fixture.status === "imported" ? "" : "internal attempt detail", now, now,
+    );
+  }
+
+  const service = new RegistrationService({
+    db,
+    graph: {},
+    client: {
+      async listAccounts() {
+        return {
+          items: fixtures.map((fixture) => ({
+            id: fixture.id,
+            platform: "chatgpt",
+            email: fixture.email,
+            lifecycle_status: "registered",
+            validity_status: "valid",
+            display_status: "registered",
+            plan_state: "free",
+            plan_name: "free",
+            overview: {
+              valid: true,
+              checked_at: now,
+              check_source: "fixture",
+              password_status: "not_configured",
+            },
+            credentials: [],
+            created_at: now,
+          })),
+        };
+      },
+    },
+  });
+
+  const result = await service.listRegisteredAccounts({ refreshUnchecked: false });
+  const byId = new Map(result.items.map((item) => [item.id, item]));
+  assert.equal(byId.get(601).nfapi.linked, true);
+  assert.equal(byId.get(601).nfapi.status, "imported");
+  assert.equal(byId.get(601).nfapi.account_id, 9601);
+  assert.deepEqual(byId.get(602).nfapi, { linked: false, status: "not_imported" });
+  assert.deepEqual(byId.get(603).nfapi, { linked: false, status: "not_imported" });
+  assert.equal(JSON.stringify(result).includes("internal attempt detail"), false);
+});
+
 test("unchecked matched accounts refresh once, re-list, and never send mismatched ids", async (t) => {
   const db = testDatabase(t);
   addCompletedRegistration(db, 77, "unchecked@example.com");

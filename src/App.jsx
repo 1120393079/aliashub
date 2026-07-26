@@ -164,7 +164,7 @@ export default function App() {
           })}
         </nav>
         <div className="sidebar-provider"><span className="provider-mark-stack"><ProviderMark provider="microsoft" size={25} /><ProviderMark provider="google" size={25} /><ProviderMark provider="icloud" size={25} /></span><span className="sidebar-provider-copy"><b>Microsoft + Google + iCloud</b><small>Outlook · Gmail · iCloud</small></span><i className="online-dot" /></div>
-        <div className="sidebar-footer">{auth.authEnabled && <button onClick={logout}><LogOut size={17} /><span>退出管理台</span></button>}<span className="version">v1.0</span></div>
+        <div className="sidebar-footer">{auth.authEnabled && <button onClick={logout}><LogOut size={17} /><span>退出管理台</span></button>}<span className="version">v1.1</span></div>
       </aside>
       {mobileNav && <button className="sidebar-overlay" aria-label="关闭菜单" onClick={() => setMobileNav(false)} />}
 

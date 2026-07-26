@@ -1,640 +1,51 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, Ban, Cable, Check, CircleStop, ClipboardCopy, Copy, Database, ExternalLink, Eye, EyeOff, Fingerprint, Globe2, KeyRound, ListChecks, LoaderCircle, Mail, Monitor, Network, Pencil, Play, RefreshCw, Save, ScrollText, Server, ShieldCheck, SlidersHorizontal, Trash2, UserPlus } from "lucide-react";
+import { AlertTriangle, Cable, Check, CircleStop, ClipboardCopy, Copy, Database, ExternalLink, EyeOff, Fingerprint, Globe2, KeyRound, ListChecks, LoaderCircle, Mail, Monitor, Network, Play, RefreshCw, Save, ScrollText, Server, ShieldCheck, SlidersHorizontal, Store, Trash2, UserPlus } from "lucide-react";
 import { api } from "../api.js";
 import { planAgentIdentityBulk, runAgentIdentityBulk } from "../agent-identity-bulk.js";
 import { Button, ConfirmDialog, EmptyState, FormField, IconButton, LoadingBlock, Modal, Pagination, Segmented, StatusBadge, useToast } from "../components.jsx";
-import { copyText, formatDate, relativeTime } from "../utils.js";
-
-const statusText = {
-  queued: "排队中",
-  running: "注册中",
-  completed: "注册成功",
-  failed: "失败",
-  cancelled: "已取消",
-  interrupted: "已中断",
-  cancel_requested: "取消中",
-};
-const deletableStatuses = new Set(["completed", "failed", "cancelled", "interrupted"]);
-const releasableStatuses = new Set(["queued", "pending", "claimed", "running", "cancel_requested"]);
-const nfapiStatusText = {
-  not_imported: "未授权",
-  pending: "待 OAuth",
-  importing: "OAuth 中",
-  created: "已创建",
-  imported: "已导入",
-  updated: "已更新",
-  skipped: "已跳过",
-  failed: "失败",
-};
-const nfapiStatusBadge = {
-  pending: "queued",
-  importing: "queued",
-  created: "active",
-  imported: "active",
-  updated: "active",
-  skipped: "warning",
-  failed: "failed",
-};
-const accountAvailabilityMeta = {
-  available: { label: "可用", badge: "active" },
-  unavailable: { label: "确认失效", badge: "failed" },
-  unchecked: { label: "待检测", badge: "queued" },
-};
-const accountTypeText = {
-  free: "Free",
-  go: "Go",
-  plus: "Plus",
-  pro: "Pro",
-  team: "Team",
-  business: "Business",
-  enterprise: "Enterprise",
-  edu: "Edu",
-  trial: "Trial",
-  other: "Other",
-  unknown: "Unknown",
-};
-const accountTypeGroupOrder = [
-  "free", "go", "plus", "pro", "team", "business", "enterprise", "edu", "trial", "other", "unknown",
-];
-const accountTypeGroupRank = new Map(accountTypeGroupOrder.map((type, index) => [type, index]));
-const accountTypeAliases = new Map([
-  ["free", new Set(["free", "basic", "starter", "hobby", "chatgptfreeplan"])],
-  ["go", new Set(["go", "chatgptgo", "chatgptgoplan"])],
-  ["plus", new Set(["plus", "premium", "chatgptplus", "chatgptplusplan"])],
-  ["pro", new Set(["pro", "chatgptpro", "chatgptproplan"])],
-  ["team", new Set(["team", "chatgptteam", "chatgptteamplan"])],
-  ["business", new Set(["business", "chatgptbusiness", "chatgptbusinessplan"])],
-  ["enterprise", new Set(["enterprise", "chatgptenterprise", "chatgptenterpriseplan"])],
-  ["edu", new Set(["edu", "education", "chatgptedu", "chatgpteduplan", "chatgpteducationplan"])],
-  ["trial", new Set(["trial", "trialing", "freetrial", "chatgpttrial", "chatgpttrialplan"])],
-]);
-const nonAccountTypeSignals = new Set([
-  "", "unknown", "none", "null", "invalid", "expired", "banned", "disabled", "inactive",
-  "unavailable", "registered", "active", "valid", "subscribed", "eligible", "canceling", "cancelled",
-]);
-const transientStatusCodes = new Set([
-  "CHECK_TIMEOUT", "PROXY_UNAVAILABLE", "NETWORK_ERROR", "RATE_LIMITED", "UPSTREAM_5XX",
-  "UPSTREAM_UNAVAILABLE", "UPSTREAM_REJECTED", "UPSTREAM_CHALLENGE", "CHALLENGE_PAGE", "CHALLENGE_REQUIRED",
-  "RESPONSE_UNRECOGNIZED", "CREDENTIALS_MISSING", "AUTH_UNAUTHORIZED_UNCONFIRMED",
-  "AUTHENTICATION_UNCONFIRMED", "ACCESS_FORBIDDEN", "ACCOUNT_IDENTITY_MISMATCH", "CHECK_INCONCLUSIVE",
-  "CHECK_FAILED", "PLAN_CONFLICT", "DNS_FAILURE", "TLS_FAILURE",
-]);
-const definitiveUnavailableCodes = new Set([
-  "AUTH_TOKEN_EXPIRED", "AUTH_TOKEN_REVOKED", "AUTH_CREDENTIALS_EXPIRED", "AUTH_CREDENTIALS_REVOKED",
-  "TOKEN_EXPIRED", "TOKEN_REVOKED", "CREDENTIAL_EXPIRED", "CREDENTIAL_REVOKED", "CREDENTIALS_EXPIRED",
-  "CREDENTIALS_REVOKED", "ACCESS_TOKEN_EXPIRED", "AUTHENTICATION_EXPIRED", "AUTHENTICATION_REVOKED",
-  "AUTH_REVOKED", "INVALID_TOKEN", "SESSION_EXPIRED", "SESSION_REVOKED", "ACCOUNT_INVALID",
-  "ACCOUNT_DISABLED", "ACCOUNT_BANNED", "ACCOUNT_DEACTIVATED", "ACCOUNT_DELETED", "ACCOUNT_SUSPENDED",
-  "USER_DISABLED", "USER_BANNED", "USER_DEACTIVATED", "USER_DELETED", "USER_SUSPENDED",
-]);
-const agentIdentityOAuthFallbackCodes = new Set([
-  "OPENAI_AGENT_IDENTITY_UNAUTHORIZED",
-  "OPENAI_AGENT_IDENTITY_FORBIDDEN",
-  "OPENAI_AGENT_IDENTITY_UPSTREAM_CHALLENGE",
-]);
-const nfapiImportDefaults = {
-  name_prefix: "",
-  account_name: "",
-  notes: "",
-  status: "active",
-  model_mapping: "{}",
-  proxy_id: "",
-  concurrency: 1,
-  load_factor: 1,
-  priority: 0,
-  rate_multiplier: 1,
-  expires_at: "",
-  auto_pause_on_expired: true,
-  temp_unschedulable_enabled: false,
-  temp_unschedulable_rules: "[]",
-  ws_mode: "off",
-  openai_passthrough: false,
-  codex_cli_only: false,
-  allow_app_server: false,
-  compact_mode: "auto",
-  compact_model_mapping: "{}",
-  image_bridge_mode: "inherit",
-  auto_pause_5h_disabled: false,
-  auto_pause_5h_threshold: "",
-  auto_pause_7d_disabled: false,
-  auto_pause_7d_threshold: "",
-  group_ids: [],
-  update_existing: false,
-  skip_default_group_bind: false,
-  confirm_mixed_channel_risk: false,
-  save_defaults: false,
-};
-
-const accountPageSizes = [5, 10, 20, 50];
-const accountPageSizeStorageKey = "aliashub.registration.account-page-size";
-
-function initialAccountPageSize() {
-  if (typeof window === "undefined") return 10;
-  try {
-    const stored = Number(window.localStorage.getItem(accountPageSizeStorageKey));
-    return accountPageSizes.includes(stored) ? stored : 10;
-  } catch {
-    return 10;
-  }
-}
-
-function jsonText(value, fallback) {
-  if (typeof value === "string") return value;
-  if (value && typeof value === "object") return JSON.stringify(value, null, 2);
-  return fallback;
-}
-
-function importFormFromDefaults(defaults = {}) {
-  const threshold = (value) => value === undefined || value === null || value === "" ? "" : Number(value);
-  return {
-    ...nfapiImportDefaults,
-    ...defaults,
-    proxy_id: defaults.proxy_id ?? "",
-    group_ids: Array.isArray(defaults.group_ids) ? defaults.group_ids.map(String) : [],
-    model_mapping: jsonText(defaults.model_mapping, "{}"),
-    compact_model_mapping: jsonText(defaults.compact_model_mapping, "{}"),
-    temp_unschedulable_rules: jsonText(defaults.temp_unschedulable_rules, "[]"),
-    auto_pause_5h_threshold: threshold(defaults.auto_pause_5h_threshold),
-    auto_pause_7d_threshold: threshold(defaults.auto_pause_7d_threshold),
-    save_defaults: false,
-  };
-}
-
-function apiId(value) {
-  return /^\d+$/.test(String(value)) ? Number(value) : value;
-}
-
-function agentIdentityResultMessage(result) {
-  if (result?.action === "created") return "NFapi Agent Identity 账号已创建";
-  if (result?.action === "skipped") return "NFapi 已有该账号，已按当前策略跳过";
-  return "NFapi Agent Identity 凭据已更新";
-}
-
-function NfapiBatchImportResult({ result }) {
-  const errors = Array.isArray(result?.errors) ? result.errors : [];
-  const created = Number(result?.created) || 0;
-  const updated = Number(result?.updated) || 0;
-  const skipped = Number(result?.skipped) || 0;
-  const failed = Number(result?.failed) || 0;
-  const total = Number(result?.total) || 0;
-  return <section className="nfapi-import-result">
-    <header><Check size={17} /><div><b>NFapi 批量导入已完成</b><small>统一配置已逐个应用到所选账号</small></div></header>
-    <div className="nfapi-result-metrics">
-      <span><b>{total}</b>已选账号</span>
-      <span><b>{created}</b>新增</span>
-      <span><b>{updated}</b>更新</span>
-      <span><b>{skipped}</b>已存在</span>
-      <span className={failed ? "error" : ""}><b>{failed}</b>需处理</span>
-    </div>
-    {errors.length > 0 && <div className="nfapi-result-errors">
-      {errors.map((item, index) => <small key={`${item?.id || "account"}-${index}`}>账号 #{item?.id || "-"}：{item?.message || "导入失败"}</small>)}
-    </div>}
-  </section>;
-}
-
-function normalizeProxyDraft(text) {
-  const proxies = [];
-  const errors = [];
-  const duplicateLines = [];
-  const sourceLines = [];
-  const seen = new Map();
-
-  String(text || "").split(/\r?\n/).forEach((raw, index) => {
-    const line = index + 1;
-    const source = raw.trim();
-    if (!source || source.startsWith("#")) return;
-    const reject = (reason) => errors.push({ line, reason });
-    if (/[\u0000-\u001f\u007f-\u009f]/.test(source) || /\s|\\/.test(source)) {
-      reject("地址中不能包含空格、换行或反斜杠");
-      return;
-    }
-
-    let proxy = source;
-    if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(proxy)) {
-      const providerParts = proxy.match(/^([^:/?#@]+):(\d{1,5}):([^:]+):(.+)$/);
-      if (providerParts) {
-        const [, host, rawPort] = providerParts;
-        const port = Number(rawPort);
-        let parsedHost;
-        try { parsedHost = new URL(`http://${host}:${rawPort}`); } catch {
-          reject("四段式代理的主机名无效");
-          return;
-        }
-        if (!parsedHost.hostname || !Number.isInteger(port) || port < 1 || port > 65535) {
-          reject("四段式代理必须使用 host:port:user:password，端口范围为 1-65535");
-          return;
-        }
-        if (seen.has(proxy)) {
-          duplicateLines.push({ line, originalLine: seen.get(proxy) });
-          return;
-        }
-        seen.set(proxy, line);
-        proxies.push(proxy);
-        sourceLines.push(line);
-        return;
-      } else {
-        proxy = `http://${proxy}`;
-      }
-    }
-
-    let parsed;
-    try { parsed = new URL(proxy); } catch {
-      reject("无法解析；请使用 URL 或 host:port:user:password 格式");
-      return;
-    }
-    if (!new Set(["http:", "https:", "socks5:"]).has(parsed.protocol)) {
-      reject("仅支持 http、https 和无认证 socks5");
-      return;
-    }
-    const authority = proxy.slice(proxy.indexOf("://") + 3);
-    if (!parsed.hostname || authority.search(/[/?#]/) >= 0) {
-      reject("代理地址不能包含路径、查询参数或片段");
-      return;
-    }
-    const atCount = [...authority].filter((char) => char === "@").length;
-    if (atCount > 1) {
-      reject("认证信息包含未转义的 @");
-      return;
-    }
-    const userInfo = atCount === 1 ? authority.slice(0, authority.indexOf("@")) : "";
-    const hostPort = atCount === 1 ? authority.slice(authority.indexOf("@") + 1) : authority;
-    const portMatch = hostPort.startsWith("[")
-      ? hostPort.match(/^\[[^\]]+\]:(\d+)$/)
-      : hostPort.match(/^[^:]+:(\d+)$/);
-    const port = Number(portMatch?.[1]);
-    if (!portMatch || !Number.isInteger(port) || port < 1 || port > 65535) {
-      reject("必须包含 1-65535 范围内的端口");
-      return;
-    }
-    const parsedHostname = parsed.hostname.startsWith("[") && parsed.hostname.endsWith("]")
-      ? parsed.hostname.slice(1, -1)
-      : parsed.hostname;
-    const domain = parsedHostname.endsWith(".") ? parsedHostname.slice(0, -1) : parsedHostname;
-    if (!domain || parsedHostname.includes("%") || domain.split(".").some((label) => !label)) {
-      reject("主机名或 IP 地址无效");
-      return;
-    }
-    if (atCount === 1) {
-      if (parsed.protocol === "socks5:") {
-        reject("socks5 暂不支持用户名密码认证");
-        return;
-      }
-      const separator = userInfo.indexOf(":");
-      if (separator <= 0 || separator === userInfo.length - 1) {
-        reject("用户名和密码必须同时填写");
-        return;
-      }
-      try {
-        const credentials = `${decodeURIComponent(userInfo.slice(0, separator))}${decodeURIComponent(userInfo.slice(separator + 1))}`;
-        if (/[\u0000-\u001f\u007f-\u009f]/.test(credentials)) throw new Error("invalid credentials");
-      } catch {
-        reject("用户名或密码包含无效转义字符");
-        return;
-      }
-    }
-
-    const normalized = `${parsed.protocol}//${authority}`;
-    if (seen.has(normalized)) {
-      duplicateLines.push({ line, originalLine: seen.get(normalized) });
-      return;
-    }
-    seen.set(normalized, line);
-    proxies.push(normalized);
-    sourceLines.push(line);
-  });
-
-  return { proxies, errors, duplicateLines, sourceLines };
-}
-
-function normalizeProxySample(item = {}) {
-  return {
-    ip: String(item.ip || item.exit_ip || item.query || "").trim(),
-    country_name: String(item.country_name || item.country || item.region_name || "").trim(),
-    country_code: String(item.country_code || item.countryCode || item.country_code2 || "").trim().toUpperCase(),
-    locale: String(item.locale || "").trim(),
-    timezone: String(item.timezone || item.time_zone || "").trim(),
-  };
-}
-
-function proxyMetadataLabel(metadata = {}) {
-  const details = metadata || {};
-  const mode = String(details.dynamic_mode || "").toLowerCase();
-  if (mode === "sticky_session") return `动态 · ${details.session_ttl || "会话"} 粘性`;
-  if (mode) return "动态出口";
-  return "";
-}
-
-function proxySelectLabel(masked, metadata) {
-  const detail = proxyMetadataLabel(metadata);
-  return detail ? `${masked}（${detail}）` : masked;
-}
-
-function nfapiAccountState(item) {
-  const details = item.nfapi || {};
-  const status = item.nfapi_status || details.status || "not_imported";
-  const shortLived = Boolean(item.nfapi_short_lived ?? details.short_lived);
-  return {
-    label: nfapiStatusText[status] || status,
-    badge: shortLived && nfapiStatusBadge[status] === "active" ? "warning" : (nfapiStatusBadge[status] || "inactive"),
-    shortLived,
-    accountId: item.nfapi_account_id || details.account_id || "",
-    error: item.nfapi_error || details.last_error || "",
-    updatedAt: item.nfapi_updated_at || details.updated_at || "",
-  };
-}
-
-function preferredBase(account) {
-  return account?.bases.find((item) => item.registration_state === "available")
-    || account?.bases.find((item) => item.registration_state === "warning")
-    || account?.bases[0];
-}
-
-function occupiedAliasInfo(item) {
-  const aliases = Array.isArray(item?.occupied_aliases)
-    ? item.occupied_aliases
-      .map((entry) => typeof entry === "string" ? entry : (entry?.email || entry?.address || entry?.alias || ""))
-      .map((entry) => String(entry || "").trim())
-      .filter(Boolean)
-    : [];
-  const reportedCount = Number(item?.occupied_alias_count ?? item?.already_exists_count);
-  return {
-    count: Math.max(Number.isFinite(reportedCount) ? Math.floor(reportedCount) : 0, aliases.length),
-    aliases: [...new Set(aliases)],
-  };
-}
-
-function baseOptionLabel(item) {
-  const type = item.strategy === "icloud_hide_my_email"
-    ? "隐藏邮箱"
-    : item.strategy === "icloud_mail_alias" ? "邮箱别名" : "";
-  const occupied = occupiedAliasInfo(item);
-  const state = item.registration_state === "in_progress"
-    ? "注册进行中"
-    : item.registration_state === "used"
-      ? "已用于注册"
-      : item.registration_state === "occupied"
-        ? "已被目标站占用"
-      : item.registration_state === "likely_exhausted"
-        ? "疑似已占用"
-        : item.registration_state === "warning"
-          ? "有占用冲突"
-          : item.registration_success_count ? `已成功 ${item.registration_success_count}` : "";
-  const details = [occupied.count ? `注册占用 ${occupied.count}` : "", type, state].filter(Boolean).join(" · ");
-  return details ? `${item.address}（${details}）` : item.address;
-}
-
-function OccupiedAliasNotice({ base }) {
-  const occupied = occupiedAliasInfo(base);
-  if (!occupied.count) return null;
-  const samples = occupied.aliases.slice(0, 3);
-  const remainder = occupied.count > samples.length ? `等 ${occupied.count} 个` : "";
-  return <div className="inline-alert danger registration-occupied-alias-alert" role="alert">
-    <AlertTriangle size={16} />
-    <span>
-      <b>已标记 {occupied.count} 个注册占用别名</b>
-      <small>{samples.length ? `最近占用：${samples.join("、")}${remainder ? `，${remainder}` : ""}` : "该基础地址曾生成被目标站占用的注册邮箱；请优先更换基础地址或后缀。"}</small>
-    </span>
-  </div>;
-}
-
-function jobStatusLabel(job) {
-  return job.failure_reason === "user_already_exists" ? "邮箱已占用" : (statusText[job.status] || job.status);
-}
-
-function ageFromBirth(value) {
-  if (!value) return "-";
-  const birth = new Date(value);
-  if (!Number.isFinite(birth.getTime())) return "-";
-  const now = new Date();
-  return now.getFullYear() - birth.getFullYear() - (now < new Date(now.getFullYear(), birth.getMonth(), birth.getDate()) ? 1 : 0);
-}
-
-function PasswordCell({ value, status, error, available, onCopy }) {
-  const [visible, setVisible] = useState(false);
-  if (!available) {
-    const label = status === "not_configured"
-      ? "未设置"
-      : status === "failed" ? "设置失败" : status === "configured" ? "已设置" : "未确认";
-    return <span className={`registration-password-state status-${status || "unknown"}`} title={error || label}><b>{label}</b>{status === "failed" && error && <small>{error}</small>}</span>;
-  }
-  return <div className="registration-secret"><code>{visible ? value : "••••••••••••"}</code><button title={visible ? "隐藏密码" : "显示密码"} onClick={() => setVisible(!visible)}>{visible ? <EyeOff size={14} /> : <Eye size={14} />}</button><button title="复制密码" onClick={onCopy}><Copy size={14} /></button></div>;
-}
-
-function AccessTokenCell({ available, loading, onCopy }) {
-  return <div className="registration-secret"><code>{available ? "••••••••••••" : "未获取"}</code><button disabled={!available || loading} title={available ? "复制 AccessToken (AT)" : "尚未获取 AT"} onClick={onCopy}>{loading ? <LoaderCircle className="spin" size={14} /> : <KeyRound size={14} />}</button></div>;
-}
-
-function accountSignalValue(item, keys) {
-  const containers = [item, item?.overview, item?.status_details, item?.statusDetails]
-    .filter((value) => value && typeof value === "object" && !Array.isArray(value));
-  for (const container of containers) {
-    for (const key of keys) {
-      const value = container[key];
-      if (value === undefined || value === null) continue;
-      if (typeof value === "string" && !value.trim()) continue;
-      if (["string", "number", "boolean"].includes(typeof value)) return value;
-    }
-  }
-  return "";
-}
-
-function accountSignalText(item, keys, maximum = 240) {
-  return String(accountSignalValue(item, keys) ?? "")
-    .replace(/[\u0000-\u001f\u007f-\u009f]/g, "")
-    .trim()
-    .slice(0, maximum);
-}
-
-function normalizeAccountType(value) {
-  const raw = String(value ?? "").trim().toLowerCase();
-  const normalized = raw.replace(/[\s-]+/g, "_");
-  const compact = raw.replace(/[^a-z0-9]/g, "");
-  if (raw === "other") return "other";
-  if (nonAccountTypeSignals.has(normalized) || nonAccountTypeSignals.has(compact)) return "unknown";
-  for (const [type, aliases] of accountTypeAliases) {
-    if (aliases.has(compact)) return type;
-  }
-  return raw ? "other" : "unknown";
-}
-
-function accountTypeMeta(item) {
-  const declaredType = accountSignalText(item, ["account_type", "accountType", "subscription_type", "subscriptionType"], 80);
-  const rawType = accountSignalText(item, ["account_type_raw", "accountTypeRaw", "subscription_type_raw", "subscriptionTypeRaw", "plan_type_raw", "planTypeRaw"], 80);
-  const declaredKind = normalizeAccountType(declaredType);
-  if (declaredKind !== "unknown" && declaredKind !== "other") {
-    return { type: declaredKind, raw: declaredType, label: accountTypeText[declaredKind] };
-  }
-  if (declaredKind === "other") {
-    const raw = rawType && normalizeAccountType(rawType) !== "unknown" ? rawType : "";
-    return { type: "other", raw, label: raw ? `Other · ${raw}` : accountTypeText.other };
-  }
-  const candidates = [
-    rawType,
-    accountSignalText(item, ["plan_name", "planName"], 80),
-    accountSignalText(item, ["membership_type", "membershipType", "individual_membership_type", "individualMembershipType"], 80),
-    accountSignalText(item, ["plan_type", "planType"], 80),
-    accountSignalText(item, ["plan_state", "planState"], 80),
-  ].filter(Boolean);
-  for (const raw of [...new Set(candidates)]) {
-    const type = normalizeAccountType(raw);
-    if (type === "unknown") continue;
-    if (type === "other") return { type, raw, label: `Other · ${raw}` };
-    return { type, raw, label: accountTypeText[type] };
-  }
-  return { type: "unknown", raw: "", label: accountTypeText.unknown };
-}
-
-function accountGroupMeta(item) {
-  const effectiveName = accountSignalText(item, ["group_name", "groupName"], 80);
-  const customName = accountSignalText(item, ["custom_group_name", "customGroupName"], 80);
-  const defaultName = accountSignalText(item, ["default_group_name", "defaultGroupName"], 80);
-  const source = accountSignalText(item, ["group_source", "groupSource"], 20).toLowerCase();
-  const name = effectiveName || customName || defaultName;
-  const automatic = Boolean(name) && (source === "plan"
-    || (!source && !customName && Boolean(defaultName) && name === defaultName));
-  return { name, customName, defaultName, source, automatic };
-}
-
-function automaticGroupType(item, groupName) {
-  const detected = accountTypeMeta(item).type;
-  if (detected !== "unknown") return detected;
-  const compactName = String(groupName || "").trim().toLowerCase().replace(/[\s_-]+|套餐/g, "");
-  return accountTypeGroupOrder.find((type) => compactName === type
-    || compactName === accountTypeText[type].toLowerCase()) || "unknown";
-}
-
-function AccountNameGroup({ item, mobile = false }) {
-  const group = accountGroupMeta(item);
-  const groupLabel = group.name || "未分组";
-  const groupTitle = group.automatic ? `${groupLabel}（按套餐自动分组）` : groupLabel;
-  return <div className={`registration-account-meta ${mobile ? "registration-account-meta-mobile" : ""}`}><b title={item.custom_name || "未命名"}>{item.custom_name || "未命名"}</b><small className="registration-account-group" title={groupTitle}><span>{groupLabel}</span>{group.automatic && <em>自动</em>}</small></div>;
-}
-
-function accountSignalTime(value) {
-  const text = String(value || "").trim();
-  if (!text) return "";
-  return Number.isFinite(Date.parse(text)) ? `${formatDate(text)}（${relativeTime(text)}）` : text;
-}
-
-function AccountSignalCell({ item, compact = false }) {
-  const statusCode = accountSignalText(item, [
-    "status_code", "statusCode", "validity_code", "validityCode", "validity_status_code", "validityStatusCode",
-    "validity_error_code", "validityErrorCode", "check_code", "checkCode", "code",
-  ], 80).toUpperCase().replace(/[\s-]+/g, "_");
-  const statusReason = accountSignalText(item, [
-    "status_reason", "statusReason", "validity_reason", "validityReason", "validity_status_reason", "validityStatusReason",
-    "validity_error", "validityError", "validity_message", "validityMessage", "check_reason", "checkReason", "reason",
-  ]);
-  const checkError = accountSignalText(item, ["status_check_error", "statusCheckError", "check_error", "checkError"]);
-  const checkState = accountSignalText(item, ["status_check_state", "statusCheckState", "check_state", "checkState", "detection_status", "detectionStatus"], 40).toLowerCase();
-  const retryableValue = accountSignalValue(item, ["status_retryable", "statusRetryable", "validity_retryable", "validityRetryable", "retryable"]);
-  const retryable = retryableValue === true || ["1", "true", "yes"].includes(String(retryableValue).toLowerCase());
-  const remoteStatus = accountSignalText(item, ["display_status", "displayStatus", "lifecycle_status", "lifecycleStatus", "status"], 80).toLowerCase();
-  const fallbackAvailability = new Set(["active", "registered", "valid", "trial", "subscribed"]).has(remoteStatus)
-    ? "available" : definitiveUnavailableCodes.has(statusCode) ? "unavailable" : "unchecked";
-  const rawAvailability = accountSignalText(item, ["availability", "availability_status", "availabilityStatus"], 40).toLowerCase();
-  const availability = accountAvailabilityMeta[rawAvailability] ? rawAvailability : fallbackAvailability;
-  const checkFailed = new Set(["failed", "inconclusive", "retry", "retryable", "error", "timeout"]).has(checkState);
-  const transientCode = transientStatusCodes.has(statusCode)
-    || /(?:TIMEOUT|NETWORK|PROXY|RATE_LIMIT|UPSTREAM|HTTP_5\d\d|CLOUDFLARE|CHALLENGE|TEMPORAR|UNRECOGNIZED)/.test(statusCode);
-  const transient = availability !== "unavailable" && (checkFailed || retryable || transientCode);
-  const meta = transient && availability === "unchecked"
-    ? { label: "待复检", badge: "warning" }
-    : accountAvailabilityMeta[availability];
-  const type = accountTypeMeta(item);
-  const attemptedAt = accountSignalText(item, ["status_check_attempted_at", "statusCheckAttemptedAt", "check_attempted_at", "checkAttemptedAt", "attempted_at", "attemptedAt"], 80);
-  const confirmedAt = accountSignalText(item, ["status_confirmed_at", "statusConfirmedAt", "validity_confirmed_at", "validityConfirmedAt"], 80);
-  const checkedAt = attemptedAt || accountSignalText(item, [
-    "status_checked_at", "statusCheckedAt", "validity_checked_at", "validityCheckedAt", "checked_at", "checkedAt",
-  ], 80) || confirmedAt;
-  const detail = [statusCode && `[${statusCode}]`, statusReason || (transient ? checkError : "")].filter(Boolean).join(" ");
-  const statusConflictValue = accountSignalValue(item, ["status_conflict", "statusConflict", "validity_conflict", "validityConflict"]);
-  const statusConflict = statusConflictValue === true || ["1", "true", "yes"].includes(String(statusConflictValue).toLowerCase());
-  const checkCaption = transient
-    ? `${detail || "检测暂时失败"} · ${availability === "unchecked" ? "请稍后复检" : "保留上次结果"}`
-    : detail || (availability === "unavailable" ? "后端已确认失效（未返回原因码）"
-      : checkState === "checked" ? "刚刚完成状态检测"
-        : statusConflict ? "最新 API 已确认可用"
-          : checkedAt ? `检测 ${relativeTime(checkedAt)}` : "等待状态检测");
-  const accountStatus = accountSignalText(item, ["account_status", "accountStatus", "lifecycle_status", "lifecycleStatus", "display_status", "displayStatus"], 80);
-  const credentialStatus = accountSignalText(item, ["credential_status", "credentialStatus", "validity_status", "validityStatus"], 80);
-  const subscriptionStatus = accountSignalText(item, ["subscription_status", "subscriptionStatus", "plan_status", "planStatus", "plan_state", "planState"], 80);
-  const source = accountSignalText(item, ["status_source", "statusSource", "validity_source", "validitySource", "check_source", "checkSource", "source"], 120);
-  const sourceAndTime = [
-    source && `来源 ${source}`,
-    checkedAt && `本次 ${relativeTime(checkedAt)}`,
-    confirmedAt && confirmedAt !== checkedAt && `确认 ${relativeTime(confirmedAt)}`,
-  ].filter(Boolean).join(" · ");
-  const title = [
-    `状态：${meta.label}`,
-    `类型：${type.label}`,
-    accountStatus && `账号状态=${accountStatus}`,
-    credentialStatus && `凭据状态=${credentialStatus}`,
-    subscriptionStatus && `订阅状态=${subscriptionStatus}`,
-    statusCode && `状态码=${statusCode}`,
-    statusReason && `原因=${statusReason}`,
-    transient && !statusReason && checkError && `检测错误=${checkError}`,
-    statusConflict && "历史页面状态与最新 API 结果冲突，采用最新 API 结果",
-    source && `来源=${source}`,
-    checkedAt && `检测时间=${accountSignalTime(checkedAt)}`,
-    confirmedAt && confirmedAt !== checkedAt && `确认时间=${accountSignalTime(confirmedAt)}`,
-  ].filter(Boolean).join(" · ");
-  const captionClass = transient ? "check-failed" : availability === "unavailable" ? "check-invalid" : detail ? "check-detail" : "";
-  return <div className={`registration-account-signal ${compact ? "compact" : ""}`} title={title}><div><StatusBadge status={meta.badge}>{meta.label}</StatusBadge><span className={`registration-account-type type-${type.type}`}>{type.label}</span></div><small className={captionClass}>{checkCaption}</small>{sourceAndTime && <small className="check-meta">{sourceAndTime}</small>}</div>;
-}
-
-function JobCommands({ job, onLogs, onCancel, onRelease, onDelete }) {
-  const cancellable = job.status === "queued" || job.status === "running";
-  const releasable = releasableStatuses.has(job.status);
-  return <div className="row-actions"><button className="registration-row-command" title="查看日志" onClick={() => onLogs(job)}><ScrollText size={15} /></button>{cancellable && <button className="registration-row-command danger" title="请求取消任务" onClick={() => onCancel(job.id)}><Ban size={15} /></button>}{releasable && <button className="registration-row-command warning" title="强制释放任务" onClick={() => onRelease(job)}><CircleStop size={15} /></button>}{deletableStatuses.has(job.status) && <button className="registration-row-command danger" title="删除注册记录" onClick={() => onDelete(job)}><Trash2 size={15} /></button>}</div>;
-}
-
-function AccountCommands({ item, checking, busy = false, onRefresh, onPassword, onNfapi, onEdit, onCopy, onDelete }) {
-  const passwordTitle = item.password_available
-    ? "密码已配置"
-    : item.password_setup_reason || "使用原邮箱设置密码";
-  return <div className="registration-account-actions" aria-label={`${item.email} 的账号操作`}>
-    <button className="registration-row-command" disabled={busy || checking} aria-label="检测状态和套餐" title="检测状态和套餐" onClick={() => onRefresh([item.id])}><RefreshCw size={15} /></button>
-    <button className="registration-row-command" disabled={busy || item.password_available || !item.password_setup_available} aria-label={passwordTitle} title={passwordTitle} onClick={() => onPassword(item)}><ShieldCheck size={15} /></button>
-    <button className="registration-row-command" disabled={busy} aria-label="添加或更新 NFapi" title="添加或更新 NFapi" onClick={() => onNfapi([item.id])}><Database size={15} /></button>
-    <button className="registration-row-command" disabled={busy} aria-label="编辑名称和分组" title="编辑名称和分组" onClick={() => onEdit(item)}><Pencil size={15} /></button>
-    <button className="registration-row-command" aria-label={item.password_available ? "复制账号和密码" : "复制邮箱"} title={item.password_available ? "复制账号和密码" : "复制邮箱"} onClick={() => onCopy(item)}><ClipboardCopy size={15} /></button>
-    <button className="registration-row-command danger" disabled={busy} aria-label="删除本地账号" title="删除本地账号" onClick={() => onDelete(item)}><Trash2 size={15} /></button>
-  </div>;
-}
-
-function OAuthMailboxPanel({ email, data, loading, error, updatedAt, onRefresh, onClose, onCopyCode }) {
-  const emails = data?.emails || [];
-  const initialError = Boolean(error && !data);
-  const footerState = initialError
-    ? "读取失败"
-    : updatedAt ? `更新于 ${relativeTime(updatedAt)}` : loading ? "正在连接邮箱" : "尚未更新";
-  return (
-    <aside className="nfapi-oauth-mailbox" aria-label={`${email || "当前账号"}的验证码邮箱`} aria-busy={loading}>
-      <header>
-        <div className="nfapi-mailbox-title"><Mail size={17} /><span><b>验证码邮箱</b><small title={email}>{email}</small></span></div>
-        <div className="nfapi-mailbox-actions">
-          <IconButton className={loading ? "spin-icon" : ""} icon={loading ? LoaderCircle : RefreshCw} label="刷新当前邮箱" size={30} disabled={loading} onClick={onRefresh} />
-          <IconButton icon={EyeOff} label="隐藏验证码邮箱" size={30} onClick={onClose} />
-        </div>
-      </header>
-      <div className="nfapi-mailbox-content" aria-live="polite">
-        {!data && loading && !error ? <LoadingBlock rows={5} /> : initialError ? <div className="nfapi-mailbox-empty failed"><AlertTriangle size={22} /><b>邮箱读取失败</b><span>{error}</span><Button size="sm" icon={RefreshCw} loading={loading} onClick={onRefresh}>立即重试</Button></div> : <>
-          {error && <div className="nfapi-mailbox-error"><AlertTriangle size={14} /><span>{error}</span></div>}
-          {emails.length ? <div className="nfapi-mail-list" role="list">{emails.map((item, index) => (
-          <article className="nfapi-mail-item" role="listitem" key={item.id || item.message_id || `${item.date}-${index}`}>
-            <header><b title={item.from || "OpenAI"}>{item.from || "OpenAI"}</b><time dateTime={item.date}>{relativeTime(item.date)}</time></header>
-            {item.verification_code && <button className="nfapi-mail-code" type="button" title="复制验证码" aria-label={`复制验证码 ${item.verification_code}`} onClick={() => onCopyCode(item.verification_code)}><span>{item.verification_code}</span><Copy size={14} /></button>}
-            <strong>{item.subject || "（无主题）"}</strong>
-            <p>{item.body_preview || item.preview || item.text || "没有邮件预览"}</p>
-          </article>
-          ))}</div> : <div className="nfapi-mailbox-empty"><Mail size={22} /><b>等待验证码邮件</b><span>打开 OAuth 登录后，新邮件会自动出现在这里。</span></div>}
-        </>}
-      </div>
-      <footer><span>{footerState}</span><small>{error ? "每 4 秒自动重试" : "每 4 秒自动刷新"}</small></footer>
-    </aside>
-  );
-}
+import { copyText, formatDate } from "../utils.js";
+import {
+  accountGroupMeta,
+  accountSignalText,
+  accountTypeGroupRank,
+  accountTypeMeta,
+  automaticGroupType,
+} from "./registration/account-signals.js";
+import {
+  AccessTokenCell,
+  AccountCommands,
+  AccountNameGroup,
+  AccountSignalCell,
+  JobCommands,
+  NfapiBatchImportResult,
+  OAuthMailboxPanel,
+  OccupiedAliasNotice,
+  PasswordCell,
+} from "./registration/display.jsx";
+import {
+  agentIdentityOAuthFallbackCodes,
+  agentIdentityResultMessage,
+  apiId,
+  importFormFromDefaults,
+  nfapiAccountState,
+  nfapiImportDefaults,
+} from "./registration/nfapi-model.js";
+import {
+  normalizeProxyDraft,
+  normalizeProxySample,
+  proxySelectLabel,
+} from "./registration/proxy-model.js";
+import {
+  accountPageSizes,
+  accountPageSizeStorageKey,
+  ageFromBirth,
+  baseOptionLabel,
+  deletableStatuses,
+  initialAccountPageSize,
+  jobStatusLabel,
+  preferredBase,
+  releasableStatuses,
+} from "./registration/registration-model.js";
 
 export default function RegistrationPage({ refreshKey }) {
   const [view, setView] = useState("tasks");
@@ -642,7 +53,7 @@ export default function RegistrationPage({ refreshKey }) {
   const [jobs, setJobs] = useState(null);
   const [accounts, setAccounts] = useState(null);
   const [accountsError, setAccountsError] = useState("");
-  const [form, setForm] = useState({ accountId: "", baseAddressId: "", count: 1, suffix: "", browserMode: "headed", proxySelection: "auto", autoContinuePostSignup: true, setPasswordAfterRegistration: false, password: "" });
+  const [form, setForm] = useState({ accountId: "", baseAddressId: "", addressMode: "base", count: 1, suffix: "", browserMode: "headed", proxySelection: "auto", autoContinuePostSignup: true, setPasswordAfterRegistration: false, password: "" });
   const [proxyText, setProxyText] = useState("");
   const [proxySaveFeedback, setProxySaveFeedback] = useState(null);
   const [starting, setStarting] = useState(false);
@@ -658,6 +69,8 @@ export default function RegistrationPage({ refreshKey }) {
   const [selectedAccountIds, setSelectedAccountIds] = useState([]);
   const [copyingTokenId, setCopyingTokenId] = useState(null);
   const [copyingSelectedTokens, setCopyingSelectedTokens] = useState(false);
+  const [pickupConfig, setPickupConfig] = useState({ enabled: false });
+  const [publishingPickup, setPublishingPickup] = useState(false);
   const [checkingAccountSignals, setCheckingAccountSignals] = useState(false);
   const accountSignalRefreshBusy = useRef(false);
   const lastFocusedAccountRefreshAt = useRef(0);
@@ -761,6 +174,14 @@ export default function RegistrationPage({ refreshKey }) {
     }
   }, []);
 
+  const loadPickupConfig = useCallback(async () => {
+    try {
+      setPickupConfig(await api("/api/pickup/config"));
+    } catch {
+      setPickupConfig({ enabled: false });
+    }
+  }, []);
+
   const refreshRegistrationData = useCallback(async () => {
     await loadJobs();
     await Promise.all([loadOptions(), loadAccounts()]);
@@ -794,7 +215,8 @@ export default function RegistrationPage({ refreshKey }) {
 
   useEffect(() => {
     refreshRegistrationData().catch((error) => toast(error.message, "error"));
-  }, [refreshRegistrationData, refreshKey, toast]);
+    loadPickupConfig();
+  }, [refreshRegistrationData, refreshKey, toast, loadPickupConfig]);
 
   useEffect(() => {
     if (!nfapiOAuthSession?.oauth_session_id || !nfapiMailboxOpen) return undefined;
@@ -1641,6 +1063,26 @@ export default function RegistrationPage({ refreshKey }) {
     }
   };
 
+  const publishSelectedToPickup = async () => {
+    if (!selectedAccountIds.length) return;
+    setPublishingPickup(true);
+    try {
+      const result = await api("/api/pickup/import-accounts", {
+        method: "POST",
+        body: { ids: selectedAccountIds },
+      });
+      if (result.delivery_text) await copyText(result.delivery_text);
+      const passwordNote = result.without_password
+        ? `；${result.without_password} 个账号没有密码，将使用邮箱验证码登录`
+        : "";
+      toast(`已上架 ${result.imported} 个账号，取件凭据已复制${passwordNote}`);
+    } catch (error) {
+      toast(error.message || "上架取件站失败", "error");
+    } finally {
+      setPublishingPickup(false);
+    }
+  };
+
   const copyRegisteredAccount = async (item) => {
     if (!item?.email) {
       toast("账号目标已不存在，请刷新后重试", "error");
@@ -1698,6 +1140,7 @@ export default function RegistrationPage({ refreshKey }) {
     || nfapiImportMode === "agent_identity";
   const passwordSetupRunning = Boolean(passwordSetupTask && !passwordSetupTask.terminal);
   const isDirectRegistration = selectedAccount?.registration_mode === "direct";
+  const isBaseAddressRegistration = !isDirectRegistration && form.addressMode === "base";
   const deleteCount = deleteTarget?.ids?.length || 0;
   const deleteTitle = deletingAccounts
     ? (deleteCount > 1 ? `删除选中的 ${deleteCount} 个注册账号？` : "删除这个注册账号？")
@@ -1732,12 +1175,13 @@ export default function RegistrationPage({ refreshKey }) {
               </div>
               <OccupiedAliasNotice base={selectedBase} />
               {selectedBase?.registration_hint && <div className="inline-alert warning"><AlertTriangle size={16} /><span>{selectedBase.registration_hint}</span></div>}
+              {!isDirectRegistration && <FormField label="注册邮箱模式" hint="基础地址成功率更高；Plus 分裂适合目标站仍接受 +tag 时批量使用"><select value={form.addressMode} onChange={(event) => setForm({ ...form, addressMode: event.target.value, ...(event.target.value === "base" ? { count: 1, suffix: "" } : {}) })}><option value="base">直接使用基础地址（推荐）</option><option value="split">生成 +tag 分裂地址</option></select></FormField>}
               <div className="form-grid two">
-                <FormField label="注册数量" hint={isDirectRegistration ? "iCloud 地址直接注册，固定为 1 个任务" : form.suffix.trim() ? "批量注册会自动追加 -01、-02 编号" : "留空后缀时，每个账号生成随机分裂邮箱"}><input type="number" min="1" max="20" value={isDirectRegistration ? 1 : form.count} disabled={isDirectRegistration} onChange={(event) => setForm({ ...form, count: Number(event.target.value) })} /></FormField>
+                <FormField label="注册数量" hint={isDirectRegistration || isBaseAddressRegistration ? "当前模式直接使用基础地址，固定为 1 个任务" : form.suffix.trim() ? "批量注册会自动追加 -01、-02 编号" : "留空后缀时，每个账号生成随机分裂邮箱"}><input type="number" min="1" max="20" value={isDirectRegistration || isBaseAddressRegistration ? 1 : form.count} disabled={isDirectRegistration || isBaseAddressRegistration} onChange={(event) => setForm({ ...form, count: Number(event.target.value) })} /></FormField>
                 <FormField label="浏览器模式"><select value={form.browserMode} onChange={(event) => setForm({ ...form, browserMode: event.target.value })}><option value="headed">内嵌指纹浏览器</option><option value="headless" disabled={!form.autoContinuePostSignup}>后台指纹浏览器</option></select></FormField>
               </div>
               <div className="form-grid two">
-                {!isDirectRegistration && <FormField label="邮箱分裂后缀" hint="例如 campaign；不填写则随机生成"><input maxLength={24} value={form.suffix} onChange={(event) => setForm({ ...form, suffix: event.target.value })} placeholder="留空自动随机" /></FormField>}
+                {!isDirectRegistration && !isBaseAddressRegistration && <FormField label="邮箱分裂后缀" hint="例如 campaign；不填写则随机生成"><input maxLength={24} value={form.suffix} onChange={(event) => setForm({ ...form, suffix: event.target.value })} placeholder="留空自动随机" /></FormField>}
                 <FormField label="注册代理" hint="可固定使用某个已保存代理，也可自动轮换或直连"><select value={form.proxySelection} onChange={(event) => setForm({ ...form, proxySelection: event.target.value })}><option value="auto">自动轮换代理池（{options.proxies.length}）</option>{options.maskedProxies.map((item, index) => <option key={`${item}-${index}`} value={`proxy:${index}`}>固定使用：{proxySelectLabel(item, options.proxyMetadata?.[index])}</option>)}<option value="direct">直连（不使用代理）</option></select></FormField>
               </div>
               <div className="fresh-browser-note"><Fingerprint size={17} /><span><b>仅邮箱验证，每次全新地域指纹</b><small>清空 Cookie · 随机 OS/屏幕/Canvas/WebGL/设备参数 · 语言、时区和地理位置匹配实际出口 IP；官方强制要求手机号时任务停止</small></span></div>
@@ -1746,7 +1190,7 @@ export default function RegistrationPage({ refreshKey }) {
                 <label className="registration-password-option"><input type="checkbox" checked={form.setPasswordAfterRegistration} onChange={(event) => setForm({ ...form, setPasswordAfterRegistration: event.target.checked, ...(event.target.checked ? {} : { password: "" }) })} /><span><b>注册后设置密码</b><small>未勾选时，仅在官网注册流程强制要求密码时设置；勾选后会进入 ChatGPT 安全设置并再次读取邮箱验证码。</small></span></label>
               </div>
               <FormField label="指定密码（可选）" hint="填写后使用此密码；留空时由注册服务随机生成。长度 12-128 个字符，不能包含首尾空白。"><input type="password" autoComplete="new-password" minLength={12} maxLength={128} disabled={!form.setPasswordAfterRegistration} value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} placeholder={form.setPasswordAfterRegistration ? "留空自动生成随机密码" : "请先勾选注册后设置密码"} /></FormField>
-              <Button variant="primary" size="lg" icon={Play} loading={starting} disabled={!form.accountId || !form.baseAddressId || !options.service?.ok || Boolean(selectedBase?.registration_disabled)} onClick={start}>{isDirectRegistration ? "使用此 iCloud 地址注册" : "开始注册"}</Button>
+              <Button variant="primary" size="lg" icon={Play} loading={starting} disabled={!form.accountId || !form.baseAddressId || !options.service?.ok || Boolean(selectedBase?.registration_disabled)} onClick={start}>{isDirectRegistration ? "使用此 iCloud 地址注册" : isBaseAddressRegistration ? "使用此基础地址注册" : "开始注册"}</Button>
             </div>
           </article>
 
@@ -1795,6 +1239,7 @@ export default function RegistrationPage({ refreshKey }) {
             </div>
             <div className="registration-account-bulk-actions">
               <Button size="sm" icon={ListChecks} loading={checkingAccountSignals} disabled={!visibleAccountItems.length || importingNfapi} title={selectedAccountIds.length ? "重新检测所选账号的当前状态和订阅类型" : "检测当前分组内全部账号的状态和订阅类型"} onClick={refreshSelectedAccountSignals}>{selectedAccountIds.length ? "检测所选" : "检测当前筛选"}</Button>
+              {pickupConfig.enabled && <Button size="sm" variant="primary" icon={Store} loading={publishingPickup} disabled={!selectedAccountIds.length || importingNfapi} title="把所选成品账号的邮箱和密码一键发布到已配置的取件站" onClick={publishSelectedToPickup}>上架取件站</Button>}
               <Button size="sm" icon={SlidersHorizontal} disabled={!selectedAccountIds.length || importingNfapi} title="为所选账号统一配置并批量导入 NFapi" onClick={() => openNfapiImporter(selectedAccountIds)}>批量导入</Button>
               <Button size="sm" icon={KeyRound} loading={copyingSelectedTokens} disabled={!selectedAccountIds.length || importingNfapi} onClick={copySelectedAccessTokens}>复制 AT</Button>
               <Button size="sm" variant="danger" icon={Trash2} disabled={!selectedAccountIds.length || importingNfapi} onClick={() => setDeleteTarget({ kind: "accounts", ids: selectedAccountIds })}>删除</Button>

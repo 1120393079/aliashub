@@ -1,6 +1,6 @@
 {
   "name": "aliashub",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Self-hosted email alias and verification-code hub with optional account registration and SUB2-compatible integration.",
   "private": true,
   "license": "AGPL-3.0-only",

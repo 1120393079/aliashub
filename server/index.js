@@ -14,6 +14,7 @@ import { MicrosoftGraphClient } from "./microsoft-graph.js";
 import { NfapiService, PUBLIC_AGENT_IDENTITY_ERROR_CODES } from "./nfapi-service.js";
 import { MicrosoftRegistrationRunnerService } from "./microsoft-registration-runner-service.js";
 import { MicrosoftRegistrationService } from "./microsoft-registration-service.js";
+import { PickupService } from "./pickup-service.js";
 import { RegistrationClient } from "./registration-client.js";
 import { RegistrationService } from "./registration-service.js";
 
@@ -341,6 +342,14 @@ export function createApp(options = {}) {
     mailboxBaseUrl: process.env.REGISTRATION_MAILBOX_URL,
     browserUrl: process.env.REGISTRATION_BROWSER_URL,
   });
+  const pickup = options.pickup || new PickupService({
+    registration,
+    baseUrl: options.pickupBaseUrl || process.env.PICKUP_SERVICE_URL,
+    publicUrl: options.pickupPublicUrl || process.env.PICKUP_PUBLIC_URL,
+    username: options.pickupUsername || process.env.PICKUP_ADMIN_USERNAME,
+    password: options.pickupPassword || process.env.PICKUP_ADMIN_PASSWORD,
+    fetchFn: options.pickupFetchFn || options.fetchFn,
+  });
   const nfapi = options.nfapi || new NfapiService({
     db,
     registrationClient,
@@ -497,6 +506,13 @@ export function createApp(options = {}) {
 
   app.get("/api/registration/options", async (_req, res, next) => {
     try { res.json(await registration.options()); } catch (error) { next(error); }
+  });
+  app.get("/api/pickup/config", (_req, res) => {
+    res.json(pickup.configuration());
+  });
+  app.post("/api/pickup/import-accounts", async (req, res, next) => {
+    try { res.json(await pickup.importRegisteredAccounts(req.body || {})); }
+    catch (error) { next(error); }
   });
   app.put("/api/registration/proxies", (req, res, next) => {
     try { res.json(registration.saveProxyPool(req.body?.proxies)); } catch (error) { next(error); }
@@ -1320,7 +1336,7 @@ export function createApp(options = {}) {
     if (PUBLIC_AGENT_IDENTITY_ERROR_CODES.has(error?.code)) body.code = error.code;
     res.status(status).json(body);
   });
-  return { app, db, graph, gmail, icloud, inbox, extension, jobs, registration, nfapi, microsoftRegistration, microsoftRegistrationRunner };
+  return { app, db, graph, gmail, icloud, inbox, extension, jobs, registration, pickup, nfapi, microsoftRegistration, microsoftRegistrationRunner };
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

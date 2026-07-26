@@ -1177,6 +1177,9 @@ export class NfapiService {
   }
 
   saveLink(source, { accountId = 0, status, shortLived, action = "", error = "", options }) {
+    if (status !== "imported") {
+      throw errorWithStatus("NFapi 绑定表只允许保存已完成的导入", 500);
+    }
     const now = nowIso();
     this.db.prepare(`
       INSERT INTO registered_account_nfapi_links
@@ -1339,14 +1342,16 @@ export class NfapiService {
               throw errorWithStatus("NFapi 已有账号尚未迁移为耐久 Agent Identity，请开启“更新已有账号”后重试", 409);
             }
             targetId = Number(existing.id);
-            if (input.save_defaults) this.saveDefaults(requestedOptions);
-            this.saveLink(source, {
-              accountId: targetId,
-              status: "imported",
-              shortLived: false,
-              action: "agent_identity_skipped",
-              options: { ...options, import_mode: "agent_identity" },
-            });
+            this.db.transaction(() => {
+              if (input.save_defaults) this.saveDefaults(requestedOptions);
+              this.saveLink(source, {
+                accountId: targetId,
+                status: "imported",
+                shortLived: false,
+                action: "agent_identity_skipped",
+                options: { ...options, import_mode: "agent_identity" },
+              });
+            })();
             this.clearPendingAgentIdentity(sourceId, pending);
             return {
               auth_mode: "agentIdentity",
@@ -1453,14 +1458,16 @@ export class NfapiService {
       await this.applyAllSettings(client, targetId, source, name, options, { longLived: true });
       const configuredTarget = await client.getAccount(targetId);
       validateAgentIdentityTarget(configuredTarget, source, pending.runtimeId);
-      if (input.save_defaults) this.saveDefaults(requestedOptions);
-      this.saveLink(source, {
-        accountId: targetId,
-        status: "imported",
-        shortLived: false,
-        action: `agent_identity_${action}`,
-        options: { ...options, import_mode: "agent_identity" },
-      });
+      this.db.transaction(() => {
+        if (input.save_defaults) this.saveDefaults(requestedOptions);
+        this.saveLink(source, {
+          accountId: targetId,
+          status: "imported",
+          shortLived: false,
+          action: `agent_identity_${action}`,
+          options: { ...options, import_mode: "agent_identity" },
+        });
+      })();
       this.clearPendingAgentIdentity(sourceId, pending);
       return {
         auth_mode: "agentIdentity",
@@ -1485,16 +1492,6 @@ export class NfapiService {
       const message = retained
         ? `${baseMessage}；已在内存中保留本次 Agent Identity，${remainingMinutes} 分钟内重试会复用`
         : baseMessage;
-      if (source) {
-        this.saveLink(source, {
-          accountId: targetId,
-          status: "failed",
-          shortLived: false,
-          action,
-          error: message,
-          options: { ...options, import_mode: "agent_identity" },
-        });
-      }
       const status = Number(error?.status);
       const publicError = errorWithStatus(
         message,
@@ -1580,10 +1577,12 @@ export class NfapiService {
       : this.desiredName(source, options, 1);
     if (existing && !options.update_existing) {
       const shortLived = !nfapiHasDurableAuth(existing);
-      if (input.save_defaults) this.saveDefaults(options);
-      this.saveLink(source, {
-        accountId: Number(existing.id), status: "imported", shortLived, action: "skipped", options,
-      });
+      this.db.transaction(() => {
+        if (input.save_defaults) this.saveDefaults(options);
+        this.saveLink(source, {
+          accountId: Number(existing.id), status: "imported", shortLived, action: "skipped", options,
+        });
+      })();
       return {
         authorization_required: false,
         status: "completed",
@@ -1655,13 +1654,6 @@ export class NfapiService {
       throw error;
     }
     if (input.save_defaults) this.saveDefaults(options);
-    this.saveLink(source, {
-      accountId: Number(existing?.id || 0),
-      status: "pending",
-      shortLived: existing ? !nfapiHasDurableAuth(existing) : false,
-      action: existing ? "oauth_reauthorization_pending" : "oauth_authorization_pending",
-      options,
-    });
     return {
       authorization_required: true,
       status: "pending",
@@ -1765,10 +1757,12 @@ export class NfapiService {
       const shortLived = action === "skipped"
         ? !nfapiHasDurableAuth(currentExisting)
         : !token.longLived;
-      this.saveLink(source, {
-        accountId: targetId, status: "imported", shortLived, action, options,
-      });
-      this.finishOAuthSession(sessionId, "completed");
+      this.db.transaction(() => {
+        this.saveLink(source, {
+          accountId: targetId, status: "imported", shortLived, action, options,
+        });
+        this.finishOAuthSession(sessionId, "completed");
+      })();
       return {
         status: "completed",
         action,
@@ -1783,14 +1777,6 @@ export class NfapiService {
       const message = redactNfapiMessage(error?.message || "SUB2 兼容服务 OAuth 导入失败", secrets)
         || "SUB2 兼容服务 OAuth 导入失败";
       this.finishOAuthSession(sessionId, "failed", message);
-      this.saveLink(source, {
-        accountId: targetId,
-        status: "failed",
-        shortLived: token ? !token.longLived : false,
-        action,
-        error: message,
-        options,
-      });
       const status = Number(error?.status);
       throw errorWithStatus(message, Number.isInteger(status) && status >= 400 && status <= 504 ? status : 502);
     }

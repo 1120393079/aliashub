@@ -397,6 +397,7 @@ test("Agent Identity rejects importer ambiguity despite an AliasHub link before 
   assert.equal(service.pendingAgentIdentities.size, 0);
   const link = db.prepare("SELECT * FROM registered_account_nfapi_links WHERE external_account_id = ?").get(String(id));
   assert.equal(link.nfapi_account_id, 9712);
+  assert.equal(link.status, "imported");
 });
 
 test("start rejects inconsistent Frcibly top-level, credential, and JWT identities before contacting NFapi", async (t) => {
@@ -687,6 +688,10 @@ test("new accounts use NFapi OAuth then standard create and preserve every advan
   const stored = db.prepare("SELECT * FROM nfapi_oauth_import_sessions WHERE id = ?").get(started.oauth_session_id);
   assert.equal(stored.external_account_id, id);
   assert.match(stored.payload_encrypted, /^v1\./);
+  assert.equal(
+    db.prepare("SELECT COUNT(*) AS count FROM registered_account_nfapi_links WHERE external_account_id = ?").get(String(id)).count,
+    0,
+  );
   for (const secret of ["upstream-session-private", "expected-state", email, "LoginPassword123!"]) {
     assert.equal(stored.payload_encrypted.includes(secret), false);
   }
@@ -1569,10 +1574,7 @@ test("Agent Identity confirmed business failures reuse identity but rotate the i
   }
   const failedLink = db.prepare("SELECT * FROM registered_account_nfapi_links WHERE external_account_id = ?")
     .get(String(id));
-  assert.equal(failedLink.status, "failed");
-  for (const secret of [privateKey, runtimeId, accessToken]) {
-    assert.equal(JSON.stringify(failedLink).includes(secret), false);
-  }
+  assert.equal(failedLink, undefined);
   assert.equal(service.pendingAgentIdentities.size, 1);
 
   const result = await service.importAgentIdentity({

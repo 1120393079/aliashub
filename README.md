@@ -16,7 +16,10 @@ the installation that you control.
 - Manage Outlook official aliases and generate repeatable `+tag` addresses.
 - Run Outlook alias fill jobs through the optional Chrome/Edge connector.
 - Coordinate account registration through the bundled optional registration
-  worker, including browser/noVNC links and proxy selection.
+  worker, including browser/noVNC links, proxy selection, direct Microsoft
+  base-address registration, and structured policy-failure reporting.
+- Optionally publish selected registered accounts to a compatible Mail Pickup
+  service and copy buyer delivery records in one batch.
 - Refresh registered-account availability and plan type on demand, including
   Free, Go, Plus, Pro, Team, Business, Enterprise, Edu, Trial, and unknown
   future plans. Dynamic proxies are rechecked across independent sessions, and
@@ -171,6 +174,31 @@ and the account response must expose credential-status flags for final
 verification. Implementations without that contract should keep Agent Identity
 import disabled and use the OAuth flow instead.
 
+## Optional Mail Pickup service
+
+AliasHub can publish selected registered accounts to a separately deployed Mail
+Pickup-compatible service. The integration is disabled unless
+`PICKUP_SERVICE_URL` is explicitly configured. Add these values only to the
+installation's uncommitted `.env` file:
+
+```dotenv
+PICKUP_SERVICE_URL=http://127.0.0.1:4190
+PICKUP_PUBLIC_URL=https://pickup.example.com
+PICKUP_ADMIN_USERNAME=admin
+PICKUP_ADMIN_PASSWORD=replace-with-the-pickup-admin-password
+```
+
+`PICKUP_SERVICE_URL` is used only for the server-to-server request.
+`PICKUP_PUBLIC_URL` is the buyer-visible origin used in returned delivery
+records. Use a dedicated pickup-service administrator account; AliasHub never
+reuses or forwards its own administrator password for this integration.
+
+The compatible service must accept an authenticated
+`POST /api/admin/mailboxes` request containing `{ upsert, items }` and return an
+`items` array with `email`, `pickup_url`, and `delivery_line`. AliasHub does not
+bundle or expose a pickup service and never sends accounts anywhere when this
+integration is disabled.
+
 ## Data and secrets
 
 Runtime state belongs in `.env` and `data/`; both are excluded from Git. Full
@@ -185,6 +213,7 @@ Never commit:
 - OAuth tokens, callback URLs/codes, administrator passwords, or session keys;
 - connector pairing keys, registration-worker tokens, SUB2 API Keys, or proxy
   credentials;
+- Mail Pickup administrator credentials or private service URLs;
 - private deployment hostnames, addresses, or production configuration.
 
 See [docs/RELEASING.md](docs/RELEASING.md) before making the repository public.

@@ -856,6 +856,59 @@ test("registration integration generates isolated addresses and exposes mailbox 
       assert.equal(direct.body.items[0].proxy_label, "直连");
     });
 
+    await t.test("registers one Microsoft base address directly without creating a plus alias", async () => {
+      const directAccount = createSourceAccount(db, { email: "direct-base@outlook.com" });
+      db.prepare("UPDATE source_accounts SET status = 'connected', updated_at = ? WHERE id = ?")
+        .run(nowIso(), directAccount.id);
+      const directBase = db.prepare("SELECT * FROM addresses WHERE account_id = ? AND kind = 'primary'")
+        .get(directAccount.id);
+
+      const created = await jsonRequest(runtime.app, "/api/registration/jobs", {
+        method: "POST",
+        body: JSON.stringify({
+          accountId: directAccount.id,
+          baseAddressId: directBase.id,
+          addressMode: "base",
+          count: 1,
+          browserMode: "headed",
+          proxySelection: "direct",
+        }),
+      });
+      assert.equal(created.response.status, 202);
+      assert.equal(created.body.items[0].email, "direct-base@outlook.com");
+      assert.equal(client.created.at(-1).email, "direct-base@outlook.com");
+      assert.doesNotMatch(client.created.at(-1).email, /\+/);
+
+      const invalidCount = await jsonRequest(runtime.app, "/api/registration/jobs", {
+        method: "POST",
+        body: JSON.stringify({
+          accountId: directAccount.id,
+          baseAddressId: directBase.id,
+          addressMode: "base",
+          count: 2,
+        }),
+      });
+      assert.equal(invalidCount.response.status, 400);
+      assert.equal(invalidCount.body.error, "基础地址直注册每次只能提交 1 个任务");
+
+      const duplicate = await jsonRequest(runtime.app, "/api/registration/jobs", {
+        method: "POST",
+        body: JSON.stringify({
+          accountId: directAccount.id,
+          baseAddressId: directBase.id,
+          addressMode: "base",
+          count: 1,
+        }),
+      });
+      assert.equal(duplicate.response.status, 409);
+      assert.equal(duplicate.body.error, "这个基础地址已有进行中的注册任务");
+
+      db.prepare("DELETE FROM registration_jobs WHERE account_id = ?").run(directAccount.id);
+      db.prepare("DELETE FROM addresses WHERE account_id = ?").run(directAccount.id);
+      db.prepare("DELETE FROM source_accounts WHERE id = ?").run(directAccount.id);
+      client.created.pop();
+    });
+
     await t.test("rejects deleting a running or queued registration record", async () => {
       const target = db.prepare("SELECT * FROM registration_jobs WHERE status = 'queued' ORDER BY id DESC LIMIT 1").get();
       const response = await jsonRequest(runtime.app, `/api/registration/jobs/${target.id}`, { method: "DELETE" });
@@ -1146,6 +1199,72 @@ test("registration integration generates isolated addresses and exposes mailbox 
         client.getTask = originalGetTask;
         client.getTaskEvents = originalGetTaskEvents;
         if (ids.length) db.prepare(`DELETE FROM registration_jobs WHERE id IN (${ids.map(() => "?").join(", ")})`).run(...ids);
+      }
+    });
+
+    await t.test("classifies registration_disallowed policy failures and preserves the public message", async () => {
+      const mappedAddress = db.prepare(`
+        SELECT id FROM addresses
+        WHERE account_id = ? AND parent_address_id = ? AND kind = 'split'
+        ORDER BY id LIMIT 1
+      `).get(account.id, base.id);
+      const taskId = "structured-policy-block";
+      const createdAt = "2099-01-03T00:00:00.000Z";
+      const jobId = Number(db.prepare(`
+        INSERT INTO registration_jobs (
+          account_id, address_id, base_address_id, email, external_task_id, status, stage, browser_mode,
+          proxy_label, fingerprint_id, message, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 'running', 'about_you', 'headed', '直连', 'policy-error', '等待同步', ?, ?)
+      `).run(
+        account.id,
+        mappedAddress.id,
+        base.id,
+        "source+structured-policy@outlook.com",
+        taskId,
+        createdAt,
+        createdAt,
+      ).lastInsertRowid);
+      const originalGetTask = client.getTask;
+      const originalGetTaskEvents = client.getTaskEvents;
+      try {
+        client.getTask = async () => ({
+          task_id: taskId,
+          type: "register",
+          status: "failed",
+          error_code: "registration_disallowed",
+          error: { message: "Sorry, we cannot create your account with the given information." },
+        });
+        client.getTaskEvents = async () => [{
+          message: "利用規約のため、お客様のアカウントを作成できません。",
+        }];
+
+        const synced = await runtime.registration.syncJob(runtime.registration.getJob(jobId));
+        assert.equal(synced.failure_reason, "account_creation_policy_blocked");
+        assert.equal(
+          db.prepare("SELECT failure_reason FROM registration_jobs WHERE id = ?").get(jobId).failure_reason,
+          "account_creation_policy_blocked",
+        );
+        const [publicJob] = await runtime.registration.listJobs({ limit: 1 });
+        assert.equal(publicJob.id, jobId);
+        assert.equal(publicJob.failure_reason, "account_creation_policy_blocked");
+        assert.equal(publicJob.display_message, "目标站按注册策略拒绝创建账号，请更换网络出口或邮箱后重试");
+
+        db.prepare(`
+          UPDATE registration_jobs
+          SET status = 'running', message = '已识别注册策略拒绝', finished_at = NULL
+          WHERE id = ?
+        `).run(jobId);
+        client.getTask = async () => ({ task_id: taskId, type: "register", status: "failed", error: "generic failure" });
+        client.getTaskEvents = async () => [{ message: "generic failure" }];
+        await runtime.registration.syncJob(runtime.registration.getJob(jobId));
+        assert.deepEqual(
+          db.prepare("SELECT failure_reason, message FROM registration_jobs WHERE id = ?").get(jobId),
+          { failure_reason: "account_creation_policy_blocked", message: "已识别注册策略拒绝" },
+        );
+      } finally {
+        client.getTask = originalGetTask;
+        client.getTaskEvents = originalGetTaskEvents;
+        db.prepare("DELETE FROM registration_jobs WHERE id = ?").run(jobId);
       }
     });
 

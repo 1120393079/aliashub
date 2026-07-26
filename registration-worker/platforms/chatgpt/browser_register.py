@@ -31,6 +31,7 @@ from .constants import (
     SENTINEL_BASE,
     OAUTH_CONSENT_FORM_SELECTOR,
 )
+from .registration_errors import extract_create_account_error, format_create_account_error
 
 
 CAMOUFOX_VISIBLE_WINDOW_SIZE = (1280, 720)
@@ -6809,6 +6810,45 @@ def _submit_about_you_via_page(page, log) -> dict:
         us_birthdate = birthdate
         cn_birthdate = birthdate.replace("-", "/")
     log(f"about_you 表单: name={name}, birthdate={birthdate}, ui_birthdate={us_birthdate}, cn_birthdate={cn_birthdate}")
+    create_account_response: dict = {}
+
+    def _capture_create_account_response(response) -> None:
+        try:
+            response_url = str(response.url or "")
+            if "/api/accounts/create_account" not in response_url:
+                return
+            payload = None
+            fallback_text = ""
+            try:
+                payload = response.json()
+            except Exception:
+                try:
+                    fallback_text = str(response.text() or "")[:500]
+                except Exception:
+                    fallback_text = ""
+            details = extract_create_account_error(
+                status=int(response.status or 0),
+                payload=payload,
+                fallback_text=fallback_text,
+            )
+            if details.get("policy_blocked") and not details.get("code"):
+                details["code"] = "account_creation_policy_blocked"
+            create_account_response.clear()
+            create_account_response.update(details)
+        except Exception:
+            return
+
+    response_listener_attached = False
+
+    def _detach_create_account_listener() -> None:
+        nonlocal response_listener_attached
+        if not response_listener_attached:
+            return
+        try:
+            page.remove_listener("response", _capture_create_account_response)
+        except Exception:
+            pass
+        response_listener_attached = False
 
     def _fill_locator(locator, value: str) -> bool:
         try:
@@ -7375,6 +7415,12 @@ def _submit_about_you_via_page(page, log) -> dict:
         visible_buttons = []
     log(f"about_you 可见提交控件: {visible_buttons[:6]}")
 
+    try:
+        page.on("response", _capture_create_account_response)
+        response_listener_attached = True
+    except Exception:
+        response_listener_attached = False
+
     submit_selector = _click_first(
         page,
         [
@@ -7403,12 +7449,14 @@ def _submit_about_you_via_page(page, log) -> dict:
     if not submit_selector:
         state_after_fill = _derive_registration_state_from_page(page)
         if not _is_about_you(state_after_fill):
+            _detach_create_account_listener()
             log(f"about_you 填写后页面已自动推进: page={state_after_fill.get('page_type') or '-'}")
             return {"ok": True, "status": 200, "url": page.url, "data": state_after_fill, "text": ""}
         try:
             age_locator.press("Enter") if about_mode == "age" and age_locator is not None else page.keyboard.press("Enter")
             submit_selector = "age-input:Enter" if about_mode == "age" else "keyboard:Enter"
         except Exception:
+            _detach_create_account_listener()
             raise RuntimeError(f"about_you 未找到提交按钮: {visible_buttons[:6]}")
     log(f"about_you 已点击继续按钮: {submit_selector}")
 
@@ -7419,8 +7467,12 @@ def _submit_about_you_via_page(page, log) -> dict:
         current_url = page.url
         last_url = current_url or last_url
         if "code=" in current_url or "chatgpt.com" in current_url or "sign-in-with-chatgpt" in current_url:
+            if create_account_response:
+                log(f"about_you 创建账号响应: status={create_account_response.get('status', 0)}")
+            _detach_create_account_listener()
             return {"ok": True, "status": 200, "url": current_url, "data": None, "text": ""}
         if "add-phone" in current_url:
+            _detach_create_account_listener()
             return {"ok": True, "status": 200, "url": current_url, "data": None, "text": ""}
         try:
             error_text = page.locator("text=Sorry, we cannot create your account").first.text_content(timeout=500)
@@ -7495,8 +7547,28 @@ def _submit_about_you_via_page(page, log) -> dict:
                     log(f"about_you 重试提交按钮: {retry_submit_selector}")
                     time.sleep(0.5)
                     continue
-            return {"ok": False, "status": 400, "url": current_url, "data": None, "text": error_text}
+            details = create_account_response or extract_create_account_error(
+                status=400,
+                fallback_text=error_text,
+            )
+            if details.get("policy_blocked") and not details.get("code"):
+                details["code"] = "account_creation_policy_blocked"
+            safe_code = str(details.get("code") or "-")[:120]
+            safe_request_id = str(details.get("request_id") or "-")[:160]
+            log(
+                "about_you 创建账号响应: "
+                f"status={details.get('status') or 400}, code={safe_code}, request_id={safe_request_id}"
+            )
+            _detach_create_account_listener()
+            return {
+                "ok": False,
+                "status": int(details.get("status") or 400),
+                "url": current_url,
+                "data": details,
+                "text": format_create_account_error(details, error_text),
+            }
         time.sleep(0.5)
+    _detach_create_account_listener()
     _dump_debug(page, "chatgpt_about_you_fail")
     return {"ok": False, "status": 0, "url": last_url, "data": None, "text": "about_you 提交后未跳转"}
 
