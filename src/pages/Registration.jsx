@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, Cable, Check, CircleStop, ClipboardCopy, Copy, Database, ExternalLink, EyeOff, Fingerprint, Globe2, KeyRound, ListChecks, LoaderCircle, Mail, Monitor, Network, Play, RefreshCw, Save, ScrollText, Server, ShieldCheck, SlidersHorizontal, Store, Trash2, UserPlus } from "lucide-react";
+import { AlertTriangle, Cable, Check, CircleStop, ClipboardCopy, Copy, Database, ExternalLink, EyeOff, Fingerprint, Globe2, KeyRound, ListChecks, LoaderCircle, Mail, Monitor, Network, Play, RefreshCw, Save, ScrollText, Server, ShieldCheck, SlidersHorizontal, Trash2, UserPlus } from "lucide-react";
 import { api } from "../api.js";
 import { planAgentIdentityBulk, runAgentIdentityBulk } from "../agent-identity-bulk.js";
 import { Button, ConfirmDialog, EmptyState, FormField, IconButton, LoadingBlock, Modal, Pagination, Segmented, StatusBadge, useToast } from "../components.jsx";
@@ -69,8 +69,6 @@ export default function RegistrationPage({ refreshKey }) {
   const [selectedAccountIds, setSelectedAccountIds] = useState([]);
   const [copyingTokenId, setCopyingTokenId] = useState(null);
   const [copyingSelectedTokens, setCopyingSelectedTokens] = useState(false);
-  const [pickupConfig, setPickupConfig] = useState({ enabled: false });
-  const [publishingPickup, setPublishingPickup] = useState(false);
   const [checkingAccountSignals, setCheckingAccountSignals] = useState(false);
   const accountSignalRefreshBusy = useRef(false);
   const lastFocusedAccountRefreshAt = useRef(0);
@@ -174,14 +172,6 @@ export default function RegistrationPage({ refreshKey }) {
     }
   }, []);
 
-  const loadPickupConfig = useCallback(async () => {
-    try {
-      setPickupConfig(await api("/api/pickup/config"));
-    } catch {
-      setPickupConfig({ enabled: false });
-    }
-  }, []);
-
   const refreshRegistrationData = useCallback(async () => {
     await loadJobs();
     await Promise.all([loadOptions(), loadAccounts()]);
@@ -215,8 +205,7 @@ export default function RegistrationPage({ refreshKey }) {
 
   useEffect(() => {
     refreshRegistrationData().catch((error) => toast(error.message, "error"));
-    loadPickupConfig();
-  }, [refreshRegistrationData, refreshKey, toast, loadPickupConfig]);
+  }, [refreshRegistrationData, refreshKey, toast]);
 
   useEffect(() => {
     if (!nfapiOAuthSession?.oauth_session_id || !nfapiMailboxOpen) return undefined;
@@ -1063,26 +1052,6 @@ export default function RegistrationPage({ refreshKey }) {
     }
   };
 
-  const publishSelectedToPickup = async () => {
-    if (!selectedAccountIds.length) return;
-    setPublishingPickup(true);
-    try {
-      const result = await api("/api/pickup/import-accounts", {
-        method: "POST",
-        body: { ids: selectedAccountIds },
-      });
-      if (result.delivery_text) await copyText(result.delivery_text);
-      const passwordNote = result.without_password
-        ? `；${result.without_password} 个账号没有密码，将使用邮箱验证码登录`
-        : "";
-      toast(`已上架 ${result.imported} 个账号，取件凭据已复制${passwordNote}`);
-    } catch (error) {
-      toast(error.message || "上架取件站失败", "error");
-    } finally {
-      setPublishingPickup(false);
-    }
-  };
-
   const copyRegisteredAccount = async (item) => {
     if (!item?.email) {
       toast("账号目标已不存在，请刷新后重试", "error");
@@ -1239,7 +1208,6 @@ export default function RegistrationPage({ refreshKey }) {
             </div>
             <div className="registration-account-bulk-actions">
               <Button size="sm" icon={ListChecks} loading={checkingAccountSignals} disabled={!visibleAccountItems.length || importingNfapi} title={selectedAccountIds.length ? "重新检测所选账号的当前状态和订阅类型" : "检测当前分组内全部账号的状态和订阅类型"} onClick={refreshSelectedAccountSignals}>{selectedAccountIds.length ? "检测所选" : "检测当前筛选"}</Button>
-              {pickupConfig.enabled && <Button size="sm" variant="primary" icon={Store} loading={publishingPickup} disabled={!selectedAccountIds.length || importingNfapi} title="把所选成品账号的邮箱和密码一键发布到已配置的取件站" onClick={publishSelectedToPickup}>上架取件站</Button>}
               <Button size="sm" icon={SlidersHorizontal} disabled={!selectedAccountIds.length || importingNfapi} title="为所选账号统一配置并批量导入 NFapi" onClick={() => openNfapiImporter(selectedAccountIds)}>批量导入</Button>
               <Button size="sm" icon={KeyRound} loading={copyingSelectedTokens} disabled={!selectedAccountIds.length || importingNfapi} onClick={copySelectedAccessTokens}>复制 AT</Button>
               <Button size="sm" variant="danger" icon={Trash2} disabled={!selectedAccountIds.length || importingNfapi} onClick={() => setDeleteTarget({ kind: "accounts", ids: selectedAccountIds })}>删除</Button>
