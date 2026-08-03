@@ -65,6 +65,10 @@ export class RegistrationClient {
     return this.request("/api/tasks/register/resume-all", { method: "POST" });
   }
 
+  cancelRegistrationQueue() {
+    return this.request("/api/tasks/register/cancel-all", { method: "POST" });
+  }
+
   createAccountAction(accountId, actionId, params = {}) {
     return this.request(
       `/api/actions/chatgpt/${encodeURIComponent(accountId)}/${encodeURIComponent(actionId)}`,

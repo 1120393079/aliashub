@@ -16,6 +16,7 @@ from application.tasks import (
     create_get_rt_bypass_task,
     create_gopay_pay_chatgpt_task,
     create_gopay_register_account_task,
+    cancel_registration_queue,
     get_task,
     list_task_events,
     pause_registration_queue,
@@ -39,6 +40,11 @@ class TaskCommandsService:
 
     def resume_registration_queue(self) -> dict:
         result = resume_registration_queue()
+        task_runtime.wake_up()
+        return result
+
+    def cancel_registration_queue(self) -> dict:
+        result = cancel_registration_queue()
         task_runtime.wake_up()
         return result
 

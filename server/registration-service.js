@@ -1753,6 +1753,10 @@ export class RegistrationService {
     return this.client.resumeRegistrationQueue();
   }
 
+  cancelRegistrationQueue() {
+    return this.client.cancelRegistrationQueue();
+  }
+
   async pauseJob(id) {
     const row = this.getJob(id);
     if (!row) throw Object.assign(new Error("注册任务不存在"), { status: 404 });

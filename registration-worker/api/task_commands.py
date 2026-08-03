@@ -144,6 +144,11 @@ def resume_registration_queue():
     return command_service.resume_registration_queue()
 
 
+@router.post("/register/cancel-all")
+def cancel_registration_queue():
+    return command_service.cancel_registration_queue()
+
+
 @router.post("/register")
 def create_register_task(body: RegisterTaskRequest):
     return command_service.create_register_task(body.model_dump())

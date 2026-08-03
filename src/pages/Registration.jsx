@@ -461,11 +461,14 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
 
   const controlQueue = async (action) => {
     if (queueAction) return;
+    if (action === "cancel" && !window.confirm("确定取消全部未完成注册吗？已完成账号会保留，注册队列将保持暂停。")) return;
     setQueueAction(action);
     try {
       const result = await api(`/api/registration/queue/${action}`, { method: "POST" });
       setQueueControl(result);
-      toast(action === "pause" ? "全部注册任务已暂停" : "注册队列已继续");
+      toast(action === "pause"
+        ? "全部注册任务已暂停"
+        : action === "cancel" ? `已取消 ${Number(result.changed || 0)} 个未完成注册任务` : "注册队列已继续");
       await loadJobs();
     } catch (error) {
       toast(error.message, "error");
@@ -1205,6 +1208,7 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
         <div className="registration-queue-actions">
           <Button size="sm" icon={Pause} loading={queueAction === "pause"} disabled={!queueControl || queueControl.paused || Boolean(queueAction)} onClick={() => controlQueue("pause")}>暂停全部</Button>
           <Button size="sm" variant="primary" icon={Play} loading={queueAction === "resume"} disabled={!queueControl?.paused || Boolean(queueAction)} onClick={() => controlQueue("resume")}>继续全部</Button>
+          <Button size="sm" variant="danger" icon={CircleStop} loading={queueAction === "cancel"} disabled={!queueControl || Number(queueControl.remaining || 0) < 1 || Boolean(queueAction)} onClick={() => controlQueue("cancel")}>全部取消</Button>
         </div>
       </div>
 

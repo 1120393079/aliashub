@@ -1035,7 +1035,7 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
   .sidebar-overlay { position: fixed; inset: 0; z-index: 29; display: block; border: 0; background: rgba(0,0,0,0.36); }
   .main-area { margin-left: 0; }
   .registration-queue-bar { align-items: stretch; flex-direction: column; }
-  .registration-queue-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .registration-queue-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .registration-queue-actions .button { justify-content: center; }
   .mobile-menu { display: inline-grid !important; }
   .overview-main-grid, .overview-bottom-grid, .factory-two-column, .split-layout { grid-template-columns: 1fr; }

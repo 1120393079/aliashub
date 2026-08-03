@@ -534,6 +534,9 @@ export function createApp(options = {}) {
   app.post("/api/registration/queue/resume", async (_req, res, next) => {
     try { res.json(await registration.resumeRegistrationQueue()); } catch (error) { next(error); }
   });
+  app.post("/api/registration/queue/cancel", async (_req, res, next) => {
+    try { res.json(await registration.cancelRegistrationQueue()); } catch (error) { next(error); }
+  });
   app.post("/api/registration/jobs/:id/cancel", async (req, res, next) => {
     try { res.json({ item: await registration.cancelJob(req.params.id) }); } catch (error) { next(error); }
   });

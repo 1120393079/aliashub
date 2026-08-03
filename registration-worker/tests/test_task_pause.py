@@ -9,6 +9,7 @@ from application.tasks import (
     TASK_STATUS_PENDING,
     TASK_STATUS_RUNNING,
     TaskLogger,
+    cancel_registration_queue,
     claim_next_runnable_task,
     create_register_task,
     get_task,
@@ -121,6 +122,12 @@ def test_global_queue_pause_holds_existing_and_new_registration_tasks():
     assert resumed["changed"] == 1
     assert get_task(created_while_paused["id"])["status"] == TASK_STATUS_PENDING
 
+    cancelled = cancel_registration_queue()
+    assert cancelled["paused"] is True
+    assert cancelled["changed"] == 1
+    assert cancelled["remaining"] == 0
+    assert get_task(created_while_paused["id"])["status"] == TASK_STATUS_CANCELLED
+
 
 def test_registration_pause_control_api(client):
     paused = client.post("/api/tasks/register/pause-all")
@@ -149,3 +156,10 @@ def test_registration_pause_control_api(client):
     resumed = client.post("/api/tasks/register/resume-all")
     assert resumed.status_code == 200
     assert resumed.json()["paused"] is False
+
+    client.post("/api/tasks/register/pause-all")
+    pending = _register_task()
+    cancelled_all = client.post("/api/tasks/register/cancel-all")
+    assert cancelled_all.status_code == 200
+    assert cancelled_all.json()["paused"] is True
+    assert get_task(pending["id"])["status"] == TASK_STATUS_CANCELLED

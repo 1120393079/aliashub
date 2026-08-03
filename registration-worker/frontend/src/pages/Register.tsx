@@ -315,8 +315,9 @@ export default function Register() {
     }
   }
 
-  const runQueueCommand = async (command: 'pause-all' | 'resume-all') => {
+  const runQueueCommand = async (command: 'pause-all' | 'resume-all' | 'cancel-all') => {
     if (queueAction) return
+    if (command === 'cancel-all' && !window.confirm(t('register.cancelAllConfirm'))) return
     setQueueAction(command)
     try {
       const latest = await apiFetch(`/tasks/register/${command}`, { method: 'POST' })
@@ -619,6 +620,16 @@ export default function Register() {
                 >
                   {queueAction ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : queueControl?.paused ? <Play className="mr-2 h-3.5 w-3.5" /> : <Pause className="mr-2 h-3.5 w-3.5" />}
                   {queueControl?.paused ? t('register.resumeAll') : t('register.pauseAll')}
+                </Button>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  className="w-full"
+                  disabled={Boolean(queueAction) || Number(queueControl?.remaining || 0) < 1}
+                  onClick={() => runQueueCommand('cancel-all')}
+                >
+                  {queueAction === 'cancel-all' ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : <CircleStop className="mr-2 h-3.5 w-3.5" />}
+                  {t('register.cancelAll')}
                 </Button>
                 <p className="text-xs leading-5 text-[var(--text-muted)]">{t('register.queuePauseHint')}</p>
               </div>

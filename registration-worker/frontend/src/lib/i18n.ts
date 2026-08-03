@@ -265,6 +265,8 @@ const ZH_MESSAGES = {
   "register.queueStats": "待执行 {pending} · 已暂停 {paused} · 执行中 {active}",
   "register.pauseAll": "暂停全部",
   "register.resumeAll": "继续全部",
+  "register.cancelAll": "全部取消",
+  "register.cancelAllConfirm": "确定取消全部未完成注册吗？已完成账号会保留，注册队列将保持暂停。",
   "register.queuePauseHint": "暂停全部后，新任务也会保持暂停。可到任务记录取消不想继续的任务，再恢复队列。",
   "register.taskInterrupted": "任务在服务重启后被中断",
   "register.taskCancelled": "任务已取消",
@@ -746,6 +748,8 @@ const EN_MESSAGES: Record<TranslationKey, string> = {
   "register.queueStats": "Pending {pending} · Paused {paused} · Active {active}",
   "register.pauseAll": "Pause All",
   "register.resumeAll": "Resume All",
+  "register.cancelAll": "Cancel All",
+  "register.cancelAllConfirm": "Cancel every unfinished registration? Completed accounts will be kept and the queue will remain paused.",
   "register.queuePauseHint": "Pause All also holds newly submitted tasks. Cancel unwanted tasks in Task History, then resume the queue.",
   "register.taskInterrupted":
     "The task was interrupted after the service restarted",

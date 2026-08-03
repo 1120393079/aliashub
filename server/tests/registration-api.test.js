@@ -65,6 +65,11 @@ class FakeRegistrationClient {
     return this.getRegistrationQueueControl();
   }
 
+  async cancelRegistrationQueue() {
+    this.queuePaused = true;
+    return { ...await this.getRegistrationQueueControl(), changed: 1 };
+  }
+
   async pauseTask(taskId) {
     this.paused.push(taskId);
     this.taskStatuses.set(taskId, "paused");
@@ -775,6 +780,11 @@ test("registration integration generates isolated addresses and exposes mailbox 
       assert.equal(resumed.response.status, 200);
       assert.equal(resumed.body.item.status, "running");
       assert.equal(client.resumed.at(-1), taskId);
+
+      const queueCancelled = await jsonRequest(runtime.app, "/api/registration/queue/cancel", { method: "POST" });
+      assert.equal(queueCancelled.response.status, 200);
+      assert.equal(queueCancelled.body.paused, true);
+      assert.equal(queueCancelled.body.changed, 1);
 
       db.prepare("DELETE FROM registration_jobs WHERE id = ?").run(job.id);
     });

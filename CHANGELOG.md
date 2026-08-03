@@ -8,7 +8,7 @@ All notable changes to AliasHub are documented in this file.
 
 - Added pause, resume, and cancel-remaining controls in both AliasHub and the
   bundled worker, plus a persistent queue-wide pause that also holds newly
-  submitted work.
+  submitted work and a queue-wide cancel action that preserves completed accounts.
 - Added a mailbox-workspace page for binding `email + dispose.lol inbox link`
   rows and a matching ChatGPT registration source that allocates exactly one
   saved mailbox to each registration task.

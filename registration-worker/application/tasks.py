@@ -615,6 +615,32 @@ def resume_registration_queue() -> dict[str, Any]:
     return {**registration_queue_control(), "changed": changed}
 
 
+def cancel_registration_queue() -> dict[str, Any]:
+    # Freeze dispatch first so no pending registration can be claimed while the
+    # cancellation sweep is running. New tasks remain held until explicitly resumed.
+    config_store.set(_REGISTRATION_QUEUE_PAUSED_KEY, "1")
+    with Session(engine) as session:
+        task_ids = list(session.exec(
+            select(TaskModel.id).where(
+                TaskModel.type == TASK_TYPE_REGISTER,
+                TaskModel.status.in_([
+                    TASK_STATUS_PENDING,
+                    TASK_STATUS_CLAIMED,
+                    TASK_STATUS_RUNNING,
+                    TASK_STATUS_PAUSED,
+                    TASK_STATUS_CANCEL_REQUESTED,
+                ]),
+            )
+        ).all())
+    changed = 0
+    for task_id in task_ids:
+        before = get_task(str(task_id))
+        task = request_cancel(str(task_id))
+        if task and task["status"] != (before or {}).get("status"):
+            changed += 1
+    return {**registration_queue_control(), "changed": changed}
+
+
 def force_release_task(task_id: str) -> Optional[dict[str, Any]]:
     released = False
 

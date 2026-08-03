@@ -79,6 +79,7 @@ test("registration client forwards queue and per-task pause controls", async () 
   await client.getRegistrationQueueControl();
   await client.pauseRegistrationQueue();
   await client.resumeRegistrationQueue();
+  await client.cancelRegistrationQueue();
   await client.pauseTask("task/one");
   await client.resumeTask("task/one");
 
@@ -86,6 +87,7 @@ test("registration client forwards queue and per-task pause controls", async () 
     { url: "https://registration.test/api/tasks/register/control", method: "GET" },
     { url: "https://registration.test/api/tasks/register/pause-all", method: "POST" },
     { url: "https://registration.test/api/tasks/register/resume-all", method: "POST" },
+    { url: "https://registration.test/api/tasks/register/cancel-all", method: "POST" },
     { url: "https://registration.test/api/tasks/task%2Fone/pause", method: "POST" },
     { url: "https://registration.test/api/tasks/task%2Fone/resume", method: "POST" },
   ]);
