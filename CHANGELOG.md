@@ -13,8 +13,6 @@ All notable changes to AliasHub are documented in this file.
   plan groups, and manual group overrides.
 - Bulk SUB2-compatible imports through OpenAI OAuth or Ed25519 Agent Identity,
   including idempotent recovery and credential-state verification.
-- Optional Mail Pickup publishing for selected registered accounts. The feature
-  is disabled until each installation explicitly configures its own service.
 - Direct Microsoft base-address registration alongside the existing Plus-address
   mode, with duplicate-task protection and one-address-at-a-time validation.
 
