@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, Cable, Check, CircleStop, ClipboardCopy, Copy, Database, ExternalLink, EyeOff, Fingerprint, Globe2, KeyRound, Link2, ListChecks, LoaderCircle, Mail, Monitor, Network, Play, RefreshCw, Save, ScrollText, Server, ShieldCheck, SlidersHorizontal, Trash2, UserPlus } from "lucide-react";
+import { AlertTriangle, Cable, Check, CircleStop, ClipboardCopy, Copy, Database, ExternalLink, EyeOff, Fingerprint, Globe2, KeyRound, Link2, ListChecks, LoaderCircle, Mail, Monitor, Network, Pause, Play, RefreshCw, Save, ScrollText, Server, ShieldCheck, SlidersHorizontal, Trash2, UserPlus } from "lucide-react";
 import { api } from "../api.js";
 import { planAgentIdentityBulk, runAgentIdentityBulk } from "../agent-identity-bulk.js";
 import { Button, ConfirmDialog, EmptyState, FormField, IconButton, LoadingBlock, Modal, Pagination, Segmented, StatusBadge, useToast } from "../components.jsx";
@@ -51,6 +51,9 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
   const [view, setView] = useState("tasks");
   const [options, setOptions] = useState(null);
   const [jobs, setJobs] = useState(null);
+  const [queueControl, setQueueControl] = useState(null);
+  const [queueAction, setQueueAction] = useState("");
+  const [jobActionIds, setJobActionIds] = useState(() => new Set());
   const [accounts, setAccounts] = useState(null);
   const [accountsError, setAccountsError] = useState("");
   const [form, setForm] = useState({ mailboxMode: initialMailboxMode === "inbox_link" ? "inbox_link" : "source", accountId: "", baseAddressId: "", addressMode: "base", count: 1, suffix: "", browserMode: "headed", proxySelection: "auto", autoContinuePostSignup: true, setPasswordAfterRegistration: false, password: "" });
@@ -161,6 +164,17 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
     }
   }, [toast]);
 
+  const loadQueueControl = useCallback(async () => {
+    try {
+      const result = await api("/api/registration/queue/control");
+      setQueueControl(result);
+      return result;
+    } catch {
+      setQueueControl(null);
+      return null;
+    }
+  }, []);
+
   const loadAccounts = useCallback(async () => {
     const requestId = ++registrationAccountsRequest.current;
     try {
@@ -178,9 +192,9 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
   }, []);
 
   const refreshRegistrationData = useCallback(async () => {
-    await loadJobs();
+    await Promise.all([loadJobs(), loadQueueControl()]);
     await Promise.all([loadOptions(), loadAccounts()]);
-  }, [loadJobs, loadOptions, loadAccounts]);
+  }, [loadJobs, loadQueueControl, loadOptions, loadAccounts]);
 
   useEffect(() => () => {
     registrationOptionsRequest.current += 1;
@@ -283,7 +297,7 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
   const selectedAccount = useMemo(() => options?.accounts.find((item) => String(item.id) === form.accountId), [options, form.accountId]);
   const selectedBase = useMemo(() => selectedAccount?.bases.find((item) => String(item.id) === form.baseAddressId), [selectedAccount, form.baseAddressId]);
   const proxyDraft = useMemo(() => normalizeProxyDraft(proxyText), [proxyText]);
-  const activeJobs = jobs?.filter((item) => releasableStatuses.has(item.status)).length || 0;
+  const activeJobs = jobs?.filter((item) => releasableStatuses.has(item.status) && item.status !== "paused").length || 0;
   const deletableJobIds = jobs?.filter((item) => deletableStatuses.has(item.status)).map((item) => item.id) || [];
   const allJobsSelected = deletableJobIds.length > 0 && deletableJobIds.every((id) => selectedJobIds.includes(id));
   const accountGroups = useMemo(() => {
@@ -416,6 +430,48 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
   const cancel = async (id) => {
     try { await api(`/api/registration/jobs/${id}/cancel`, { method: "POST" }); toast("注册任务已取消"); await refreshRegistrationData(); }
     catch (error) { toast(error.message, "error"); }
+  };
+
+  const setJobAction = (id, active) => {
+    setJobActionIds((current) => {
+      const next = new Set(current);
+      if (active) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
+
+  const controlJob = async (job, action) => {
+    if (!job?.id || jobActionIds.has(job.id)) return;
+    setJobAction(job.id, true);
+    try {
+      const result = await api(`/api/registration/jobs/${job.id}/${action}`, { method: "POST" });
+      const stillPaused = result.item?.status === "paused";
+      toast(action === "pause"
+        ? `${job.email} 已暂停后续注册`
+        : stillPaused ? "注册队列仍处于全部暂停状态，请先点击“继续全部”" : `${job.email} 已继续注册`,
+      stillPaused && action === "resume" ? "error" : "success");
+      await Promise.all([loadJobs(), loadQueueControl()]);
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      setJobAction(job.id, false);
+    }
+  };
+
+  const controlQueue = async (action) => {
+    if (queueAction) return;
+    setQueueAction(action);
+    try {
+      const result = await api(`/api/registration/queue/${action}`, { method: "POST" });
+      setQueueControl(result);
+      toast(action === "pause" ? "全部注册任务已暂停" : "注册队列已继续");
+      await loadJobs();
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      setQueueAction("");
+    }
   };
 
   const releaseJob = async () => {
@@ -1133,6 +1189,7 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
   const deleteDescription = deletingAccounts
     ? "将从本地账号池删除账号、密码（如有）、AT、Cookie 等凭据；不会注销官方 ChatGPT 账号。注册记录、分裂邮箱、邮件和验证码都会保留。"
     : "只从注册记录列表中移除所选记录。已注册账号、账号凭据、分裂邮箱和验证码都会保留。";
+  const queueCounts = queueControl?.counts || {};
 
   return (
     <div className="page-stack registration-page">
@@ -1141,6 +1198,14 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
         <span><LoaderCircle size={16} /><b>执行中</b><strong>{activeJobs}</strong></span>
         <span><Check size={16} /><b>注册成功</b><strong>{accounts.total}</strong></span>
         <span><Network size={16} /><b>代理池</b><strong>{options.proxies.length}</strong></span>
+      </div>
+
+      <div className={`registration-queue-bar ${queueControl?.paused ? "paused" : ""}`}>
+        <div><Pause size={18} /><span><b>注册队列</b><small>{queueControl ? `待执行 ${Number(queueCounts.pending || 0)} · 已暂停 ${Number(queueCounts.paused || 0)} · 执行中 ${Number(queueCounts.active || 0)}` : "正在读取队列状态"}</small></span><StatusBadge status={queueControl?.paused ? "paused" : "active"}>{queueControl?.paused ? "全部已暂停" : "队列运行中"}</StatusBadge></div>
+        <div className="registration-queue-actions">
+          <Button size="sm" icon={Pause} loading={queueAction === "pause"} disabled={!queueControl || queueControl.paused || Boolean(queueAction)} onClick={() => controlQueue("pause")}>暂停全部</Button>
+          <Button size="sm" variant="primary" icon={Play} loading={queueAction === "resume"} disabled={!queueControl?.paused || Boolean(queueAction)} onClick={() => controlQueue("resume")}>继续全部</Button>
+        </div>
       </div>
 
       <Segmented value={view} onChange={setView} ariaLabel="注册视图" items={[
@@ -1207,12 +1272,12 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
             <div className="data-table-wrap"><table className="data-table"><thead><tr><th className="select-column"><input type="checkbox" aria-label="选择全部可删除注册记录" checked={allJobsSelected} disabled={!deletableJobIds.length} onChange={toggleAllJobs} /></th><th>注册邮箱</th><th>随机身份</th><th>指纹会话</th><th>代理 / 出口 IP</th><th>状态</th><th>创建时间</th><th aria-label="操作" /></tr></thead><tbody>{jobs.map((job) => {
               const selectable = deletableStatuses.has(job.status);
               const checked = selectedJobIds.includes(job.id);
-              return <tr className={checked ? "selected-row" : ""} key={job.id}><td className="select-column"><input type="checkbox" aria-label={`选择 ${job.email}`} checked={checked} disabled={!selectable} onChange={() => toggleJob(job.id)} /></td><td><button className="registration-email-button" onClick={() => copyText(job.email).then(() => toast("邮箱已复制"))}>{job.email}<Copy size={13} /></button><small className="registration-source">{job.source_email || (job.account_id ? "源邮箱已删除" : "链接取件邮箱")}</small></td><td><div className="registration-identity"><b>{job.display_name || "等待生成"}</b><small>{job.birth_date ? `${job.birth_date} · ${ageFromBirth(job.birth_date)} 岁` : "姓名和年龄自动随机"}</small></div></td><td><code className="fingerprint-code">{job.fingerprint_id}</code><small className="registration-source">{job.browser_mode === "headed" ? "内嵌 Camoufox" : "后台 Camoufox"}</small></td><td><div className="registration-identity"><b>{job.proxy_label}</b><small>{job.exit_ip ? `出口 ${job.exit_ip}` : "等待识别出口 IP"}</small></div></td><td><div className="registration-status"><StatusBadge status={job.status}>{jobStatusLabel(job)}</StatusBadge>{job.failure_reason === "user_already_exists" && <small>建议更换基础地址</small>}</div></td><td><span className="muted-cell">{formatDate(job.created_at)}</span></td><td><JobCommands job={job} onLogs={openLogs} onCancel={cancel} onRelease={setReleaseTarget} onDelete={(item) => setDeleteTarget({ kind: "job", ids: [item.id], item })} /></td></tr>;
+              return <tr className={checked ? "selected-row" : ""} key={job.id}><td className="select-column"><input type="checkbox" aria-label={`选择 ${job.email}`} checked={checked} disabled={!selectable} onChange={() => toggleJob(job.id)} /></td><td><button className="registration-email-button" onClick={() => copyText(job.email).then(() => toast("邮箱已复制"))}>{job.email}<Copy size={13} /></button><small className="registration-source">{job.source_email || (job.account_id ? "源邮箱已删除" : "链接取件邮箱")}</small></td><td><div className="registration-identity"><b>{job.display_name || "等待生成"}</b><small>{job.birth_date ? `${job.birth_date} · ${ageFromBirth(job.birth_date)} 岁` : "姓名和年龄自动随机"}</small></div></td><td><code className="fingerprint-code">{job.fingerprint_id}</code><small className="registration-source">{job.browser_mode === "headed" ? "内嵌 Camoufox" : "后台 Camoufox"}</small></td><td><div className="registration-identity"><b>{job.proxy_label}</b><small>{job.exit_ip ? `出口 ${job.exit_ip}` : "等待识别出口 IP"}</small></div></td><td><div className="registration-status"><StatusBadge status={job.status}>{jobStatusLabel(job)}</StatusBadge>{job.failure_reason === "user_already_exists" && <small>建议更换基础地址</small>}</div></td><td><span className="muted-cell">{formatDate(job.created_at)}</span></td><td><JobCommands job={job} busy={jobActionIds.has(job.id)} onLogs={openLogs} onPause={(item) => controlJob(item, "pause")} onResume={(item) => controlJob(item, "resume")} onCancel={cancel} onRelease={setReleaseTarget} onDelete={(item) => setDeleteTarget({ kind: "job", ids: [item.id], item })} /></td></tr>;
             })}</tbody></table></div>
             <div className="registration-mobile-list">{jobs.map((job) => {
               const selectable = deletableStatuses.has(job.status);
               const checked = selectedJobIds.includes(job.id);
-              return <article className={checked ? "selected" : ""} key={job.id}><header><input type="checkbox" aria-label={`选择 ${job.email}`} checked={checked} disabled={!selectable} onChange={() => toggleJob(job.id)} /><StatusBadge status={job.status}>{jobStatusLabel(job)}</StatusBadge><time>{formatDate(job.created_at)}</time></header><button onClick={() => copyText(job.email).then(() => toast("邮箱已复制"))}>{job.email}<Copy size={14} /></button><dl><div><dt>身份</dt><dd>{job.display_name || "等待生成"}</dd></div><div><dt>出口 IP</dt><dd>{job.exit_ip || "等待识别"}</dd></div><div><dt>代理</dt><dd>{job.proxy_label}</dd></div></dl><footer><span>{job.display_message || job.message || "-"}</span><JobCommands job={job} onLogs={openLogs} onCancel={cancel} onRelease={setReleaseTarget} onDelete={(item) => setDeleteTarget({ kind: "job", ids: [item.id], item })} /></footer></article>;
+              return <article className={checked ? "selected" : ""} key={job.id}><header><input type="checkbox" aria-label={`选择 ${job.email}`} checked={checked} disabled={!selectable} onChange={() => toggleJob(job.id)} /><StatusBadge status={job.status}>{jobStatusLabel(job)}</StatusBadge><time>{formatDate(job.created_at)}</time></header><button onClick={() => copyText(job.email).then(() => toast("邮箱已复制"))}>{job.email}<Copy size={14} /></button><dl><div><dt>身份</dt><dd>{job.display_name || "等待生成"}</dd></div><div><dt>出口 IP</dt><dd>{job.exit_ip || "等待识别"}</dd></div><div><dt>代理</dt><dd>{job.proxy_label}</dd></div></dl><footer><span>{job.display_message || job.message || "-"}</span><JobCommands job={job} busy={jobActionIds.has(job.id)} onLogs={openLogs} onPause={(item) => controlJob(item, "pause")} onResume={(item) => controlJob(item, "resume")} onCancel={cancel} onRelease={setReleaseTarget} onDelete={(item) => setDeleteTarget({ kind: "job", ids: [item.id], item })} /></footer></article>;
             })}</div>
             <div className="table-footer"><span>共 {jobs.length} 个注册任务</span></div>
           </> : <EmptyState icon={UserPlus} title="还没有注册任务" description="选择源头邮箱和基础地址后开始注册。" />}

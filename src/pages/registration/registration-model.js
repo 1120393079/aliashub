@@ -1,6 +1,7 @@
 const statusText = {
   queued: "排队中",
   running: "注册中",
+  paused: "已暂停",
   completed: "注册成功",
   failed: "失败",
   cancelled: "已取消",
@@ -9,7 +10,7 @@ const statusText = {
 };
 
 export const deletableStatuses = new Set(["completed", "failed", "cancelled", "interrupted"]);
-export const releasableStatuses = new Set(["queued", "pending", "claimed", "running", "cancel_requested"]);
+export const releasableStatuses = new Set(["queued", "pending", "claimed", "running", "paused", "cancel_requested"]);
 export const accountPageSizes = [5, 10, 20, 50];
 export const accountPageSizeStorageKey = "aliashub.registration.account-page-size";
 

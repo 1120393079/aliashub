@@ -31,8 +31,8 @@ import {
 import { serializeInboxLinkEntry } from "./inbox-link-pool.js";
 
 const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled", "interrupted"]);
-const ACTIVE_STATUSES = new Set(["pending", "claimed", "running", "cancel_requested"]);
-const RELEASABLE_JOB_STATUSES = new Set(["queued", "pending", "claimed", "running", "cancel_requested"]);
+const ACTIVE_STATUSES = new Set(["pending", "claimed", "running", "paused", "cancel_requested"]);
+const RELEASABLE_JOB_STATUSES = new Set(["queued", "pending", "claimed", "running", "paused", "cancel_requested"]);
 const ACCOUNT_STATUS_REFRESH_COOLDOWN_MS = 15 * 60 * 1000;
 const ACCOUNT_STATUS_REFRESH_BATCH_SIZE = 20;
 
@@ -1581,7 +1581,7 @@ export class RegistrationService {
               status = 'completed'
               OR (
                 deleted_at IS NULL
-                AND status IN ('queued', 'pending', 'claimed', 'running', 'cancel_requested')
+                AND status IN ('queued', 'pending', 'claimed', 'running', 'paused', 'cancel_requested')
               )
             )
           ORDER BY created_at DESC, id DESC LIMIT 1
@@ -1741,6 +1741,40 @@ export class RegistrationService {
     return synced.map(publicRegistrationJob);
   }
 
+  registrationQueueControl() {
+    return this.client.getRegistrationQueueControl();
+  }
+
+  pauseRegistrationQueue() {
+    return this.client.pauseRegistrationQueue();
+  }
+
+  resumeRegistrationQueue() {
+    return this.client.resumeRegistrationQueue();
+  }
+
+  async pauseJob(id) {
+    const row = this.getJob(id);
+    if (!row) throw Object.assign(new Error("注册任务不存在"), { status: 404 });
+    if (TERMINAL_STATUSES.has(row.status)) return publicRegistrationJob(row);
+    if (!row.external_task_id) {
+      throw Object.assign(new Error("任务尚未提交到注册服务，请稍后重试"), { status: 409 });
+    }
+    await this.client.pauseTask(row.external_task_id);
+    return publicRegistrationJob(await this.syncJob(this.getJob(row.id)));
+  }
+
+  async resumeJob(id) {
+    const row = this.getJob(id);
+    if (!row) throw Object.assign(new Error("注册任务不存在"), { status: 404 });
+    if (TERMINAL_STATUSES.has(row.status)) return publicRegistrationJob(row);
+    if (!row.external_task_id) {
+      throw Object.assign(new Error("任务尚未提交到注册服务，请稍后重试"), { status: 409 });
+    }
+    await this.client.resumeTask(row.external_task_id);
+    return publicRegistrationJob(await this.syncJob(this.getJob(row.id)));
+  }
+
   async cancelJob(id) {
     const row = this.getJob(id);
     if (!row) throw Object.assign(new Error("注册任务不存在"), { status: 404 });
@@ -1796,7 +1830,7 @@ export class RegistrationService {
     const result = this.db.prepare(`
       UPDATE registration_jobs SET status = ?, stage = 'released', message = ?, finished_at = ?, updated_at = ?
       WHERE id = ? AND deleted_at IS NULL
-        AND status IN ('queued', 'pending', 'claimed', 'running', 'cancel_requested')
+        AND status IN ('queued', 'pending', 'claimed', 'running', 'paused', 'cancel_requested')
     `).run(nextStatus, message, finishedAt, finishedAt, row.id);
     if (!result.changes) {
       const latest = this.getJob(row.id);

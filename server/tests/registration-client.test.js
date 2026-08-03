@@ -65,6 +65,32 @@ test("registration client does not hide force-release server failures", async ()
   await assert.rejects(() => client.releaseTask("task-3"), /release failed/);
 });
 
+test("registration client forwards queue and per-task pause controls", async () => {
+  const calls = [];
+  const client = new RegistrationClient({
+    baseUrl: "https://registration.test",
+    token: "secret-token",
+    fetchFn: async (url, options) => {
+      calls.push({ url, method: options.method || "GET" });
+      return jsonResponse(200, { paused: url.includes("pause"), status: "paused" });
+    },
+  });
+
+  await client.getRegistrationQueueControl();
+  await client.pauseRegistrationQueue();
+  await client.resumeRegistrationQueue();
+  await client.pauseTask("task/one");
+  await client.resumeTask("task/one");
+
+  assert.deepEqual(calls, [
+    { url: "https://registration.test/api/tasks/register/control", method: "GET" },
+    { url: "https://registration.test/api/tasks/register/pause-all", method: "POST" },
+    { url: "https://registration.test/api/tasks/register/resume-all", method: "POST" },
+    { url: "https://registration.test/api/tasks/task%2Fone/pause", method: "POST" },
+    { url: "https://registration.test/api/tasks/task%2Fone/resume", method: "POST" },
+  ]);
+});
+
 test("registration client forwards proxy inspection parameters exactly", async () => {
   const calls = [];
   const expected = {

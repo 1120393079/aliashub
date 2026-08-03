@@ -53,6 +53,18 @@ export class RegistrationClient {
     return this.request("/api/tasks/register", { method: "POST", body: payload });
   }
 
+  getRegistrationQueueControl() {
+    return this.request("/api/tasks/register/control");
+  }
+
+  pauseRegistrationQueue() {
+    return this.request("/api/tasks/register/pause-all", { method: "POST" });
+  }
+
+  resumeRegistrationQueue() {
+    return this.request("/api/tasks/register/resume-all", { method: "POST" });
+  }
+
   createAccountAction(accountId, actionId, params = {}) {
     return this.request(
       `/api/actions/chatgpt/${encodeURIComponent(accountId)}/${encodeURIComponent(actionId)}`,
@@ -104,6 +116,14 @@ export class RegistrationClient {
 
   cancelTask(taskId) {
     return this.request(`/api/tasks/${encodeURIComponent(taskId)}/cancel`, { method: "POST" });
+  }
+
+  pauseTask(taskId) {
+    return this.request(`/api/tasks/${encodeURIComponent(taskId)}/pause`, { method: "POST" });
+  }
+
+  resumeTask(taskId) {
+    return this.request(`/api/tasks/${encodeURIComponent(taskId)}/resume`, { method: "POST" });
   }
 
   cancelActionTask(taskId) {

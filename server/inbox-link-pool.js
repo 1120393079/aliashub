@@ -125,7 +125,7 @@ export class InboxLinkMailboxService {
           status = 'completed'
           OR (
             deleted_at IS NULL
-            AND status IN ('queued', 'pending', 'claimed', 'running', 'cancel_requested')
+            AND status IN ('queued', 'pending', 'claimed', 'running', 'paused', 'cancel_requested')
           )
         )
       ORDER BY created_at DESC, id DESC LIMIT 1

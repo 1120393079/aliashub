@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { AlertTriangle, Ban, Check, CircleStop, ClipboardCopy, Copy, Database, Eye, EyeOff, KeyRound, LoaderCircle, Mail, Pencil, RefreshCw, ScrollText, ShieldCheck, Trash2 } from "lucide-react";
+import { AlertTriangle, Ban, Check, CircleStop, ClipboardCopy, Copy, Database, Eye, EyeOff, KeyRound, LoaderCircle, Mail, Pause, Pencil, Play, RefreshCw, ScrollText, ShieldCheck, Trash2 } from "lucide-react";
 import { Button, IconButton, LoadingBlock, StatusBadge } from "../../components.jsx";
 import { formatDate, relativeTime } from "../../utils.js";
 import {
@@ -144,10 +144,12 @@ export function AccountSignalCell({ item, compact = false }) {
   return <div className={`registration-account-signal ${compact ? "compact" : ""}`} title={title}><div><StatusBadge status={meta.badge}>{meta.label}</StatusBadge><span className={`registration-account-type type-${type.type}`}>{type.label}</span></div><small className={captionClass}>{checkCaption}</small>{sourceAndTime && <small className="check-meta">{sourceAndTime}</small>}</div>;
 }
 
-export function JobCommands({ job, onLogs, onCancel, onRelease, onDelete }) {
-  const cancellable = job.status === "queued" || job.status === "running";
+export function JobCommands({ job, onLogs, onPause, onResume, onCancel, onRelease, onDelete, busy = false }) {
+  const pausable = job.status === "queued" || job.status === "running";
+  const resumable = job.status === "paused";
+  const cancellable = pausable || resumable;
   const releasable = releasableStatuses.has(job.status);
-  return <div className="row-actions"><button className="registration-row-command" title="查看日志" onClick={() => onLogs(job)}><ScrollText size={15} /></button>{cancellable && <button className="registration-row-command danger" title="请求取消任务" onClick={() => onCancel(job.id)}><Ban size={15} /></button>}{releasable && <button className="registration-row-command warning" title="强制释放任务" onClick={() => onRelease(job)}><CircleStop size={15} /></button>}{deletableStatuses.has(job.status) && <button className="registration-row-command danger" title="删除注册记录" onClick={() => onDelete(job)}><Trash2 size={15} /></button>}</div>;
+  return <div className="row-actions"><button className="registration-row-command" title="查看日志" onClick={() => onLogs(job)}><ScrollText size={15} /></button>{pausable && <button className="registration-row-command warning" disabled={busy} title="暂停后续注册" onClick={() => onPause(job)}><Pause size={15} /></button>}{resumable && <button className="registration-row-command" disabled={busy} title="继续注册" onClick={() => onResume(job)}><Play size={15} /></button>}{cancellable && <button className="registration-row-command danger" disabled={busy} title="取消剩余注册" onClick={() => onCancel(job.id)}><Ban size={15} /></button>}{releasable && <button className="registration-row-command warning" disabled={busy} title="强制释放任务" onClick={() => onRelease(job)}><CircleStop size={15} /></button>}{deletableStatuses.has(job.status) && <button className="registration-row-command danger" title="删除注册记录" onClick={() => onDelete(job)}><Trash2 size={15} /></button>}</div>;
 }
 
 export function AccountCommands({ item, checking, busy = false, onRefresh, onPassword, onNfapi, onEdit, onCopy, onDelete }) {

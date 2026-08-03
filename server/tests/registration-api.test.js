@@ -12,6 +12,10 @@ class FakeRegistrationClient {
   constructor() {
     this.created = [];
     this.cancelled = [];
+    this.paused = [];
+    this.resumed = [];
+    this.queuePaused = false;
+    this.taskStatuses = new Map();
     this.released = [];
     this.deletedAccounts = new Set();
     this.proxyInspections = [];
@@ -31,7 +35,7 @@ class FakeRegistrationClient {
   }
 
   async getTask(taskId) {
-    return { task_id: taskId, type: "register", status: "succeeded", progress_current: 1, progress_total: 1 };
+    return { task_id: taskId, type: "register", status: this.taskStatuses.get(taskId) || "succeeded", progress_current: 1, progress_total: 1 };
   }
 
   async getTaskEvents() {
@@ -45,6 +49,32 @@ class FakeRegistrationClient {
   async cancelTask(taskId) {
     this.cancelled.push(taskId);
     return { task_id: taskId, status: "cancel_requested" };
+  }
+
+  async getRegistrationQueueControl() {
+    return { paused: this.queuePaused, counts: { pending: 0, paused: this.paused.length, active: 0 } };
+  }
+
+  async pauseRegistrationQueue() {
+    this.queuePaused = true;
+    return this.getRegistrationQueueControl();
+  }
+
+  async resumeRegistrationQueue() {
+    this.queuePaused = false;
+    return this.getRegistrationQueueControl();
+  }
+
+  async pauseTask(taskId) {
+    this.paused.push(taskId);
+    this.taskStatuses.set(taskId, "paused");
+    return { task_id: taskId, status: "paused" };
+  }
+
+  async resumeTask(taskId) {
+    this.resumed.push(taskId);
+    this.taskStatuses.set(taskId, "running");
+    return { task_id: taskId, status: "running" };
   }
 
   async releaseTask(taskId) {
@@ -709,6 +739,42 @@ test("registration integration generates isolated addresses and exposes mailbox 
       assert.equal(released.body.item.status, "cancelled");
       assert.equal(released.body.release_mode, "force_release");
       assert.equal(client.released.at(-1), taskId);
+
+      db.prepare("DELETE FROM registration_jobs WHERE id = ?").run(job.id);
+    });
+
+    await t.test("pauses and resumes the whole queue and one registration job", async () => {
+      const created = await jsonRequest(runtime.app, "/api/registration/jobs", {
+        method: "POST",
+        body: JSON.stringify({
+          accountId: account.id,
+          baseAddressId: base.id,
+          count: 1,
+          suffix: "pause-resume",
+          browserMode: "headed",
+          proxies: [],
+        }),
+      });
+      const job = created.body.items[0];
+      const taskId = `task-${client.created.length}`;
+
+      const queuePaused = await jsonRequest(runtime.app, "/api/registration/queue/pause", { method: "POST" });
+      assert.equal(queuePaused.response.status, 200);
+      assert.equal(queuePaused.body.paused, true);
+
+      const paused = await jsonRequest(runtime.app, `/api/registration/jobs/${job.id}/pause`, { method: "POST" });
+      assert.equal(paused.response.status, 200);
+      assert.equal(paused.body.item.status, "paused");
+      assert.equal(client.paused.at(-1), taskId);
+
+      const queueResumed = await jsonRequest(runtime.app, "/api/registration/queue/resume", { method: "POST" });
+      assert.equal(queueResumed.response.status, 200);
+      assert.equal(queueResumed.body.paused, false);
+
+      const resumed = await jsonRequest(runtime.app, `/api/registration/jobs/${job.id}/resume`, { method: "POST" });
+      assert.equal(resumed.response.status, 200);
+      assert.equal(resumed.body.item.status, "running");
+      assert.equal(client.resumed.at(-1), taskId);
 
       db.prepare("DELETE FROM registration_jobs WHERE id = ?").run(job.id);
     });

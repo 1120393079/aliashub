@@ -172,6 +172,15 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .registration-summary b { font-size: 10px; font-weight: 600; }
 .registration-summary strong { margin-left: auto; color: var(--text); font-size: 16px; }
 .registration-summary .status-badge { margin-left: auto; }
+.registration-queue-bar { min-height: 58px; display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 9px 13px; border: 1px solid color-mix(in srgb, var(--green) 26%, var(--line)); border-radius: 7px; background: var(--surface); box-shadow: var(--shadow); }
+.registration-queue-bar.paused { border-color: color-mix(in srgb, var(--amber) 34%, var(--line)); background: color-mix(in srgb, var(--amber-soft) 44%, var(--surface)); }
+.registration-queue-bar > div:first-child { min-width: 0; display: flex; align-items: center; gap: 10px; }
+.registration-queue-bar > div:first-child > svg { flex: 0 0 auto; color: var(--green); }
+.registration-queue-bar.paused > div:first-child > svg { color: var(--amber); }
+.registration-queue-bar > div:first-child > span { min-width: 0; display: grid; gap: 3px; }
+.registration-queue-bar > div:first-child b { font-size: 11px; }
+.registration-queue-bar > div:first-child small { overflow: hidden; color: var(--text-soft); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.registration-queue-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 7px; }
 .registration-control-grid { display: grid; grid-template-columns: minmax(360px, 0.82fr) minmax(520px, 1.18fr); gap: 15px; align-items: start; }
 .registration-launch-panel .panel-header > svg { color: var(--green); }
 .registration-launch-form { display: grid; gap: 14px; padding: 17px; }
@@ -1025,6 +1034,9 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
   .sidebar-close { display: inline-grid !important; }
   .sidebar-overlay { position: fixed; inset: 0; z-index: 29; display: block; border: 0; background: rgba(0,0,0,0.36); }
   .main-area { margin-left: 0; }
+  .registration-queue-bar { align-items: stretch; flex-direction: column; }
+  .registration-queue-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .registration-queue-actions .button { justify-content: center; }
   .mobile-menu { display: inline-grid !important; }
   .overview-main-grid, .overview-bottom-grid, .factory-two-column, .split-layout { grid-template-columns: 1fr; }
   .settings-layout { grid-template-columns: 1fr; }

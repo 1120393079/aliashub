@@ -525,8 +525,23 @@ export function createApp(options = {}) {
   app.get("/api/registration/jobs", async (req, res, next) => {
     try { res.json({ items: await registration.listJobs(req.query) }); } catch (error) { next(error); }
   });
+  app.get("/api/registration/queue/control", async (_req, res, next) => {
+    try { res.json(await registration.registrationQueueControl()); } catch (error) { next(error); }
+  });
+  app.post("/api/registration/queue/pause", async (_req, res, next) => {
+    try { res.json(await registration.pauseRegistrationQueue()); } catch (error) { next(error); }
+  });
+  app.post("/api/registration/queue/resume", async (_req, res, next) => {
+    try { res.json(await registration.resumeRegistrationQueue()); } catch (error) { next(error); }
+  });
   app.post("/api/registration/jobs/:id/cancel", async (req, res, next) => {
     try { res.json({ item: await registration.cancelJob(req.params.id) }); } catch (error) { next(error); }
+  });
+  app.post("/api/registration/jobs/:id/pause", async (req, res, next) => {
+    try { res.json({ item: await registration.pauseJob(req.params.id) }); } catch (error) { next(error); }
+  });
+  app.post("/api/registration/jobs/:id/resume", async (req, res, next) => {
+    try { res.json({ item: await registration.resumeJob(req.params.id) }); } catch (error) { next(error); }
   });
   app.post("/api/registration/jobs/:id/release", async (req, res, next) => {
     try { res.json(await registration.releaseJob(req.params.id)); } catch (error) { next(error); }
