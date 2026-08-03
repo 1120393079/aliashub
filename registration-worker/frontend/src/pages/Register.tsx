@@ -9,7 +9,7 @@ import { TaskLogPanel } from '@/components/tasks/TaskLogPanel'
 import { Button } from '@/components/ui/button'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { Play, CheckCircle, XCircle, Loader2, Orbit, Mail, ScanText, ShieldCheck, Workflow } from 'lucide-react'
+import { Play, Pause, CircleStop, CheckCircle, XCircle, Loader2, Orbit, Mail, ScanText, ShieldCheck, Workflow } from 'lucide-react'
 import { getTaskStatusText, isTerminalTaskStatus, TASK_STATUS_VARIANTS } from '@/lib/tasks'
 
 const DEFAULT_FORM: Record<string, any> = {
@@ -63,10 +63,19 @@ export default function Register() {
   const [optionsError, setOptionsError] = useState('')
   const [task, setTask] = useState<any>(null)
   const [polling, setPolling] = useState(false)
+  const [taskAction, setTaskAction] = useState('')
+  const [queueControl, setQueueControl] = useState<any>(null)
+  const [queueAction, setQueueAction] = useState('')
   const handledTerminalTaskIdsRef = useRef<Set<string>>(new Set())
   const openedCashierTaskIdsRef = useRef<Set<string>>(new Set())
 
   const set = (k: string, v: any) => setForm(f => ({ ...f, [k]: v }))
+
+  const loadQueueControl = useCallback(async () => {
+    const latest = await apiFetch('/tasks/register/control')
+    setQueueControl(latest)
+    return latest
+  }, [])
 
   const applyTerminalTask = useCallback((latest: any, statusHint?: string) => {
     setTask(latest)
@@ -133,6 +142,14 @@ export default function Register() {
       })
     })
   }, [])
+
+  useEffect(() => {
+    loadQueueControl().catch(() => {})
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === 'visible') loadQueueControl().catch(() => {})
+    }, 3000)
+    return () => window.clearInterval(interval)
+  }, [loadQueueControl])
 
   const currentPlatform = platforms.find((p: any) => p.name === form.platform) || null
   const platformOptions = platforms.map((p: any) => [p.name, p.display_name])
@@ -282,6 +299,38 @@ export default function Register() {
     setPolling(true)
   }
 
+  const runTaskCommand = async (command: 'pause' | 'resume' | 'cancel') => {
+    const taskId = String(task?.task_id || task?.id || '')
+    if (!taskId || taskAction) return
+    if (command === 'cancel' && !window.confirm(t('register.cancelRemainingConfirm'))) return
+    setTaskAction(command)
+    try {
+      const latest = await apiFetch(`/tasks/${encodeURIComponent(taskId)}/${command}`, { method: 'POST' })
+      setTask(latest)
+      const terminal = isTerminalTaskStatus(String(latest?.status || ''))
+      setPolling(!terminal)
+      if (terminal) applyTerminalTask(latest)
+    } finally {
+      setTaskAction('')
+    }
+  }
+
+  const runQueueCommand = async (command: 'pause-all' | 'resume-all') => {
+    if (queueAction) return
+    setQueueAction(command)
+    try {
+      const latest = await apiFetch(`/tasks/register/${command}`, { method: 'POST' })
+      setQueueControl(latest)
+      if (task?.task_id || task?.id) {
+        const taskId = String(task.task_id || task.id)
+        const current = await apiFetch(`/tasks/${encodeURIComponent(taskId)}`).catch(() => null)
+        if (current) setTask(current)
+      }
+    } finally {
+      setQueueAction('')
+    }
+  }
+
   const handleTaskDone = useCallback(async (status: string) => {
     if (!task?.task_id) return
     if (handledTerminalTaskIdsRef.current.has(String(task.task_id))) {
@@ -365,6 +414,11 @@ export default function Register() {
     { label: t('common.success'), value: String(task.success ?? 0), icon: CheckCircle },
     { label: t('common.failure'), value: String(task.error_count ?? task.errors?.length ?? 0), icon: XCircle },
   ] : []
+  const taskStatus = String(task?.status || '')
+  const canPauseTask = Boolean(task?.pausable === true || ['pending', 'claimed', 'running'].includes(taskStatus))
+  const canResumeTask = Boolean(task?.resumable === true || taskStatus === 'paused')
+  const canCancelTask = Boolean(task && !isTerminalTaskStatus(taskStatus) && taskStatus !== 'cancel_requested')
+  const queueCounts = queueControl?.counts || {}
 
   return (
     <div className="space-y-4">
@@ -540,7 +594,35 @@ export default function Register() {
                   <div className="mt-2 text-base font-medium text-[var(--text-primary)]">{summaryVerification}</div>
                 </div>
               </div>
-              <Button onClick={submit} disabled={polling} className="w-full">
+              <div className="space-y-3 rounded-lg border border-[var(--border-soft)] bg-[var(--chip-bg)] p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-xs font-medium text-[var(--text-primary)]">{t('register.queueControl')}</div>
+                    <div className="mt-1 text-xs text-[var(--text-muted)]">
+                      {t('register.queueStats', {
+                        pending: Number(queueCounts.pending || 0),
+                        paused: Number(queueCounts.paused || 0),
+                        active: Number(queueCounts.active || 0),
+                      })}
+                    </div>
+                  </div>
+                  <Badge variant={queueControl?.paused ? 'warning' : 'secondary'}>
+                    {queueControl?.paused ? t('register.queuePaused') : t('register.queueRunning')}
+                  </Badge>
+                </div>
+                <Button
+                  variant={queueControl?.paused ? 'default' : 'outline'}
+                  size="sm"
+                  className="w-full"
+                  disabled={Boolean(queueAction)}
+                  onClick={() => runQueueCommand(queueControl?.paused ? 'resume-all' : 'pause-all')}
+                >
+                  {queueAction ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : queueControl?.paused ? <Play className="mr-2 h-3.5 w-3.5" /> : <Pause className="mr-2 h-3.5 w-3.5" />}
+                  {queueControl?.paused ? t('register.resumeAll') : t('register.pauseAll')}
+                </Button>
+                <p className="text-xs leading-5 text-[var(--text-muted)]">{t('register.queuePauseHint')}</p>
+              </div>
+              <Button onClick={submit} disabled={polling || queueControl?.paused} className="w-full">
                 {polling ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />{t('register.running')}</> : <><Play className="mr-2 h-4 w-4" />{t('register.start')}</>}
               </Button>
             </CardContent>
@@ -573,6 +655,31 @@ export default function Register() {
                     <div>{t('taskHistory.taskId')}</div>
                     <div className="mt-1 break-all font-mono text-[var(--text-primary)]">{task.id}</div>
                   </div>
+                  {(canPauseTask || canResumeTask || canCancelTask) && (
+                    <div className="space-y-2 rounded-lg border border-[var(--border-soft)] bg-[var(--chip-bg)] p-3">
+                      <div className="flex flex-wrap gap-2">
+                        {canPauseTask && (
+                          <Button variant="outline" size="sm" disabled={Boolean(taskAction)} onClick={() => runTaskCommand('pause')}>
+                            {taskAction === 'pause' ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : <Pause className="mr-2 h-3.5 w-3.5" />}
+                            {t('register.pause')}
+                          </Button>
+                        )}
+                        {canResumeTask && (
+                          <Button size="sm" disabled={Boolean(taskAction)} onClick={() => runTaskCommand('resume')}>
+                            {taskAction === 'resume' ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : <Play className="mr-2 h-3.5 w-3.5" />}
+                            {t('register.resume')}
+                          </Button>
+                        )}
+                        {canCancelTask && (
+                          <Button variant="destructive" size="sm" disabled={Boolean(taskAction)} onClick={() => runTaskCommand('cancel')}>
+                            {taskAction === 'cancel' ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : <CircleStop className="mr-2 h-3.5 w-3.5" />}
+                            {t('register.cancelRemaining')}
+                          </Button>
+                        )}
+                      </div>
+                      <p className="text-xs leading-5 text-[var(--text-muted)]">{t('register.pauseHint')}</p>
+                    </div>
+                  )}
                   {task.errors?.length > 0 && (
                     <div className="space-y-1">
                       {task.errors.map((e: string, i: number) => (

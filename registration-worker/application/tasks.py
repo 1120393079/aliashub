@@ -18,6 +18,7 @@ from core.account_graph import (
     recover_lifecycle_status_for_valid_account,
 )
 from core.base_platform import AccountStatus, RegisterConfig
+from core.config_store import config_store
 from core.datetime_utils import format_local_clock, serialize_datetime
 from core.db import AccountModel, TaskEventModel, TaskLog, TaskModel, engine, save_account
 from core.platform_accounts import build_platform_account
@@ -46,6 +47,7 @@ TASK_STATUS_FAILED = "failed"
 TASK_STATUS_INTERRUPTED = "interrupted"
 TASK_STATUS_CANCEL_REQUESTED = "cancel_requested"
 TASK_STATUS_CANCELLED = "cancelled"
+TASK_STATUS_PAUSED = "paused"
 
 
 def _mask_proxy_for_log(proxy: str | None) -> str:
@@ -61,10 +63,12 @@ ACTIVE_TASK_STATUSES = {
     TASK_STATUS_CLAIMED,
     TASK_STATUS_RUNNING,
     TASK_STATUS_CANCEL_REQUESTED,
+    TASK_STATUS_PAUSED,
 }
 
 _task_locks: dict[str, threading.Lock] = {}
 _task_locks_guard = threading.Lock()
+_REGISTRATION_QUEUE_PAUSED_KEY = "registration_queue_paused"
 
 
 def _utcnow() -> datetime:
@@ -73,6 +77,42 @@ def _utcnow() -> datetime:
 
 def _utcnow_iso() -> str:
     return _utcnow().isoformat().replace("+00:00", "Z")
+
+
+def is_registration_queue_paused() -> bool:
+    return str(config_store.get(_REGISTRATION_QUEUE_PAUSED_KEY, "0") or "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def registration_queue_control() -> dict[str, Any]:
+    with Session(engine) as session:
+        tasks = session.exec(
+            select(TaskModel).where(TaskModel.type == TASK_TYPE_REGISTER)
+        ).all()
+    counts = {
+        "pending": 0,
+        "paused": 0,
+        "active": 0,
+        "cancel_requested": 0,
+    }
+    for task in tasks:
+        if task.status == TASK_STATUS_PENDING:
+            counts["pending"] += 1
+        elif task.status == TASK_STATUS_PAUSED:
+            counts["paused"] += 1
+        elif task.status == TASK_STATUS_CANCEL_REQUESTED:
+            counts["cancel_requested"] += 1
+        elif task.status in {TASK_STATUS_CLAIMED, TASK_STATUS_RUNNING}:
+            counts["active"] += 1
+    return {
+        "paused": is_registration_queue_paused(),
+        "counts": counts,
+        "remaining": sum(counts.values()),
+    }
 
 
 def _serialize_datetime(value: datetime | None) -> str | None:
@@ -190,7 +230,19 @@ def serialize_task(task: TaskModel) -> dict[str, Any]:
         "platform": task.platform,
         "status": task.status,
         "terminal": task.status in TERMINAL_TASK_STATUSES,
-        "cancellable": task.status in {TASK_STATUS_PENDING, TASK_STATUS_CLAIMED, TASK_STATUS_RUNNING, TASK_STATUS_CANCEL_REQUESTED},
+        "cancellable": task.status in {
+            TASK_STATUS_PENDING,
+            TASK_STATUS_CLAIMED,
+            TASK_STATUS_RUNNING,
+            TASK_STATUS_PAUSED,
+            TASK_STATUS_CANCEL_REQUESTED,
+        },
+        "pausable": task.type == TASK_TYPE_REGISTER and task.status in {
+            TASK_STATUS_PENDING,
+            TASK_STATUS_CLAIMED,
+            TASK_STATUS_RUNNING,
+        },
+        "resumable": task.type == TASK_TYPE_REGISTER and task.status == TASK_STATUS_PAUSED,
         "progress": f"{progress_current}/{progress_total}" if progress_total else "0/0",
         "progress_detail": {
             "current": progress_current,
@@ -253,12 +305,15 @@ def create_task(
 
 def create_register_task(payload: dict[str, Any]) -> dict[str, Any]:
     count = max(int(payload.get("count", 1) or 1), 1)
-    return create_task(
+    task = create_task(
         task_type=TASK_TYPE_REGISTER,
         platform=str(payload.get("platform", "")),
         payload=payload,
         progress_total=count,
     )
+    if is_registration_queue_paused():
+        return request_pause(task["id"]) or task
+    return task
 
 
 def create_account_check_task(account_id: int) -> dict[str, Any]:
@@ -435,6 +490,8 @@ def mark_incomplete_tasks_interrupted() -> None:
             select(TaskModel).where(TaskModel.status.in_(non_terminal))
         ).all()
         for task in tasks:
+            if task.status == TASK_STATUS_PAUSED and not task.started_at:
+                continue
             task.status = TASK_STATUS_INTERRUPTED
             task.error = task.error or "任务在服务重启后被中断"
             task.finished_at = _utcnow()
@@ -460,6 +517,102 @@ def request_cancel(task_id: str) -> Optional[dict[str, Any]]:
         return None
     append_task_event(task_id, "已请求取消任务", event_type="state", level="warning")
     return serialize_task(task)
+
+
+def request_pause(task_id: str) -> Optional[dict[str, Any]]:
+    changed = False
+
+    def _pause(task: TaskModel) -> None:
+        nonlocal changed
+        if task.type != TASK_TYPE_REGISTER:
+            return
+        if task.status not in {
+            TASK_STATUS_PENDING,
+            TASK_STATUS_CLAIMED,
+            TASK_STATUS_RUNNING,
+        }:
+            return
+        changed = True
+        task.status = TASK_STATUS_PAUSED
+
+    task = _mutate_task(task_id, _pause)
+    if not task:
+        return None
+    if changed:
+        append_task_event(
+            task_id,
+            "任务已暂停；不再启动新的注册，正在执行的账号会安全完成",
+            event_type="state",
+            level="warning",
+            detail={"status": TASK_STATUS_PAUSED},
+        )
+    return serialize_task(task)
+
+
+def request_resume(task_id: str) -> Optional[dict[str, Any]]:
+    changed = False
+    queue_paused = is_registration_queue_paused()
+
+    def _resume(task: TaskModel) -> None:
+        nonlocal changed
+        if (
+            queue_paused
+            or task.type != TASK_TYPE_REGISTER
+            or task.status != TASK_STATUS_PAUSED
+        ):
+            return
+        changed = True
+        task.status = TASK_STATUS_RUNNING if task.started_at else TASK_STATUS_PENDING
+
+    task = _mutate_task(task_id, _resume)
+    if not task:
+        return None
+    if changed:
+        append_task_event(
+            task_id,
+            "任务已继续；开始调度剩余注册",
+            event_type="state",
+            detail={"status": task.status},
+        )
+    return serialize_task(task)
+
+
+def pause_registration_queue() -> dict[str, Any]:
+    config_store.set(_REGISTRATION_QUEUE_PAUSED_KEY, "1")
+    with Session(engine) as session:
+        task_ids = list(session.exec(
+            select(TaskModel.id).where(
+                TaskModel.type == TASK_TYPE_REGISTER,
+                TaskModel.status.in_([
+                    TASK_STATUS_PENDING,
+                    TASK_STATUS_CLAIMED,
+                    TASK_STATUS_RUNNING,
+                ]),
+            )
+        ).all())
+    changed = 0
+    for task_id in task_ids:
+        task = request_pause(str(task_id))
+        if task and task["status"] == TASK_STATUS_PAUSED:
+            changed += 1
+    return {**registration_queue_control(), "changed": changed}
+
+
+def resume_registration_queue() -> dict[str, Any]:
+    config_store.set(_REGISTRATION_QUEUE_PAUSED_KEY, "0")
+    with Session(engine) as session:
+        task_ids = list(session.exec(
+            select(TaskModel.id).where(
+                TaskModel.type == TASK_TYPE_REGISTER,
+                TaskModel.status == TASK_STATUS_PAUSED,
+            )
+        ).all())
+    changed = 0
+    for task_id in task_ids:
+        task = request_resume(str(task_id))
+        if task and task["status"] in {TASK_STATUS_PENDING, TASK_STATUS_RUNNING}:
+            changed += 1
+    return {**registration_queue_control(), "changed": changed}
 
 
 def force_release_task(task_id: str) -> Optional[dict[str, Any]]:
@@ -491,7 +644,9 @@ def force_release_task(task_id: str) -> Optional[dict[str, Any]]:
 def _request_cancel_mutation(task: TaskModel) -> None:
     if task.status in TERMINAL_TASK_STATUSES:
         return
-    if task.status == TASK_STATUS_PENDING:
+    if task.status == TASK_STATUS_PENDING or (
+        task.status == TASK_STATUS_PAUSED and not task.started_at
+    ):
         task.status = TASK_STATUS_CANCELLED
         task.finished_at = _utcnow()
         task.error = task.error or "任务在开始前被取消"
@@ -507,6 +662,7 @@ def claim_next_runnable_task(
 ) -> Optional[dict[str, Any]]:
     running_platform_counts = dict(running_platform_counts or {})
     busy_account_keys = set(busy_account_keys or set())
+    registration_queue_paused = is_registration_queue_paused()
     with Session(engine) as session:
         tasks = session.exec(
             select(TaskModel)
@@ -514,6 +670,8 @@ def claim_next_runnable_task(
             .order_by(TaskModel.created_at)
         ).all()
         for task in tasks:
+            if registration_queue_paused and task.type == TASK_TYPE_REGISTER:
+                continue
             payload = task.get_payload()
             platform = task.platform or str(payload.get("platform", "") or "")
             account_keys = _task_account_keys(task.type, payload)
@@ -606,6 +764,18 @@ class TaskLogger:
                 or task.status == TASK_STATUS_CANCEL_REQUESTED
                 or task.status in TERMINAL_TASK_STATUSES
             )
+
+    def is_paused(self) -> bool:
+        with Session(engine) as session:
+            task = session.get(TaskModel, self.task_id)
+            return bool(task and task.status == TASK_STATUS_PAUSED)
+
+    def wait_if_paused(self, poll_interval: float = 0.25) -> bool:
+        while self.is_paused():
+            if self.is_cancel_requested():
+                return False
+            time.sleep(max(float(poll_interval or 0.25), 0.05))
+        return not self.is_cancel_requested()
 
     def raise_if_stopped(self) -> None:
         if self.is_cancel_requested():
@@ -1030,6 +1200,9 @@ def execute_task(task_id: str) -> None:
     if logger.is_cancel_requested():
         logger.finish(TASK_STATUS_CANCELLED, error="任务在启动后立即被取消")
         return
+    if not logger.wait_if_paused():
+        logger.finish(TASK_STATUS_CANCELLED, error="任务已取消")
+        return
 
     handlers: dict[str, Callable[[dict[str, Any], TaskLogger], None]] = {
         TASK_TYPE_REGISTER: _execute_register_task,
@@ -1407,6 +1580,16 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
     password = payload.get("password") or None
     proxy = payload.get("proxy") or None
     extra = dict(payload.get("extra") or {})
+
+    def _is_paused() -> bool:
+        checker = getattr(logger, "is_paused", None)
+        return bool(checker()) if callable(checker) else False
+
+    def _wait_if_paused() -> bool:
+        waiter = getattr(logger, "wait_if_paused", None)
+        if callable(waiter):
+            return bool(waiter())
+        return not logger.is_cancel_requested()
 
     # 强校验：ChatGPT Plus 自动支付链接 + sms_pool 模式下，**每个并发线程
     # 独占一条 SMS 号**——所以数量约束是 ``len(pool) >= concurrency``，**不是**
@@ -1889,33 +2072,39 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
             return _hero_phone_alive()
 
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
-            while _should_submit_more() and len(futures) < concurrency:
-                futures[pool.submit(_do_one, submitted)] = submitted
-                submitted += 1
-
-            while futures:
-                done, _ = wait(set(futures.keys()), return_when=FIRST_COMPLETED)
-                for future in done:
-                    futures.pop(future, None)
-                    result = future.result()
-                    completed += 1
-                    if result is True:
-                        success += 1
-                    elif result != "__cancel_requested__":
-                        errors.append(str(result))
-                    logger.set_progress(
-                        min(
-                            success
-                            if (herosms_enabled or chatgpt_plus_must_succeed)
-                            else completed,
-                            progress_total,
-                        ),
-                        progress_total,
-                    )
-                while _should_submit_more() and len(futures) < concurrency:
+            while True:
+                while (
+                    not _is_paused()
+                    and _should_submit_more()
+                    and len(futures) < concurrency
+                ):
                     futures[pool.submit(_do_one, submitted)] = submitted
                     submitted += 1
-                if logger.is_cancel_requested() and not futures:
+
+                if futures:
+                    done, _ = wait(set(futures.keys()), return_when=FIRST_COMPLETED)
+                    for future in done:
+                        futures.pop(future, None)
+                        result = future.result()
+                        completed += 1
+                        if result is True:
+                            success += 1
+                        elif result != "__cancel_requested__":
+                            errors.append(str(result))
+                        logger.set_progress(
+                            min(
+                                success
+                                if (herosms_enabled or chatgpt_plus_must_succeed)
+                                else completed,
+                                progress_total,
+                            ),
+                            progress_total,
+                        )
+                    continue
+
+                if logger.is_cancel_requested() or not _should_submit_more():
+                    break
+                if not _wait_if_paused():
                     break
     except Exception as exc:
         logger.log(f"致命错误: {exc}", level="error")

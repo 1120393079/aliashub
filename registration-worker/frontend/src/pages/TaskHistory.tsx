@@ -6,7 +6,7 @@ import { useI18n } from '@/lib/i18n-context'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { getTaskStatusText, isCancellableTaskStatus, isTerminalTaskStatus, TASK_STATUS_VARIANTS } from '@/lib/tasks'
-import { RefreshCw, Activity, CheckCircle2, AlertTriangle, Clock3, ChevronDown, CircleStop } from 'lucide-react'
+import { RefreshCw, Activity, CheckCircle2, AlertTriangle, Clock3, ChevronDown, CircleStop, Pause, Play } from 'lucide-react'
 
 function shortId(id: string) {
   if (!id) return '-'
@@ -41,6 +41,7 @@ export default function TaskHistory() {
   const [platforms, setPlatforms] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
   const [terminatingTaskIds, setTerminatingTaskIds] = useState<Set<string>>(() => new Set())
+  const [taskActions, setTaskActions] = useState<Record<string, string>>({})
 
   const load = async () => {
     setLoading(true)
@@ -87,10 +88,28 @@ export default function TaskHistory() {
     }
   }
 
+  const handlePauseResume = async (task: any, command: 'pause' | 'resume') => {
+    const taskId = String(task.id || task.task_id || '')
+    if (!taskId || taskActions[taskId]) return
+    setTaskActions((current) => ({ ...current, [taskId]: command }))
+    try {
+      const updated = await apiFetch(`/tasks/${encodeURIComponent(taskId)}/${command}`, { method: 'POST' })
+      setTasks((items) => items.map((item) =>
+        String(item.id || item.task_id || '') === taskId ? { ...item, ...updated } : item
+      ))
+    } finally {
+      setTaskActions((current) => {
+        const next = { ...current }
+        delete next[taskId]
+        return next
+      })
+    }
+  }
+
   const succeeded = tasks.filter((t) => t.status === 'succeeded').length
   const failed = tasks.filter((t) => t.status === 'failed').length
   const running = tasks.filter((t) =>
-    ['running', 'claimed', 'pending', 'cancel_requested'].includes(t.status)
+    ['running', 'claimed', 'pending', 'paused', 'cancel_requested'].includes(t.status)
   ).length
 
   const metricCards = [
@@ -156,6 +175,7 @@ export default function TaskHistory() {
               >
                 <option value="">{t('taskHistory.allStatuses')}</option>
                 <option value="running">{t('taskHistory.running')}</option>
+                <option value="paused">{getTaskStatusText('paused', language)}</option>
                 <option value="succeeded">{t('common.success')}</option>
                 <option value="failed">{t('common.failure')}</option>
                 <option value="cancelled">{getTaskStatusText('cancelled', language)}</option>
@@ -203,6 +223,15 @@ export default function TaskHistory() {
                 const taskId = String(task.id || task.task_id || '')
                 const terminating = taskId ? terminatingTaskIds.has(taskId) : false
                 const statusText = String(task.status || '')
+                const taskAction = taskId ? taskActions[taskId] || '' : ''
+                const canPause = Boolean(
+                  taskId &&
+                  (task.pausable === true || (task.type === 'register' && ['pending', 'claimed', 'running'].includes(statusText)))
+                )
+                const canResume = Boolean(
+                  taskId &&
+                  (task.resumable === true || (task.type === 'register' && statusText === 'paused'))
+                )
                 const canTerminate = Boolean(
                   taskId &&
                   statusText !== 'cancel_requested' &&
@@ -286,23 +315,37 @@ export default function TaskHistory() {
                       )}
                     </td>
                     <td className="px-4 py-3 text-right">
-                      {canTerminate || terminating || task.status === 'cancel_requested' ? (
-                        <Button
-                          variant={task.status === 'cancel_requested' ? 'outline' : 'destructive'}
-                          size="sm"
-                          onClick={() => handleTerminate(task)}
-                          disabled={!canTerminate || terminating}
-                          title={t('taskHistory.terminateTitle')}
-                          className="gap-1.5 whitespace-nowrap"
-                        >
-                          <CircleStop className={`h-3.5 w-3.5 ${terminating ? 'animate-spin' : ''}`} />
-                          {terminating || task.status === 'cancel_requested'
-                            ? t('taskHistory.terminating')
-                            : t('taskHistory.terminate')}
-                        </Button>
-                      ) : (
-                        <span className="text-xs text-[var(--text-muted)]">-</span>
-                      )}
+                      {canPause || canResume || canTerminate || terminating || task.status === 'cancel_requested' ? (
+                        <div className="flex justify-end gap-1.5">
+                          {canPause && (
+                            <Button variant="outline" size="sm" disabled={Boolean(taskAction) || terminating} onClick={() => handlePauseResume(task, 'pause')} className="gap-1.5 whitespace-nowrap">
+                              <Pause className="h-3.5 w-3.5" />
+                              {t('taskHistory.pause')}
+                            </Button>
+                          )}
+                          {canResume && (
+                            <Button variant="outline" size="sm" disabled={Boolean(taskAction) || terminating} onClick={() => handlePauseResume(task, 'resume')} className="gap-1.5 whitespace-nowrap">
+                              <Play className="h-3.5 w-3.5" />
+                              {t('taskHistory.resume')}
+                            </Button>
+                          )}
+                          {(canTerminate || terminating || task.status === 'cancel_requested') && (
+                            <Button
+                              variant={task.status === 'cancel_requested' ? 'outline' : 'destructive'}
+                              size="sm"
+                              onClick={() => handleTerminate(task)}
+                              disabled={!canTerminate || terminating || Boolean(taskAction)}
+                              title={t('taskHistory.terminateTitle')}
+                              className="gap-1.5 whitespace-nowrap"
+                            >
+                              <CircleStop className={`h-3.5 w-3.5 ${terminating ? 'animate-spin' : ''}`} />
+                              {terminating || task.status === 'cancel_requested'
+                                ? t('taskHistory.terminating')
+                                : t('taskHistory.terminate')}
+                            </Button>
+                          )}
+                        </div>
+                      ) : <span className="text-xs text-[var(--text-muted)]">-</span>}
                     </td>
                   </tr>
                 )

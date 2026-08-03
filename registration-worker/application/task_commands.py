@@ -18,12 +18,30 @@ from application.tasks import (
     create_gopay_register_account_task,
     get_task,
     list_task_events,
+    pause_registration_queue,
+    registration_queue_control,
     request_cancel,
+    request_pause,
+    request_resume,
+    resume_registration_queue,
 )
 from services.task_runtime import task_runtime
 
 
 class TaskCommandsService:
+    def registration_queue_control(self) -> dict:
+        return registration_queue_control()
+
+    def pause_registration_queue(self) -> dict:
+        result = pause_registration_queue()
+        task_runtime.wake_up()
+        return result
+
+    def resume_registration_queue(self) -> dict:
+        result = resume_registration_queue()
+        task_runtime.wake_up()
+        return result
+
     def create_register_task(self, payload: dict) -> dict:
         task = create_register_task(payload)
         task_runtime.wake_up()
@@ -61,6 +79,18 @@ class TaskCommandsService:
 
     def cancel_task(self, task_id: str) -> dict | None:
         task = request_cancel(task_id)
+        if task:
+            task_runtime.wake_up()
+        return task
+
+    def pause_task(self, task_id: str) -> dict | None:
+        task = request_pause(task_id)
+        if task:
+            task_runtime.wake_up()
+        return task
+
+    def resume_task(self, task_id: str) -> dict | None:
+        task = request_resume(task_id)
         if task:
             task_runtime.wake_up()
         return task

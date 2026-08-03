@@ -129,6 +129,21 @@ class GoPayRegisterAccountTaskRequest(BaseModel):
     rebind_service: str = ""
 
 
+@router.get("/register/control")
+def registration_queue_control():
+    return command_service.registration_queue_control()
+
+
+@router.post("/register/pause-all")
+def pause_registration_queue():
+    return command_service.pause_registration_queue()
+
+
+@router.post("/register/resume-all")
+def resume_registration_queue():
+    return command_service.resume_registration_queue()
+
+
 @router.post("/register")
 def create_register_task(body: RegisterTaskRequest):
     return command_service.create_register_task(body.model_dump())
@@ -190,6 +205,22 @@ def create_gopay_register_account_task(body: GoPayRegisterAccountTaskRequest):
 @router.post("/{task_id}/cancel")
 def cancel_task(task_id: str):
     task = command_service.cancel_task(task_id)
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    return task
+
+
+@router.post("/{task_id}/pause")
+def pause_task(task_id: str):
+    task = command_service.pause_task(task_id)
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    return task
+
+
+@router.post("/{task_id}/resume")
+def resume_task(task_id: str):
+    task = command_service.resume_task(task_id)
     if not task:
         raise HTTPException(404, "任务不存在")
     return task

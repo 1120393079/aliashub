@@ -7,6 +7,7 @@ export const TASK_STATUS_VARIANTS: Record<string, any> = {
   succeeded: 'success',
   failed: 'danger',
   interrupted: 'warning',
+  paused: 'warning',
   cancel_requested: 'warning',
   cancelled: 'warning',
 }
@@ -22,6 +23,7 @@ export const ACTIVE_CANCELLABLE_TASK_STATUSES = new Set([
   'pending',
   'claimed',
   'running',
+  'paused',
 ])
 
 export function isTerminalTaskStatus(status: string) {
@@ -44,6 +46,8 @@ export function getTaskStatusText(status: string, language?: Language) {
       return translate('taskStatus.cancelled', language)
     case 'cancel_requested':
       return translate('taskStatus.cancel_requested', language)
+    case 'paused':
+      return translate('taskStatus.paused', language)
     case 'running':
       return translate('taskStatus.running', language)
     case 'claimed':
