@@ -280,6 +280,15 @@ def _create_local_ms_pool(extra: dict, proxy: str | None) -> 'BaseMailbox':
     )
 
 
+def _create_dispose_inbox_link(extra: dict, proxy: str | None) -> 'BaseMailbox':
+    from core.inbox_link_mailbox import DisposeInboxLinkMailboxPool
+
+    config = dict(extra or {})
+    if proxy and not config.get("proxy"):
+        config["proxy"] = proxy
+    return DisposeInboxLinkMailboxPool.from_config(config)
+
+
 def _create_laoudo(extra: dict, proxy: str | None) -> 'BaseMailbox':
     return LaoudoMailbox(
         auth_token=extra.get("laoudo_auth", ""),
@@ -310,6 +319,7 @@ MAILBOX_FACTORY_REGISTRY = {
     "testmail_api": _create_testmail,
     "outlook_email_api": _create_outlook_email,
     "local_ms_pool": _create_local_ms_pool,
+    "dispose_inbox_link": _create_dispose_inbox_link,
     "laoudo_api": _create_laoudo,
     # backward-compat fallback
     "generic_http": _create_generic_http,
@@ -322,6 +332,7 @@ MAILBOX_FACTORY_REGISTRY = {
     "testmail": _create_testmail,
     "outlook_email": _create_outlook_email,
     "local_ms": _create_local_ms_pool,
+    "dispose_link": _create_dispose_inbox_link,
     "laoudo": _create_laoudo,
 }
 
@@ -351,13 +362,15 @@ def create_mailbox(provider: str, extra: dict = None, proxy: str = None) -> 'Bas
     enabled_items = settings_repo.list_enabled("mailbox")
     enabled_keys = [str(item.provider_key or "").strip() for item in enabled_items if str(item.provider_key or "").strip()]
     ordered_keys: list[str] = [provider_key]
-    for key in explicit_fallbacks:
-        if key not in ordered_keys:
+    # A fixed inbox-link pool must never fall through to another provider.
+    if definition.driver_type != "dispose_inbox_link":
+        for key in explicit_fallbacks:
+            if key not in ordered_keys:
+                ordered_keys.append(key)
+        for key in enabled_keys:
+            if key == provider_key or key == "laoudo" or key in ordered_keys:
+                continue
             ordered_keys.append(key)
-    for key in enabled_keys:
-        if key == provider_key or key == "laoudo" or key in ordered_keys:
-            continue
-        ordered_keys.append(key)
 
     providers: list[tuple[str, BaseMailbox]] = []
     for key in ordered_keys:

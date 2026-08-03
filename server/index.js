@@ -10,6 +10,7 @@ import { audit, createDatabase, createSourceAccount, getSettings, nowIso, setSet
 import { ExtensionService } from "./extension-service.js";
 import { GoogleGmailClient } from "./google-gmail.js";
 import { ICloudImapClient, icloudImapConfiguration } from "./icloud-imap.js";
+import { InboxLinkMailboxService } from "./inbox-link-pool.js";
 import { MicrosoftGraphClient } from "./microsoft-graph.js";
 import { NfapiService, PUBLIC_AGENT_IDENTITY_ERROR_CODES } from "./nfapi-service.js";
 import { MicrosoftRegistrationRunnerService } from "./microsoft-registration-runner-service.js";
@@ -333,6 +334,10 @@ export function createApp(options = {}) {
     token: process.env.REGISTRATION_SERVICE_TOKEN,
     fetchFn: options.registrationFetchFn,
   });
+  const inboxLinkMailboxes = options.inboxLinkMailboxes || new InboxLinkMailboxService({
+    db,
+    encryptionKey: options.dataEncryptionKey ?? process.env.DATA_ENCRYPTION_KEY,
+  });
   const registration = new RegistrationService({
     db,
     graph: inbox,
@@ -340,6 +345,7 @@ export function createApp(options = {}) {
     publicBaseUrl,
     mailboxBaseUrl: process.env.REGISTRATION_MAILBOX_URL,
     browserUrl: process.env.REGISTRATION_BROWSER_URL,
+    inboxLinkMailboxes,
   });
   const nfapi = options.nfapi || new NfapiService({
     db,
@@ -497,6 +503,15 @@ export function createApp(options = {}) {
 
   app.get("/api/registration/options", async (_req, res, next) => {
     try { res.json(await registration.options()); } catch (error) { next(error); }
+  });
+  app.get("/api/inbox-link-mailboxes", (_req, res, next) => {
+    try { res.json(inboxLinkMailboxes.list()); } catch (error) { next(error); }
+  });
+  app.post("/api/inbox-link-mailboxes/import", (req, res, next) => {
+    try { res.status(201).json(inboxLinkMailboxes.import(req.body || {})); } catch (error) { next(error); }
+  });
+  app.delete("/api/inbox-link-mailboxes/:id", (req, res, next) => {
+    try { res.json(inboxLinkMailboxes.delete(req.params.id)); } catch (error) { next(error); }
   });
   app.put("/api/registration/proxies", (req, res, next) => {
     try { res.json(registration.saveProxyPool(req.body?.proxies)); } catch (error) { next(error); }
@@ -1320,7 +1335,7 @@ export function createApp(options = {}) {
     if (PUBLIC_AGENT_IDENTITY_ERROR_CODES.has(error?.code)) body.code = error.code;
     res.status(status).json(body);
   });
-  return { app, db, graph, gmail, icloud, inbox, extension, jobs, registration, nfapi, microsoftRegistration, microsoftRegistrationRunner };
+  return { app, db, graph, gmail, icloud, inbox, inboxLinkMailboxes, extension, jobs, registration, nfapi, microsoftRegistration, microsoftRegistrationRunner };
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, Cable, Check, CircleStop, ClipboardCopy, Copy, Database, ExternalLink, EyeOff, Fingerprint, Globe2, KeyRound, ListChecks, LoaderCircle, Mail, Monitor, Network, Play, RefreshCw, Save, ScrollText, Server, ShieldCheck, SlidersHorizontal, Trash2, UserPlus } from "lucide-react";
+import { AlertTriangle, Cable, Check, CircleStop, ClipboardCopy, Copy, Database, ExternalLink, EyeOff, Fingerprint, Globe2, KeyRound, Link2, ListChecks, LoaderCircle, Mail, Monitor, Network, Play, RefreshCw, Save, ScrollText, Server, ShieldCheck, SlidersHorizontal, Trash2, UserPlus } from "lucide-react";
 import { api } from "../api.js";
 import { planAgentIdentityBulk, runAgentIdentityBulk } from "../agent-identity-bulk.js";
 import { Button, ConfirmDialog, EmptyState, FormField, IconButton, LoadingBlock, Modal, Pagination, Segmented, StatusBadge, useToast } from "../components.jsx";
@@ -47,13 +47,13 @@ import {
   releasableStatuses,
 } from "./registration/registration-model.js";
 
-export default function RegistrationPage({ refreshKey }) {
+export default function RegistrationPage({ refreshKey, onNavigate, initialMailboxMode = "" }) {
   const [view, setView] = useState("tasks");
   const [options, setOptions] = useState(null);
   const [jobs, setJobs] = useState(null);
   const [accounts, setAccounts] = useState(null);
   const [accountsError, setAccountsError] = useState("");
-  const [form, setForm] = useState({ accountId: "", baseAddressId: "", addressMode: "base", count: 1, suffix: "", browserMode: "headed", proxySelection: "auto", autoContinuePostSignup: true, setPasswordAfterRegistration: false, password: "" });
+  const [form, setForm] = useState({ mailboxMode: initialMailboxMode === "inbox_link" ? "inbox_link" : "source", accountId: "", baseAddressId: "", addressMode: "base", count: 1, suffix: "", browserMode: "headed", proxySelection: "auto", autoContinuePostSignup: true, setPasswordAfterRegistration: false, password: "" });
   const [proxyText, setProxyText] = useState("");
   const [proxySaveFeedback, setProxySaveFeedback] = useState(null);
   const [starting, setStarting] = useState(false);
@@ -133,7 +133,7 @@ export default function RegistrationPage({ refreshKey }) {
         ...current,
         accountId,
         baseAddressId: validBase ? current.baseAddressId : String(preferredBase(account)?.id || ""),
-        count: direct ? 1 : current.count,
+        count: direct && current.mailboxMode !== "inbox_link" ? 1 : current.count,
         suffix: direct ? "" : current.suffix,
         proxySelection,
       };
@@ -141,6 +141,11 @@ export default function RegistrationPage({ refreshKey }) {
     setProxyInspectIndex((current) => current !== "" && Number(current) < data.proxies.length ? current : (data.proxies.length ? "0" : ""));
     return data;
   }, []);
+
+  useEffect(() => {
+    if (initialMailboxMode !== "inbox_link") return;
+    setForm((current) => ({ ...current, mailboxMode: "inbox_link" }));
+  }, [initialMailboxMode]);
 
   const loadJobs = useCallback(async () => {
     const requestId = ++registrationJobsRequest.current;
@@ -1108,8 +1113,19 @@ export default function RegistrationPage({ refreshKey }) {
   const isAgentIdentityResult = nfapiImportResult?.auth_mode === "agentIdentity"
     || nfapiImportMode === "agent_identity";
   const passwordSetupRunning = Boolean(passwordSetupTask && !passwordSetupTask.terminal);
-  const isDirectRegistration = selectedAccount?.registration_mode === "direct";
-  const isBaseAddressRegistration = !isDirectRegistration && form.addressMode === "base";
+  const isInboxLinkRegistration = form.mailboxMode === "inbox_link";
+  const inboxLinkMailboxCount = Number(options.inboxLinkMailboxes?.available || 0);
+  const requestedInboxLinkCount = Number(form.count);
+  const validInboxLinkCount = Number.isSafeInteger(requestedInboxLinkCount)
+    && requestedInboxLinkCount >= 1
+    && requestedInboxLinkCount <= inboxLinkMailboxCount;
+  const inboxLinkCountError = isInboxLinkRegistration && !Number.isSafeInteger(requestedInboxLinkCount)
+    ? "请输入整数"
+    : (isInboxLinkRegistration && requestedInboxLinkCount > inboxLinkMailboxCount
+      ? `当前仅 ${inboxLinkMailboxCount} 个可用`
+      : "");
+  const isDirectRegistration = !isInboxLinkRegistration && selectedAccount?.registration_mode === "direct";
+  const isBaseAddressRegistration = !isInboxLinkRegistration && !isDirectRegistration && form.addressMode === "base";
   const deleteCount = deleteTarget?.ids?.length || 0;
   const deleteTitle = deletingAccounts
     ? (deleteCount > 1 ? `删除选中的 ${deleteCount} 个注册账号？` : "删除这个注册账号？")
@@ -1136,21 +1152,32 @@ export default function RegistrationPage({ refreshKey }) {
       {view === "tasks" && <>
         <section className="registration-control-grid">
           <article className="panel registration-launch-panel">
-            <header className="panel-header"><div><h2>创建邮箱注册任务</h2><p>{isDirectRegistration ? "可分别选择 iCloud 邮箱别名或隐藏邮箱；两者均直接注册，不生成 +tag 分裂地址" : "自动生成独立分裂邮箱，并使用全新随机指纹环境"}</p></div><Fingerprint size={20} /></header>
+            <header className="panel-header"><div><h2>创建邮箱注册任务</h2><p>{isInboxLinkRegistration ? "从邮箱工作台已绑定的链接取件邮箱池中分配邮箱注册" : isDirectRegistration ? "可分别选择 iCloud 邮箱别名或隐藏邮箱；两者均直接注册，不生成 +tag 分裂地址" : "自动生成独立分裂邮箱，并使用全新随机指纹环境"}</p></div><Fingerprint size={20} /></header>
             <div className="registration-launch-form">
-              <div className="form-grid two">
+              <FormField label="注册邮箱来源"><select value={form.mailboxMode} onChange={(event) => {
+                const mailboxMode = event.target.value;
+                setForm((current) => ({
+                  ...current,
+                  mailboxMode,
+                  ...(mailboxMode === "inbox_link"
+                    ? { count: Math.max(1, Math.min(Number(current.count) || 1, inboxLinkMailboxCount || 1)), suffix: "" }
+                    : (selectedAccount?.registration_mode === "direct" ? { count: 1, suffix: "" } : {})),
+                }));
+              }}><option value="source">邮箱工作台地址</option><option value="inbox_link">链接取件邮箱池（可用 {inboxLinkMailboxCount}）</option></select></FormField>
+              {!isInboxLinkRegistration && <div className="form-grid two">
                 <FormField label="源头邮箱"><select value={form.accountId} onChange={(event) => changeAccount(event.target.value)}><option value="">请选择</option>{options.accounts.map((item) => <option key={item.id} value={item.id}>{item.email}</option>)}</select></FormField>
                 <FormField label={isDirectRegistration ? "iCloud 地址类型" : "基础地址"}><select value={form.baseAddressId} onChange={(event) => setForm({ ...form, baseAddressId: event.target.value })}><option value="">请选择</option>{selectedAccount?.bases.map((item) => <option key={item.id} value={item.id} disabled={Boolean(item.registration_disabled)}>{baseOptionLabel(item)}</option>)}</select></FormField>
-              </div>
-              <OccupiedAliasNotice base={selectedBase} />
-              {selectedBase?.registration_hint && <div className="inline-alert warning"><AlertTriangle size={16} /><span>{selectedBase.registration_hint}</span></div>}
-              {!isDirectRegistration && <FormField label="注册邮箱模式" hint="基础地址成功率更高；Plus 分裂适合目标站仍接受 +tag 时批量使用"><select value={form.addressMode} onChange={(event) => setForm({ ...form, addressMode: event.target.value, ...(event.target.value === "base" ? { count: 1, suffix: "" } : {}) })}><option value="base">直接使用基础地址（推荐）</option><option value="split">生成 +tag 分裂地址</option></select></FormField>}
+              </div>}
+              {!isInboxLinkRegistration && <OccupiedAliasNotice base={selectedBase} />}
+              {!isInboxLinkRegistration && selectedBase?.registration_hint && <div className="inline-alert warning"><AlertTriangle size={16} /><span>{selectedBase.registration_hint}</span></div>}
+              {!isInboxLinkRegistration && !isDirectRegistration && <FormField label="注册邮箱模式" hint="基础地址成功率更高；Plus 分裂适合目标站仍接受 +tag 时批量使用"><select value={form.addressMode} onChange={(event) => setForm({ ...form, addressMode: event.target.value, ...(event.target.value === "base" ? { count: 1, suffix: "" } : {}) })}><option value="base">直接使用基础地址（推荐）</option><option value="split">生成 +tag 分裂地址</option></select></FormField>}
+              {isInboxLinkRegistration && <div className={`inline-alert ${inboxLinkMailboxCount ? "success" : "warning"}`}><Link2 size={16} /><span>{inboxLinkMailboxCount ? `当前有 ${inboxLinkMailboxCount} 个已绑定链接邮箱可用；输入几个就分配几个。` : "没有可用的链接取件邮箱，请先到邮箱工作台绑定。"}<button type="button" className="bare-button registration-inline-link" onClick={() => onNavigate?.("inbox-link")}>管理链接邮箱</button></span></div>}
               <div className="form-grid two">
-                <FormField label="注册数量" hint={isDirectRegistration || isBaseAddressRegistration ? "当前模式直接使用基础地址，固定为 1 个任务" : form.suffix.trim() ? "批量注册会自动追加 -01、-02 编号" : "留空后缀时，每个账号生成随机分裂邮箱"}><input type="number" min="1" max="20" value={isDirectRegistration || isBaseAddressRegistration ? 1 : form.count} disabled={isDirectRegistration || isBaseAddressRegistration} onChange={(event) => setForm({ ...form, count: Number(event.target.value) })} /></FormField>
+                <FormField label="注册数量" error={inboxLinkCountError} hint={isInboxLinkRegistration ? "从已绑定可用池按绑定时间依次分配；输入多少就提交多少" : isDirectRegistration || isBaseAddressRegistration ? "当前模式直接使用基础地址，固定为 1 个任务" : form.suffix.trim() ? "批量注册会自动追加 -01、-02 编号" : "留空后缀时，每个账号生成随机分裂邮箱"}><input type="number" min="1" max={isInboxLinkRegistration ? 200 : 20} step="1" value={isDirectRegistration || isBaseAddressRegistration ? 1 : form.count} disabled={isDirectRegistration || isBaseAddressRegistration} onChange={(event) => setForm({ ...form, count: Number(event.target.value) })} /></FormField>
                 <FormField label="浏览器模式"><select value={form.browserMode} onChange={(event) => setForm({ ...form, browserMode: event.target.value })}><option value="headed">内嵌指纹浏览器</option><option value="headless" disabled={!form.autoContinuePostSignup}>后台指纹浏览器</option></select></FormField>
               </div>
               <div className="form-grid two">
-                {!isDirectRegistration && !isBaseAddressRegistration && <FormField label="邮箱分裂后缀" hint="例如 campaign；不填写则随机生成"><input maxLength={24} value={form.suffix} onChange={(event) => setForm({ ...form, suffix: event.target.value })} placeholder="留空自动随机" /></FormField>}
+                {!isInboxLinkRegistration && !isDirectRegistration && !isBaseAddressRegistration && <FormField label="邮箱分裂后缀" hint="例如 campaign；不填写则随机生成"><input maxLength={24} value={form.suffix} onChange={(event) => setForm({ ...form, suffix: event.target.value })} placeholder="留空自动随机" /></FormField>}
                 <FormField label="注册代理" hint="可固定使用某个已保存代理，也可自动轮换或直连"><select value={form.proxySelection} onChange={(event) => setForm({ ...form, proxySelection: event.target.value })}><option value="auto">自动轮换代理池（{options.proxies.length}）</option>{options.maskedProxies.map((item, index) => <option key={`${item}-${index}`} value={`proxy:${index}`}>固定使用：{proxySelectLabel(item, options.proxyMetadata?.[index])}</option>)}<option value="direct">直连（不使用代理）</option></select></FormField>
               </div>
               <div className="fresh-browser-note"><Fingerprint size={17} /><span><b>仅邮箱验证，每次全新地域指纹</b><small>清空 Cookie · 随机 OS/屏幕/Canvas/WebGL/设备参数 · 语言、时区和地理位置匹配实际出口 IP；官方强制要求手机号时任务停止</small></span></div>
@@ -1159,7 +1186,7 @@ export default function RegistrationPage({ refreshKey }) {
                 <label className="registration-password-option"><input type="checkbox" checked={form.setPasswordAfterRegistration} onChange={(event) => setForm({ ...form, setPasswordAfterRegistration: event.target.checked, ...(event.target.checked ? {} : { password: "" }) })} /><span><b>注册后设置密码</b><small>未勾选时，仅在官网注册流程强制要求密码时设置；勾选后会进入 ChatGPT 安全设置并再次读取邮箱验证码。</small></span></label>
               </div>
               <FormField label="指定密码（可选）" hint="填写后使用此密码；留空时由注册服务随机生成。长度 12-128 个字符，不能包含首尾空白。"><input type="password" autoComplete="new-password" minLength={12} maxLength={128} disabled={!form.setPasswordAfterRegistration} value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} placeholder={form.setPasswordAfterRegistration ? "留空自动生成随机密码" : "请先勾选注册后设置密码"} /></FormField>
-              <Button variant="primary" size="lg" icon={Play} loading={starting} disabled={!form.accountId || !form.baseAddressId || !options.service?.ok || Boolean(selectedBase?.registration_disabled)} onClick={start}>{isDirectRegistration ? "使用此 iCloud 地址注册" : isBaseAddressRegistration ? "使用此基础地址注册" : "开始注册"}</Button>
+              <Button variant="primary" size="lg" icon={Play} loading={starting} disabled={!options.service?.ok || (isInboxLinkRegistration ? !validInboxLinkCount : !form.accountId || !form.baseAddressId || Boolean(selectedBase?.registration_disabled))} onClick={start}>{isInboxLinkRegistration ? "使用链接邮箱池注册" : isDirectRegistration ? "使用此 iCloud 地址注册" : isBaseAddressRegistration ? "使用此基础地址注册" : "开始注册"}</Button>
             </div>
           </article>
 
@@ -1180,7 +1207,7 @@ export default function RegistrationPage({ refreshKey }) {
             <div className="data-table-wrap"><table className="data-table"><thead><tr><th className="select-column"><input type="checkbox" aria-label="选择全部可删除注册记录" checked={allJobsSelected} disabled={!deletableJobIds.length} onChange={toggleAllJobs} /></th><th>注册邮箱</th><th>随机身份</th><th>指纹会话</th><th>代理 / 出口 IP</th><th>状态</th><th>创建时间</th><th aria-label="操作" /></tr></thead><tbody>{jobs.map((job) => {
               const selectable = deletableStatuses.has(job.status);
               const checked = selectedJobIds.includes(job.id);
-              return <tr className={checked ? "selected-row" : ""} key={job.id}><td className="select-column"><input type="checkbox" aria-label={`选择 ${job.email}`} checked={checked} disabled={!selectable} onChange={() => toggleJob(job.id)} /></td><td><button className="registration-email-button" onClick={() => copyText(job.email).then(() => toast("邮箱已复制"))}>{job.email}<Copy size={13} /></button><small className="registration-source">{job.source_email || "源邮箱已删除"}</small></td><td><div className="registration-identity"><b>{job.display_name || "等待生成"}</b><small>{job.birth_date ? `${job.birth_date} · ${ageFromBirth(job.birth_date)} 岁` : "姓名和年龄自动随机"}</small></div></td><td><code className="fingerprint-code">{job.fingerprint_id}</code><small className="registration-source">{job.browser_mode === "headed" ? "内嵌 Camoufox" : "后台 Camoufox"}</small></td><td><div className="registration-identity"><b>{job.proxy_label}</b><small>{job.exit_ip ? `出口 ${job.exit_ip}` : "等待识别出口 IP"}</small></div></td><td><div className="registration-status"><StatusBadge status={job.status}>{jobStatusLabel(job)}</StatusBadge>{job.failure_reason === "user_already_exists" && <small>建议更换基础地址</small>}</div></td><td><span className="muted-cell">{formatDate(job.created_at)}</span></td><td><JobCommands job={job} onLogs={openLogs} onCancel={cancel} onRelease={setReleaseTarget} onDelete={(item) => setDeleteTarget({ kind: "job", ids: [item.id], item })} /></td></tr>;
+              return <tr className={checked ? "selected-row" : ""} key={job.id}><td className="select-column"><input type="checkbox" aria-label={`选择 ${job.email}`} checked={checked} disabled={!selectable} onChange={() => toggleJob(job.id)} /></td><td><button className="registration-email-button" onClick={() => copyText(job.email).then(() => toast("邮箱已复制"))}>{job.email}<Copy size={13} /></button><small className="registration-source">{job.source_email || (job.account_id ? "源邮箱已删除" : "链接取件邮箱")}</small></td><td><div className="registration-identity"><b>{job.display_name || "等待生成"}</b><small>{job.birth_date ? `${job.birth_date} · ${ageFromBirth(job.birth_date)} 岁` : "姓名和年龄自动随机"}</small></div></td><td><code className="fingerprint-code">{job.fingerprint_id}</code><small className="registration-source">{job.browser_mode === "headed" ? "内嵌 Camoufox" : "后台 Camoufox"}</small></td><td><div className="registration-identity"><b>{job.proxy_label}</b><small>{job.exit_ip ? `出口 ${job.exit_ip}` : "等待识别出口 IP"}</small></div></td><td><div className="registration-status"><StatusBadge status={job.status}>{jobStatusLabel(job)}</StatusBadge>{job.failure_reason === "user_already_exists" && <small>建议更换基础地址</small>}</div></td><td><span className="muted-cell">{formatDate(job.created_at)}</span></td><td><JobCommands job={job} onLogs={openLogs} onCancel={cancel} onRelease={setReleaseTarget} onDelete={(item) => setDeleteTarget({ kind: "job", ids: [item.id], item })} /></td></tr>;
             })}</tbody></table></div>
             <div className="registration-mobile-list">{jobs.map((job) => {
               const selectable = deletableStatuses.has(job.status);

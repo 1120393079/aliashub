@@ -2,6 +2,21 @@
 
 All notable changes to AliasHub are documented in this file.
 
+## Unreleased
+
+### Added
+
+- Added a mailbox-workspace page for binding `email + dispose.lol inbox link`
+  rows and a matching ChatGPT registration source that allocates exactly one
+  saved mailbox to each registration task.
+- Added bundled-worker support for dispose.lol inbox-link message snapshots,
+  new-message OTP polling, fixed-pool capacity checks, and per-task allocation.
+
+### Security
+
+- Inbox-link keys are encrypted with AES-256-GCM in AliasHub, masked in API and
+  UI responses, and omitted from registration logs and public test fixtures.
+
 ## [1.1.0] - 2026-07-26
 
 ### Added

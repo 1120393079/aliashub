@@ -142,9 +142,10 @@ service name must be supplied explicitly. Docker Compose users do not need it.
 
 Keep `.env` and `data/` together in every backup. Changing or losing
 `DATA_ENCRYPTION_KEY` makes previously encrypted OAuth tokens, iCloud
-App-specific passwords, and service credentials unreadable. Store backups
+App-specific passwords, inbox-link keys, and service credentials unreadable. Store backups
 outside the web root and encrypt them. Set `DATA_ENCRYPTION_KEY` before adding
-iCloud Mail; AliasHub refuses iCloud credential storage when it is unset.
+iCloud Mail or binding dispose.lol inbox links; AliasHub refuses credential
+storage when it is unset.
 
 To use a different local port before the first start:
 

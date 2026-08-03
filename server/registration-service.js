@@ -28,6 +28,7 @@ import {
   sanitizeRegistrationRemoteValue,
   statusCheckProxyRoute,
 } from "./registration-proxy.js";
+import { serializeInboxLinkEntry } from "./inbox-link-pool.js";
 
 const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled", "interrupted"]);
 const ACTIVE_STATUSES = new Set(["pending", "claimed", "running", "cancel_requested"]);
@@ -1164,13 +1165,14 @@ function identityFromEvents(events = []) {
 }
 
 export class RegistrationService {
-  constructor({ db, graph, client, publicBaseUrl, mailboxBaseUrl, browserUrl } = {}) {
+  constructor({ db, graph, client, publicBaseUrl, mailboxBaseUrl, browserUrl, inboxLinkMailboxes = null } = {}) {
     this.db = db;
     this.graph = graph;
     this.client = client;
     this.connectorKey = getSetting(db, "registration_connector_key", "");
     this.mailboxBaseUrl = String(mailboxBaseUrl || publicBaseUrl || "").replace(/\/$/, "");
     this.browserUrl = browserUrl || "/alias-hub/browser/vnc.html?autoconnect=true&resize=scale&path=websockify";
+    this.inboxLinkMailboxes = inboxLinkMailboxes;
     this.scanPromises = new Map();
     this.accountStatusRefreshAttempts = new Map();
     this.accountStatusCheckOutcomes = new Map();
@@ -1350,13 +1352,26 @@ export class RegistrationService {
       proxies,
       maskedProxies: proxies.map(maskProxy),
       proxyMetadata: proxies.map(proxyMetadata),
+      inboxLinkMailboxes: this.inboxLinkMailboxes?.list() || {
+        total: 0, available: 0, used: 0, in_progress: 0, items: [],
+      },
       browserUrl: this.browserUrl,
       service: await this.client.health(),
     };
   }
 
   async createJobs(input = {}) {
-    const count = Math.max(1, Math.min(20, Number(input.count) || 1));
+    const mailboxMode = String(input.mailboxMode || "source").trim().toLowerCase();
+    if (!new Set(["source", "inbox_link"]).has(mailboxMode)) {
+      throw Object.assign(new Error("注册邮箱来源无效"), { status: 400 });
+    }
+    const requestedCount = Number(input.count);
+    if (mailboxMode === "inbox_link" && (!Number.isSafeInteger(requestedCount) || requestedCount < 1 || requestedCount > 200)) {
+      throw Object.assign(new Error("链接取件注册数量必须是 1 到 200 的整数"), { status: 400 });
+    }
+    const count = mailboxMode === "inbox_link"
+      ? requestedCount
+      : Math.max(1, Math.min(20, requestedCount || 1));
     const addressMode = String(input.addressMode || "split").trim().toLowerCase();
     if (!new Set(["split", "base"]).has(addressMode)) {
       throw Object.assign(new Error("注册邮箱模式无效"), { status: 400 });
@@ -1389,6 +1404,19 @@ export class RegistrationService {
       throw Object.assign(new Error("指定密码长度必须为 12 到 128 个字符"), { status: 400 });
     }
     const browserMode = autoContinuePostSignup ? requestedBrowserMode : "headed";
+    if (mailboxMode === "inbox_link") {
+      if (!this.inboxLinkMailboxes) {
+        throw Object.assign(new Error("链接取件邮箱服务尚未配置"), { status: 503 });
+      }
+      return this.createInboxLinkJobs({
+        input,
+        entries: this.inboxLinkMailboxes.availableEntries(count),
+        browserMode,
+        requestedPassword,
+        setPasswordAfterRegistration,
+        autoContinuePostSignup,
+      });
+    }
     const account = this.db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(Number(input.accountId));
     if (!account) throw Object.assign(new Error("源头邮箱不存在"), { status: 404 });
     if (account.status !== "connected") throw Object.assign(new Error("请先完成这个源头邮箱的连接验证"), { status: 409 });
@@ -1528,6 +1556,97 @@ export class RegistrationService {
           SET status = 'failed', stage = 'submit', message = ?, failure_reason = ?, finished_at = ?, updated_at = ?
           WHERE id = ?
         `).run("注册任务提交失败", failureReason, finishedAt, finishedAt, jobId);
+      }
+      jobs.push(publicRegistrationJob(this.getJob(jobId)));
+    }
+    return jobs;
+  }
+
+  async createInboxLinkJobs({
+    input,
+    entries,
+    browserMode,
+    requestedPassword,
+    setPasswordAfterRegistration,
+    autoContinuePostSignup,
+  }) {
+    const proxies = resolveJobProxies(input, this.getProxyPool());
+    const usedProxySessions = new Set();
+    const reservations = this.db.transaction(() => {
+      for (const entry of entries) {
+        const existing = this.db.prepare(`
+          SELECT status FROM registration_jobs
+          WHERE lower(email) = lower(?)
+            AND (
+              status = 'completed'
+              OR (
+                deleted_at IS NULL
+                AND status IN ('queued', 'pending', 'claimed', 'running', 'cancel_requested')
+              )
+            )
+          ORDER BY created_at DESC, id DESC LIMIT 1
+        `).get(entry.email);
+        if (existing) {
+          const message = existing.status === "completed"
+            ? `${entry.email} 已经用于成功注册`
+            : `${entry.email} 已有进行中的注册任务`;
+          throw Object.assign(new Error(message), { status: 409 });
+        }
+      }
+
+      return entries.map((entry, index) => {
+        const proxyTemplate = proxies.length ? proxies[index % proxies.length] : "";
+        const proxy = materializeProxySession(proxyTemplate, usedProxySessions);
+        const now = nowIso();
+        const result = this.db.prepare(`
+          INSERT INTO registration_jobs (
+            account_id, address_id, base_address_id, email, status, stage, browser_mode, proxy_label, fingerprint_id,
+            message, created_at, updated_at
+          ) VALUES (NULL, NULL, NULL, ?, 'queued', 'queued', ?, ?, ?, '正在提交链接取件注册任务', ?, ?)
+        `).run(entry.email, browserMode, maskProxy(proxy), crypto.randomUUID().slice(0, 12), now, now);
+        return { entry, proxy, jobId: Number(result.lastInsertRowid) };
+      });
+    })();
+
+    const jobs = [];
+    for (const { entry, proxy, jobId } of reservations) {
+      try {
+        const task = await this.client.createTask({
+          platform: "chatgpt",
+          email: entry.email,
+          password: requestedPassword || null,
+          count: 1,
+          concurrency: 1,
+          proxy: proxy || null,
+          executor_type: browserMode,
+          captcha_solver: "auto",
+          extra: {
+            identity_provider: "mailbox",
+            mail_provider: "dispose_inbox_link",
+            mail_source_provider: "dispose_inbox_link",
+            dispose_inbox_link_pool_text: serializeInboxLinkEntry(entry),
+            dispose_inbox_link_poll_interval: "3",
+            fresh_browser_context: true,
+            random_fingerprint: true,
+            email_only_registration: true,
+            disable_phone_verification: true,
+            phone_verification_policy: "forbid",
+            allow_chatgpt_registration_proxy: true,
+            set_password_after_registration: setPasswordAfterRegistration,
+            auto_continue_post_signup: autoContinuePostSignup,
+          },
+        });
+        const taskId = String(task.task_id || task.id || "");
+        this.db.prepare("UPDATE registration_jobs SET external_task_id = ?, message = ?, updated_at = ? WHERE id = ?")
+          .run(taskId, "链接取件任务已提交，等待执行", nowIso(), jobId);
+      } catch (error) {
+        const failureReason = remoteRegistrationFailureReason(error);
+        const finishedAt = nowIso();
+        this.db.prepare(`
+          UPDATE registration_jobs
+          SET status = 'failed', stage = 'submit', message = ?, failure_reason = ?, finished_at = ?, updated_at = ?
+          WHERE id = ?
+        `).run("链接取件注册任务提交失败", failureReason, finishedAt, finishedAt, jobId);
       }
       jobs.push(publicRegistrationJob(this.getJob(jobId)));
     }

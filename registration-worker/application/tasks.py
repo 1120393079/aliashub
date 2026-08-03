@@ -1497,6 +1497,7 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
     # concurrent initialization issues (e.g. MoeMail auto-registering
     # multiple provider accounts simultaneously).
     shared_mailbox = None
+    mailbox_attempt_capacity: int | None = None
     try:
         from core.base_identity import normalize_identity_provider
         from core.base_mailbox import create_mailbox
@@ -1511,6 +1512,17 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
                 extra=extra,
                 proxy=registration_base_proxy or None,
             )
+            available_count = getattr(shared_mailbox, "available_count", None)
+            if callable(available_count):
+                available_count = available_count()
+            if available_count is not None:
+                available_count = int(available_count)
+                mailbox_attempt_capacity = available_count
+                if count > available_count:
+                    raise RuntimeError(
+                        f"链接取件邮箱池数量不足：注册数量 {count}，有效邮箱仅 {available_count} 条"
+                    )
+                logger.log(f"链接取件邮箱池已加载 {available_count} 条，本次注册使用 {count} 条")
     except Exception as exc:
         logger.log(f"邮箱初始化失败: {exc}", level="error")
         logger.finish(TASK_STATUS_FAILED, error=f"邮箱初始化失败: {exc}")
@@ -1826,6 +1838,8 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
             max_attempts = max(
                 count if not herosms_enabled else max_success * 3, 1
             )
+        if mailbox_attempt_capacity is not None:
+            max_attempts = min(max_attempts, mailbox_attempt_capacity)
 
         def _hero_phone_alive() -> bool:
             if not (herosms_enabled and hero_reuse_to_max):

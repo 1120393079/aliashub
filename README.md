@@ -18,6 +18,9 @@ the installation that you control.
 - Coordinate account registration through the bundled optional registration
   worker, including browser/noVNC links, proxy selection, direct Microsoft
   base-address registration, and structured policy-failure reporting.
+- Bind existing mailbox addresses to dispose.lol inbox links in the mailbox
+  workspace, then allocate one saved mailbox per ChatGPT registration task.
+  Inbox-link keys are encrypted in AliasHub and masked in API/UI responses.
 - Refresh registered-account availability and plan type on demand, including
   Free, Go, Plus, Pro, Team, Business, Enterprise, Edu, Trial, and unknown
   future plans. Dynamic proxies are rechecked across independent sessions, and
@@ -177,8 +180,8 @@ import disabled and use the OAuth flow instead.
 Runtime state belongs in `.env` and `data/`; both are excluded from Git. Full
 mode stores the worker database in `data/registration-worker/`. Back up `.env`
 and the complete `data/` directory together. Losing `DATA_ENCRYPTION_KEY` makes
-encrypted OAuth tokens, iCloud App-specific passwords, and stored service
-credentials unreadable.
+encrypted OAuth tokens, iCloud App-specific passwords, inbox-link keys, and
+stored service credentials unreadable.
 
 Never commit:
 
@@ -186,6 +189,7 @@ Never commit:
 - OAuth tokens, callback URLs/codes, administrator passwords, or session keys;
 - connector pairing keys, registration-worker tokens, SUB2 API Keys, or proxy
   credentials;
+- mailbox inbox links or their embedded access keys;
 - private deployment hostnames, addresses, or production configuration.
 
 See [docs/RELEASING.md](docs/RELEASING.md) before making the repository public.

@@ -235,6 +235,20 @@ const schema = `
   CREATE INDEX IF NOT EXISTS idx_registration_jobs_email ON registration_jobs(email, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_registration_jobs_external ON registration_jobs(external_task_id);
 
+  CREATE TABLE IF NOT EXISTS inbox_link_mailboxes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    inbox_key_hash TEXT NOT NULL UNIQUE,
+    inbox_key_encrypted TEXT NOT NULL,
+    inbox_key_preview TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'disabled')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_inbox_link_mailboxes_status
+    ON inbox_link_mailboxes(status, created_at DESC);
+
   CREATE TABLE IF NOT EXISTS registration_password_setup_tasks (
     task_id TEXT PRIMARY KEY,
     external_account_id INTEGER NOT NULL CHECK(external_account_id > 0),

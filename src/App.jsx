@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Bell, BookOpen, Bot, ChevronDown, Inbox, KeyRound, Layers, LayoutDashboard, LogOut, Mail, Menu, Moon, Plus, Settings, Sun, WandSparkles, X } from "lucide-react";
+import { Bell, BookOpen, Bot, ChevronDown, Inbox, KeyRound, Layers, LayoutDashboard, Link2, LogOut, Mail, Menu, Moon, Plus, Settings, Sun, WandSparkles, X } from "lucide-react";
 import { api } from "./api.js";
 import { Button, IconButton, LoadingBlock, MicrosoftMark, ProviderMark, useToast } from "./components.jsx";
 import OverviewPage from "./pages/Overview.jsx";
@@ -7,6 +7,7 @@ import SourcesPage from "./pages/Sources.jsx";
 import FactoryPage from "./pages/Factory.jsx";
 import RegistrationPage from "./pages/Registration.jsx";
 import MicrosoftRegistrationPage from "./pages/MicrosoftRegistration.jsx";
+import InboxLinkRegistrationPage from "./pages/InboxLinkRegistration.jsx";
 import InboxPage from "./pages/Inbox.jsx";
 import CodesPage from "./pages/Codes.jsx";
 import AddressesPage from "./pages/Addresses.jsx";
@@ -19,13 +20,14 @@ const pages = {
   inbox: { label: "邮件中心", subtitle: "集中接收所有绑定邮箱的邮件", icon: Inbox },
   codes: { label: "验证码中心", subtitle: "集中查看所有源头号的验证码", icon: KeyRound },
   addresses: { label: "地址仓库", subtitle: "全部基础地址和分裂地址", icon: BookOpen },
+  "inbox-link": { label: "链接取件", subtitle: "绑定邮箱取件链接并用于批量注册", icon: Link2 },
   "microsoft-registration": { label: "微软邮箱注册", subtitle: "Go 注册机回传与账号归档", icon: MicrosoftMark },
   registration: { label: "ChatGPT注册", subtitle: "自动注册与账号集中管理", icon: Bot, featured: true },
   settings: { label: "系统设置", subtitle: "服务与数据配置", icon: Settings },
 };
 
 const mobilePageKeys = ["overview", "sources", "inbox", "addresses", "registration"];
-const emailWorkspacePageKeys = ["sources", "factory", "inbox", "codes", "addresses", "microsoft-registration"];
+const emailWorkspacePageKeys = ["sources", "factory", "inbox", "codes", "addresses", "inbox-link", "microsoft-registration"];
 
 function LoginPage({ onAuthenticated }) {
   const [form, setForm] = useState({ username: "admin", password: "" });
@@ -109,7 +111,8 @@ export default function App() {
     const props = { refreshKey, onDataChange: changed, onNavigate: navigate };
     if (page === "sources") return <SourcesPage {...props} addOpen={addAccountOpen} setAddOpen={setAddAccountOpen} initialAccountId={routeState.accountId} connectAccount={routeState.connect} />;
     if (page === "factory") return null;
-    if (page === "registration") return <RegistrationPage {...props} />;
+    if (page === "registration") return <RegistrationPage {...props} initialMailboxMode={routeState.mailboxMode} />;
+    if (page === "inbox-link") return <InboxLinkRegistrationPage {...props} />;
     if (page === "microsoft-registration") return <MicrosoftRegistrationPage {...props} />;
     if (page === "inbox") return <InboxPage {...props} initialAccountId={routeState.accountId} />;
     if (page === "codes") return <CodesPage {...props} initialAccountId={routeState.accountId} />;
