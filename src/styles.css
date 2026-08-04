@@ -478,6 +478,7 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .selection-bar { min-height: 46px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 10px 7px 14px; border: 1px solid color-mix(in srgb, var(--coral) 25%, var(--line)); border-radius: 7px; background: var(--coral-soft); color: var(--coral); font-size: 11px; }
 .search-box { display: flex; align-items: center; gap: 8px; height: 38px; width: 270px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface); color: var(--text-faint); }
 .search-box.fluid { width: 100%; }
+.search-box.registration-account-search { width: min(250px, 24vw); background: var(--surface); }
 .search-box input { min-height: 0; height: 34px; border: 0; padding: 0; box-shadow: none; background: transparent; }
 .compact-select { width: auto; max-width: 220px; height: 38px; min-height: 38px; }
 
@@ -1125,6 +1126,7 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
   .registration-mobile-facts { grid-template-columns: 1fr; }
   .registration-bulk-bar { flex-wrap: wrap; gap: 8px; padding: 8px 10px; }
   .registration-group-filter { order: 3; width: 100%; max-width: none; }
+  .search-box.registration-account-search { order: 2; width: 100%; }
   .registration-bulk-bar > span { margin-left: 0; flex: 1; text-align: right; }
   .registration-bulk-bar > .button { width: 100%; }
   .registration-account-toolbar { padding: 9px 10px; }

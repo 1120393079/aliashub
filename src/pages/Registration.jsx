@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, Cable, Check, CircleStop, ClipboardCopy, Copy, Database, ExternalLink, EyeOff, Fingerprint, Globe2, KeyRound, Link2, ListChecks, LoaderCircle, Mail, Monitor, Network, Pause, Play, RefreshCw, Save, ScrollText, Server, ShieldCheck, SlidersHorizontal, Trash2, UserPlus } from "lucide-react";
+import { AlertTriangle, Cable, Check, CircleStop, ClipboardCopy, Copy, Database, ExternalLink, EyeOff, Fingerprint, Globe2, KeyRound, Link2, ListChecks, LoaderCircle, Mail, Monitor, Network, Pause, Play, RefreshCw, Save, ScrollText, Search, Server, ShieldCheck, SlidersHorizontal, Trash2, UserPlus } from "lucide-react";
 import { api } from "../api.js";
 import { planAgentIdentityBulk, runAgentIdentityBulk } from "../agent-identity-bulk.js";
 import { Button, ConfirmDialog, EmptyState, FormField, IconButton, LoadingBlock, Modal, Pagination, Segmented, StatusBadge, useToast } from "../components.jsx";
@@ -76,6 +76,7 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
   const accountSignalRefreshBusy = useRef(false);
   const lastFocusedAccountRefreshAt = useRef(0);
   const [accountGroupFilter, setAccountGroupFilter] = useState("all");
+  const [accountSearch, setAccountSearch] = useState("");
   const [accountPage, setAccountPage] = useState(1);
   const [accountPageSize, setAccountPageSize] = useState(initialAccountPageSize);
   const [editingAccount, setEditingAccount] = useState(null);
@@ -331,11 +332,15 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
     .filter((item) => !accountGroupMeta(item).name).length, [accounts]);
   const visibleAccountItems = useMemo(() => {
     const items = accounts?.items || [];
-    if (accountGroupFilter === "all") return items;
-    if (accountGroupFilter === "ungrouped") return items.filter((item) => !accountGroupMeta(item).name);
-    const groupName = accountGroupFilter.startsWith("group:") ? accountGroupFilter.slice(6) : "";
-    return items.filter((item) => accountGroupMeta(item).name === groupName);
-  }, [accounts, accountGroupFilter]);
+    const groupedItems = accountGroupFilter === "all"
+      ? items
+      : accountGroupFilter === "ungrouped"
+        ? items.filter((item) => !accountGroupMeta(item).name)
+        : items.filter((item) => accountGroupMeta(item).name === (accountGroupFilter.startsWith("group:") ? accountGroupFilter.slice(6) : ""));
+    const query = accountSearch.trim().toLocaleLowerCase();
+    if (!query) return groupedItems;
+    return groupedItems.filter((item) => String(item.email || "").toLocaleLowerCase().includes(query));
+  }, [accounts, accountGroupFilter, accountSearch]);
   const accountPages = Math.max(1, Math.ceil(visibleAccountItems.length / accountPageSize));
   const safeAccountPage = Math.min(accountPage, accountPages);
   const accountPageOffset = (safeAccountPage - 1) * accountPageSize;
@@ -531,6 +536,12 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
   const changeAccountGroupFilter = (value) => {
     if (importingNfapi) return;
     setAccountGroupFilter(value);
+    setAccountPage(1);
+    setSelectedAccountIds([]);
+  };
+  const changeAccountSearch = (value) => {
+    if (importingNfapi) return;
+    setAccountSearch(value);
     setAccountPage(1);
     setSelectedAccountIds([]);
   };
@@ -1295,6 +1306,7 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
           <div className="registration-account-toolbar">
             <div className="registration-account-filters">
               <label className="registration-select-page"><input type="checkbox" checked={allAccountsSelected} disabled={!accountIds.length || importingNfapi} onChange={toggleAllAccounts} /><span>全选本页</span></label>
+              <label className="search-box registration-account-search"><Search size={16} /><input type="search" autoComplete="off" spellCheck="false" aria-label="按邮箱查询注册账号" value={accountSearch} disabled={importingNfapi} onChange={(event) => changeAccountSearch(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") changeAccountSearch(""); }} placeholder="输入邮箱查询账号" /></label>
               <select className="compact-select registration-group-filter" aria-label="按账号分组筛选" value={accountGroupFilter} disabled={importingNfapi} onChange={(event) => changeAccountGroupFilter(event.target.value)}>
                 <option value="all">全部分组（{accounts.items.length}）</option>
                 <option value="ungrouped">未分组（{ungroupedAccountCount}）</option>
@@ -1329,7 +1341,7 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
               const nfapiState = nfapiAccountState(item);
               return <article className={checked ? "selected" : ""} key={item.id}><header><input type="checkbox" aria-label={`选择 ${item.email}`} checked={checked} disabled={importingNfapi} onChange={() => toggleAccount(item.id)} /><AccountSignalCell item={item} compact /><time>{formatDate(item.created_at)}</time></header><AccountNameGroup item={item} mobile /><button onClick={() => copyText(item.email).then(() => toast("邮箱已复制"))}>{item.email}<Copy size={14} /></button><div className="registration-mobile-credentials"><PasswordCell value={item.password} status={item.password_status} error={item.password_error} available={item.password_available} onCopy={() => copyText(item.password).then(() => toast("密码已复制"))} /><AccessTokenCell available={item.access_token_available} loading={copyingTokenId === item.id} onCopy={() => copyAccessToken(item)} /></div><div className="registration-mobile-facts"><div className="registration-account-exit"><Globe2 size={14} /><span><small>出口 IP</small><b>{item.exit_ip || "未记录"}</b></span></div><div className="registration-account-exit"><Database size={14} /><span><small>NFapi</small><b>{nfapiState.label}{nfapiState.shortLived ? " · 短期凭据" : ""}</b></span></div></div>{nfapiState.error && <div className="inline-alert error"><AlertTriangle size={14} /><span>{nfapiState.error}</span></div>}<footer><span>{item.display_name || "未记录"}</span><AccountCommands item={item} checking={checkingAccountSignals} busy={importingNfapi} onRefresh={refreshAccountSignals} onPassword={openPasswordSetup} onNfapi={openNfapiImporter} onEdit={openAccountEditor} onCopy={copyRegisteredAccount} onDelete={(target) => setDeleteTarget({ kind: "account", ids: [target.id], item: target })} /></footer></article>;
             })}</div>
-          </> : <EmptyState icon={KeyRound} title="这个分组还没有账号" action={<Button onClick={() => changeAccountGroupFilter("all")}>查看全部账号</Button>} />}
+          </> : <EmptyState icon={KeyRound} title={accountSearch.trim() ? "没有匹配的账号" : "这个分组还没有账号"} description={accountSearch.trim() ? `没有找到邮箱包含“${accountSearch.trim()}”的账号` : undefined} action={accountSearch.trim() ? <Button onClick={() => changeAccountSearch("")}>清除查询</Button> : <Button onClick={() => changeAccountGroupFilter("all")}>查看全部账号</Button>} />}
           <div className="table-footer registration-account-footer">
             <div className="registration-account-range"><strong>{accountRangeStart}–{accountRangeEnd}</strong><span>筛选后 {visibleAccountItems.length} 个 · 总计 {accounts.total} 个</span></div>
             <div className="registration-account-pagination">
