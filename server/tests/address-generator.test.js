@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { codeFromText, microsoftDomains, normalizeMicrosoftEmail, splitAddress } from "../address-generator.js";
+import {
+  codeFromText,
+  isIcloudImportedStrategy,
+  microsoftDomains,
+  normalizeIcloudCustomDomainEmail,
+  normalizeMicrosoftEmail,
+  splitAddress,
+} from "../address-generator.js";
 
 test("accepts supported Microsoft source domains", () => {
   const expectedDomains = [
@@ -26,6 +33,13 @@ test("splits primary and official aliases independently", () => {
   assert.equal(splitAddress("main@hotmail.com", { prefix: "shop", mode: "sequence", sequence: 1 }), "main+shop-0001@hotmail.com");
   assert.equal(splitAddress("official@outlook.com", { prefix: "shop", mode: "sequence", sequence: 1 }), "official+shop-0001@outlook.com");
   assert.equal(splitAddress("main@hotmail.com", { customTag: "gpt-campaign" }), "main+gpt-campaign@hotmail.com");
+});
+
+test("accepts iCloud custom-domain addresses as imported direct-registration addresses", () => {
+  assert.equal(normalizeIcloudCustomDomainEmail("Apple@Ningdabbs.cn"), "apple@ningdabbs.cn");
+  assert.equal(normalizeIcloudCustomDomainEmail("name@icloud.com"), "");
+  assert.equal(normalizeIcloudCustomDomainEmail("relay@privaterelay.appleid.com"), "");
+  assert.equal(isIcloudImportedStrategy("icloud_custom_domain"), true);
 });
 
 test("extracts contextual verification codes", () => {

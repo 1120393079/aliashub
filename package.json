@@ -1,6 +1,6 @@
 {
   "name": "aliashub",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Self-hosted email alias and verification-code hub with optional account registration and SUB2-compatible integration.",
   "private": true,
   "license": "AGPL-3.0-only",
@@ -39,6 +39,7 @@
     "express": "^4.21.2",
     "imapflow": "1.4.8",
     "lucide-react": "^0.468.0",
+    "pg": "^8.22.0",
     "postal-mime": "2.7.5",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"

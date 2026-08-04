@@ -20,7 +20,7 @@ const pages = {
   inbox: { label: "邮件中心", subtitle: "集中接收所有绑定邮箱的邮件", icon: Inbox },
   codes: { label: "验证码中心", subtitle: "集中查看所有源头号的验证码", icon: KeyRound },
   addresses: { label: "地址仓库", subtitle: "全部基础地址和分裂地址", icon: BookOpen },
-  "inbox-link": { label: "链接取件", subtitle: "绑定邮箱取件链接并用于批量注册", icon: Link2 },
+  "inbox-link": { label: "链接取件", subtitle: "使用邮箱取件链接批量注册", icon: Link2 },
   "microsoft-registration": { label: "微软邮箱注册", subtitle: "Go 注册机回传与账号归档", icon: MicrosoftMark },
   registration: { label: "ChatGPT注册", subtitle: "自动注册与账号集中管理", icon: Bot, featured: true },
   settings: { label: "系统设置", subtitle: "服务与数据配置", icon: Settings },
@@ -167,7 +167,7 @@ export default function App() {
           })}
         </nav>
         <div className="sidebar-provider"><span className="provider-mark-stack"><ProviderMark provider="microsoft" size={25} /><ProviderMark provider="google" size={25} /><ProviderMark provider="icloud" size={25} /></span><span className="sidebar-provider-copy"><b>Microsoft + Google + iCloud</b><small>Outlook · Gmail · iCloud</small></span><i className="online-dot" /></div>
-        <div className="sidebar-footer">{auth.authEnabled && <button onClick={logout}><LogOut size={17} /><span>退出管理台</span></button>}<span className="version">v1.1</span></div>
+        <div className="sidebar-footer">{auth.authEnabled && <button onClick={logout}><LogOut size={17} /><span>退出管理台</span></button>}<span className="version">v1.0</span></div>
       </aside>
       {mobileNav && <button className="sidebar-overlay" aria-label="关闭菜单" onClick={() => setMobileNav(false)} />}
 

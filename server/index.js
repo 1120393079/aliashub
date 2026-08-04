@@ -5,14 +5,16 @@ import "dotenv/config";
 import express from "express";
 import { deleteSplitAddresses, generateSplits, importIcloudAliases, JobRunner, parseJson, publicAccount, syncOfficialAddresses } from "./account-service.js";
 import { createAuth } from "./auth.js";
-import { isIcloudImportedStrategy, microsoftDomains, normalizeIcloudAliasEmail, normalizeMicrosoftEmail } from "./address-generator.js";
+import { isIcloudImportedStrategy, microsoftDomains, normalizeMicrosoftEmail } from "./address-generator.js";
 import { audit, createDatabase, createSourceAccount, getSettings, nowIso, setSetting } from "./db.js";
 import { ExtensionService } from "./extension-service.js";
+import { registerEzCaptchaAdapter } from "./ez-captcha-adapter.js";
 import { GoogleGmailClient } from "./google-gmail.js";
 import { ICloudImapClient, icloudImapConfiguration } from "./icloud-imap.js";
 import { InboxLinkMailboxService } from "./inbox-link-pool.js";
 import { MicrosoftGraphClient } from "./microsoft-graph.js";
 import { NfapiService, PUBLIC_AGENT_IDENTITY_ERROR_CODES } from "./nfapi-service.js";
+import { NfapiCredentialStore, NfapiCredentialSync } from "./nfapi-credential-sync.js";
 import { MicrosoftRegistrationRunnerService } from "./microsoft-registration-runner-service.js";
 import { MicrosoftRegistrationService } from "./microsoft-registration-service.js";
 import { RegistrationClient } from "./registration-client.js";
@@ -30,6 +32,33 @@ function publicJob(row) {
   return row ? { ...row, config: parseJson(row.config), result: parseJson(row.result) } : null;
 }
 
+export function inboxLinkChatgptStatus(account) {
+  if (!account) return null;
+  const plan = String(account.account_type || account.plan || "unknown").trim().toLowerCase();
+  const credentialStatus = String(account.credential_status || "unknown").trim().toLowerCase();
+  const validityStatus = String(account.validity_status || "unknown").trim().toLowerCase();
+  const statusCode = String(account.status_code || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const free = plan === "free";
+  const atInvalid = ["expired", "revoked", "missing"].includes(credentialStatus)
+    || ["invalid", "expired", "revoked"].includes(validityStatus)
+    || [
+      "access_token_refresh_required",
+      "auth_unauthorized_unconfirmed",
+      "authentication_unconfirmed",
+    ].includes(statusCode)
+    || /(?:auth(?:entication)?|access_token|credential|session|token).*(?:expired|revoked|invalid|missing|unauthorized|refresh_required)/.test(statusCode);
+  return {
+    external_account_id: Number(account.id) || null,
+    plan,
+    display_status: account.display_status || account.status || "unknown",
+    credential_status: credentialStatus,
+    validity_status: validityStatus,
+    status_code: statusCode,
+    at_invalid: atInvalid,
+    unlink_recommended: free && atInvalid,
+  };
+}
+
 function requireMicrosoftAccount(account) {
   if (account?.provider !== "microsoft") {
     throw Object.assign(new Error("这个邮箱提供商不支持 Microsoft 官方别名功能"), {
@@ -41,7 +70,7 @@ function requireMicrosoftAccount(account) {
 }
 
 function addressQuery(db, { accountId, kind, q, page = 1, limit = 50 } = {}) {
-  const conditions = ["1 = 1"];
+  const conditions = ["source_accounts.provider <> 'inbox_link'"];
   const params = [];
   if (accountId) { conditions.push("addresses.account_id = ?"); params.push(Number(accountId)); }
   if (kind && kind !== "all") { conditions.push("addresses.kind = ?"); params.push(kind); }
@@ -98,7 +127,7 @@ function publicMessage(row, { includeBody = false } = {}) {
 
 function messageById(db, id) {
   const row = db.prepare(`
-    SELECT mail_messages.*, source_accounts.email AS source_email,
+    SELECT mail_messages.*, source_accounts.email AS source_email, source_accounts.provider AS source_provider,
       addresses.address, addresses.kind AS address_kind, parent.address AS parent_address
     FROM mail_messages
     JOIN source_accounts ON source_accounts.id = mail_messages.account_id
@@ -156,7 +185,7 @@ function messageQuery(db, { accountId, q, hidden = false, page = 1, limit = 50 }
   const hiddenCount = counts.hidden || 0;
   const currentTotal = hidden ? hiddenCount : visible;
   const items = db.prepare(`
-    SELECT mail_messages.*, source_accounts.email AS source_email,
+    SELECT mail_messages.*, source_accounts.email AS source_email, source_accounts.provider AS source_provider,
       addresses.address, addresses.kind AS address_kind, parent.address AS parent_address
     FROM mail_messages
     JOIN source_accounts ON source_accounts.id = mail_messages.account_id
@@ -315,11 +344,18 @@ export function createApp(options = {}) {
     imapFactory: options.icloudImapFactory,
     parseMessage: options.icloudParseMessage,
   });
+  const inboxLinkMailboxes = options.inboxLinkMailboxes || new InboxLinkMailboxService({
+    db,
+    encryptionKey: options.dataEncryptionKey ?? process.env.DATA_ENCRYPTION_KEY,
+    fetchFn: options.inboxLinkFetchFn || options.fetchFn,
+    apiBase: options.inboxLinkApiBase,
+  });
   const inbox = options.inbox || {
     scanInbox(account) {
       if (account.provider === "google") return gmail.scanInbox(account);
       if (account.provider === "microsoft") return graph.scanInbox(account);
       if (account.provider === "icloud") return icloud.scanInbox(account);
+      if (account.provider === "inbox_link") return inboxLinkMailboxes.scanInbox(account);
       throw Object.assign(new Error(`不支持的邮箱提供商：${account.provider}`), {
         status: 409,
         code: "UNSUPPORTED_MAIL_PROVIDER",
@@ -333,10 +369,6 @@ export function createApp(options = {}) {
     baseUrl: process.env.REGISTRATION_SERVICE_URL,
     token: process.env.REGISTRATION_SERVICE_TOKEN,
     fetchFn: options.registrationFetchFn,
-  });
-  const inboxLinkMailboxes = options.inboxLinkMailboxes || new InboxLinkMailboxService({
-    db,
-    encryptionKey: options.dataEncryptionKey ?? process.env.DATA_ENCRYPTION_KEY,
   });
   const registration = new RegistrationService({
     db,
@@ -359,6 +391,28 @@ export function createApp(options = {}) {
     baseUrl: options.nfapiBaseUrl || process.env.SUB2_BASE_URL || process.env.NFAPI_BASE_URL,
     apiKey: options.nfapiApiKey || process.env.SUB2_ADMIN_API_KEY || process.env.NFAPI_ADMIN_API_KEY,
   });
+  let nfapiCredentialSync = Object.hasOwn(options, "nfapiCredentialSync")
+    ? options.nfapiCredentialSync : null;
+  const nfapiCredentialStoreConfigured = Boolean(options.nfapiCredentialStore)
+    || [
+      process.env.NFAPI_CREDENTIAL_DB_HOST,
+      process.env.NFAPI_CREDENTIAL_DB_NAME,
+      process.env.NFAPI_CREDENTIAL_DB_USER,
+    ].every((value) => String(value || "").trim());
+  if (!Object.hasOwn(options, "nfapiCredentialSync")
+    && !options.registrationClient
+    && nfapiCredentialStoreConfigured
+    && typeof nfapi.client === "function") {
+    const store = options.nfapiCredentialStore || new NfapiCredentialStore();
+    nfapiCredentialSync = new NfapiCredentialSync({
+      db,
+      store,
+      registrationClient,
+      nfapiClientFactory: () => nfapi.client(),
+      nfapiBaseUrl: () => nfapi.baseUrl(),
+    });
+  }
+  registration.nfapiCredentialSync = nfapiCredentialSync;
   const microsoftRegistration = options.microsoftRegistration || new MicrosoftRegistrationService({
     db,
     encryptionKey: options.dataEncryptionKey ?? process.env.DATA_ENCRYPTION_KEY,
@@ -412,6 +466,12 @@ export function createApp(options = {}) {
   app.get("/api/auth/check", auth.check);
   app.post("/api/auth/login", auth.login);
   app.post("/api/auth/logout", auth.logout);
+
+  registerEzCaptchaAdapter({
+    app,
+    db,
+    fetchFn: options.captchaFetchFn || options.fetchFn || fetch,
+  });
 
   app.get("/api/extension/download", auth.requireAdmin, (_req, res, next) => {
     const archive = path.join(projectRoot, "release", "aliashub-outlook-extension.zip");
@@ -504,14 +564,79 @@ export function createApp(options = {}) {
   app.get("/api/registration/options", async (_req, res, next) => {
     try { res.json(await registration.options()); } catch (error) { next(error); }
   });
-  app.get("/api/inbox-link-mailboxes", (_req, res, next) => {
-    try { res.json(inboxLinkMailboxes.list()); } catch (error) { next(error); }
+  app.get("/api/inbox-link-mailboxes", async (_req, res, next) => {
+    try {
+      const data = inboxLinkMailboxes.list();
+      let registeredAccounts = [];
+      try {
+        const registered = await registration.listRegisteredAccounts({ refreshUnchecked: false });
+        registeredAccounts = registered.items || [];
+      } catch {
+        // The link pool remains manageable when the registration service is temporarily unavailable.
+      }
+      const accountByEmail = new Map(registeredAccounts.map((item) => [String(item.email || "").toLowerCase(), item]));
+      data.items = data.items.map((item) => {
+        const chatgpt = inboxLinkChatgptStatus(accountByEmail.get(item.email.toLowerCase()));
+        return {
+          ...item,
+          chatgpt,
+          unlink_recommended: Boolean(chatgpt?.unlink_recommended),
+        };
+      });
+      data.free_invalid_at = data.items.filter((item) => item.unlink_recommended).length;
+      data.account_status_ready = registeredAccounts.length > 0;
+      res.json(data);
+    } catch (error) { next(error); }
   });
   app.post("/api/inbox-link-mailboxes/import", (req, res, next) => {
     try { res.status(201).json(inboxLinkMailboxes.import(req.body || {})); } catch (error) { next(error); }
   });
-  app.delete("/api/inbox-link-mailboxes/:id", (req, res, next) => {
-    try { res.json(inboxLinkMailboxes.delete(req.params.id)); } catch (error) { next(error); }
+  const deleteInboxLinkMailboxes = async (input = {}) => {
+    const rows = inboxLinkMailboxes.validateBulkDelete(input);
+    const latestCompletedAccount = db.prepare(`
+      SELECT external_account_id
+      FROM registration_jobs
+      WHERE lower(email) = lower(?)
+        AND status = 'completed' AND external_account_id <> ''
+      ORDER BY id DESC LIMIT 1
+    `);
+    const accountIdByMailboxId = new Map();
+    for (const row of rows) {
+      const externalAccountId = Number(latestCompletedAccount.get(row.email)?.external_account_id) || 0;
+      if (externalAccountId) accountIdByMailboxId.set(Number(row.id), externalAccountId);
+    }
+    const accountIds = [...new Set(accountIdByMailboxId.values())];
+    let gptResult = { requested: 0, deleted: 0, failed: [] };
+    if (accountIds.length) {
+      gptResult = await registration.deleteRegisteredAccounts({ ids: accountIds });
+    }
+    const failedAccountIds = new Set((gptResult.failed || []).map((item) => Number(item.id)));
+    const removableIds = rows
+      .filter((row) => {
+        const accountId = accountIdByMailboxId.get(Number(row.id));
+        return !accountId || !failedAccountIds.has(accountId);
+      })
+      .map((row) => Number(row.id));
+    const bindings = removableIds.length
+      ? inboxLinkMailboxes.bulkDelete({ ids: removableIds })
+      : { deleted: 0, items: [] };
+    return {
+      requested: rows.length,
+      deleted: bindings.deleted,
+      items: bindings.items,
+      gpt_requested: accountIds.length,
+      gpt_deleted: Number(gptResult.deleted) || 0,
+      gpt_failed: gptResult.failed || [],
+    };
+  };
+  app.post("/api/inbox-link-mailboxes/bulk-delete", async (req, res, next) => {
+    try { res.json(await deleteInboxLinkMailboxes(req.body || {})); } catch (error) { next(error); }
+  });
+  app.delete("/api/inbox-link-mailboxes/:id", async (req, res, next) => {
+    try {
+      const result = await deleteInboxLinkMailboxes({ ids: [req.params.id] });
+      res.json({ ...result.items[0], gpt_deleted: result.gpt_deleted, gpt_failed: result.gpt_failed });
+    } catch (error) { next(error); }
   });
   app.put("/api/registration/proxies", (req, res, next) => {
     try { res.json(registration.saveProxyPool(req.body?.proxies)); } catch (error) { next(error); }
@@ -561,14 +686,34 @@ export function createApp(options = {}) {
   app.get("/api/registration/accounts", async (_req, res, next) => {
     try { res.json(await registration.listRegisteredAccounts()); } catch (error) { next(error); }
   });
+  app.post("/api/registration/accounts/import-local", async (req, res, next) => {
+    try { res.status(201).json(await registration.importLocalAccounts(req.body || {})); } catch (error) { next(error); }
+  });
   app.post("/api/registration/accounts/refresh-status", async (req, res, next) => {
-    try { res.json(await registration.refreshRegisteredAccountSignals(req.body || {})); } catch (error) { next(error); }
+    try {
+      const input = req.body || {};
+      res.json(await registration.refreshRegisteredAccountSignals(input, {
+        skipNfapiSync: input.skip_nfapi_sync === true,
+      }));
+    } catch (error) { next(error); }
+  });
+  app.patch("/api/registration/accounts/bulk-group", async (req, res, next) => {
+    try { res.json(await registration.updateRegisteredAccountGroups(req.body || {})); } catch (error) { next(error); }
   });
   app.patch("/api/registration/accounts/:id", async (req, res, next) => {
     try { res.json(await registration.updateRegisteredAccountMetadata(req.params.id, req.body || {})); } catch (error) { next(error); }
   });
+  app.post("/api/registration/accounts/:id/refresh-at", async (req, res, next) => {
+    try { res.json(await registration.refreshRegisteredAccountAccessToken(req.params.id)); } catch (error) { next(error); }
+  });
   app.get("/api/registration/accounts/:id/access-token", async (req, res, next) => {
     try { res.json(await registration.registeredAccountAccessToken(req.params.id)); } catch (error) { next(error); }
+  });
+  app.get("/api/registration/accounts/:id/refresh-token", async (req, res, next) => {
+    try { res.json(await registration.registeredAccountRefreshToken(req.params.id)); } catch (error) { next(error); }
+  });
+  app.get("/api/registration/accounts/:id/sub2api-export", async (req, res, next) => {
+    try { res.json(await registration.registeredAccountSub2Export(req.params.id)); } catch (error) { next(error); }
   });
   app.get("/api/registration/accounts/:id/emails", async (req, res, next) => {
     try { res.json(await registration.registeredAccountEmails(req.params.id, req.query)); } catch (error) { next(error); }
@@ -595,6 +740,7 @@ export function createApp(options = {}) {
         options: req.body?.options || {},
         save_defaults: req.body?.save_defaults,
         force_restart: req.body?.force_restart,
+        reauthorization: req.body?.reauthorization,
       }));
     } catch (error) { next(error); }
   });
@@ -671,16 +817,18 @@ export function createApp(options = {}) {
       SELECT COUNT(*) AS total,
         SUM(CASE WHEN status = 'connected' THEN 1 ELSE 0 END) AS connected,
         SUM(CASE WHEN status = 'action_required' THEN 1 ELSE 0 END) AS action_required
-      FROM source_accounts
+      FROM source_accounts WHERE provider <> 'inbox_link'
     `).get();
     const addresses = db.prepare(`
       SELECT COUNT(*) AS total,
         SUM(CASE WHEN kind = 'official' THEN 1 ELSE 0 END) AS official,
         SUM(CASE WHEN kind = 'split' THEN 1 ELSE 0 END) AS split
-      FROM addresses WHERE status = 'active'
+      FROM addresses
+      JOIN source_accounts ON source_accounts.id = addresses.account_id
+      WHERE addresses.status = 'active' AND source_accounts.provider <> 'inbox_link'
     `).get();
     const codes = db.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN is_used = 0 THEN 1 ELSE 0 END) AS unused FROM verification_codes WHERE is_hidden = 0").get();
-    const recentAccounts = db.prepare("SELECT * FROM source_accounts ORDER BY updated_at DESC LIMIT 6").all().map((row) => publicAccount(db, row));
+    const recentAccounts = db.prepare("SELECT * FROM source_accounts WHERE provider <> 'inbox_link' ORDER BY updated_at DESC LIMIT 6").all().map((row) => publicAccount(db, row));
     const recentCodes = db.prepare(`
       SELECT verification_codes.*, source_accounts.email AS source_email, addresses.address, addresses.kind,
         parent.address AS parent_address
@@ -711,8 +859,13 @@ export function createApp(options = {}) {
     });
   });
 
-  app.get("/api/accounts", (_req, res) => {
-    const items = db.prepare("SELECT * FROM source_accounts ORDER BY created_at DESC").all().map((row) => {
+  app.get("/api/accounts", (req, res) => {
+    const includeInboxLinks = req.query.includeInboxLinks === "true";
+    const items = db.prepare(`
+      SELECT * FROM source_accounts
+      ${includeInboxLinks ? "" : "WHERE provider <> 'inbox_link'"}
+      ORDER BY created_at DESC
+    `).all().map((row) => {
       const latestJob = db.prepare("SELECT * FROM automation_jobs WHERE account_id = ? ORDER BY created_at DESC LIMIT 1").get(row.id);
       return { ...publicAccount(db, row), latest_job: publicJob(latestJob) };
     });
@@ -723,6 +876,7 @@ export function createApp(options = {}) {
         microsoft: { authMode: "oauth", supportsOfficialAliases: true, supportsPlusAliases: true, supportsImportedAliases: false, supportsDirectRegistration: false },
         google: { authMode: "oauth", supportsOfficialAliases: false, supportsPlusAliases: true, supportsImportedAliases: false, supportsDirectRegistration: false },
         icloud: { authMode: "app_password", supportsOfficialAliases: false, supportsPlusAliases: false, supportsImportedAliases: true, supportsDirectRegistration: true },
+        inbox_link: { authMode: "inbox_link", supportsOfficialAliases: false, supportsPlusAliases: false, supportsImportedAliases: false, supportsDirectRegistration: false },
       },
     });
   });
@@ -818,11 +972,10 @@ export function createApp(options = {}) {
         throw Object.assign(new Error("这个源头邮箱不是 iCloud 账号"), { status: 409, code: "ICLOUD_ACCOUNT_REQUIRED" });
       }
       const input = Array.isArray(req.body?.aliases) ? req.body.aliases : [];
-      const invalid = input.map((value) => String(value || "").trim()).filter((value) => value && !normalizeIcloudAliasEmail(value));
-      if (invalid.length) {
-        throw Object.assign(new Error(`仅支持 @icloud.com、@me.com、@mac.com 或 @privaterelay.appleid.com 地址：${invalid[0]}`), { status: 400 });
-      }
-      const items = importIcloudAliases(db, account, input, { type: String(req.body?.type || "") });
+      const items = importIcloudAliases(db, account, input, {
+        type: String(req.body?.type || ""),
+        replace: req.body?.replace === true,
+      });
       res.json({
         items,
         account: publicAccount(db, db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(account.id)),
@@ -964,7 +1117,7 @@ export function createApp(options = {}) {
         db,
         item.account_id,
         importedIcloudAddress ? "alias" : "split",
-        importedIcloudAddress ? "移除本地 iCloud 别名映射" : "删除分裂地址",
+        importedIcloudAddress ? "移除本地 iCloud 地址映射" : "删除分裂地址",
         item.address,
         {},
       );
@@ -1353,7 +1506,7 @@ export function createApp(options = {}) {
     if (PUBLIC_AGENT_IDENTITY_ERROR_CODES.has(error?.code)) body.code = error.code;
     res.status(status).json(body);
   });
-  return { app, db, graph, gmail, icloud, inbox, inboxLinkMailboxes, extension, jobs, registration, nfapi, microsoftRegistration, microsoftRegistrationRunner };
+  return { app, db, graph, gmail, icloud, inbox, inboxLinkMailboxes, extension, jobs, registration, nfapi, nfapiCredentialSync, microsoftRegistration, microsoftRegistrationRunner };
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
@@ -1366,6 +1519,7 @@ if (isMain) {
   const shutdown = async () => {
     server.close();
     await runtime.microsoftRegistrationRunner.stopForShutdown();
+    await runtime.nfapiCredentialSync?.close?.();
     runtime.db.close();
     process.exit(0);
   };

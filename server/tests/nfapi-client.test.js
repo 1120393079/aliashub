@@ -284,7 +284,7 @@ test("NFapi client converts aborted requests into gateway timeouts", async () =>
     await assert.rejects(
       () => client.listGroups(),
       (error) => {
-        assert.equal(error.message, "SUB2 兼容服务请求超时");
+        assert.equal(error.message, "NFapi 请求超时");
         assert.equal(error.status, 504);
         return true;
       },
@@ -298,4 +298,22 @@ test("unwrapNfapiPayload preserves non-envelope payloads", () => {
   assert.deepEqual(unwrapNfapiPayload({ items: [1] }), { items: [1] });
   assert.deepEqual(unwrapNfapiPayload([1, 2]), [1, 2]);
   assert.equal(unwrapNfapiPayload("plain"), "plain");
+});
+
+test("NFapi client refreshes one OAuth account without returning credentials", async () => {
+  const calls = [];
+  const client = new NfapiClient({
+    baseUrl: "https://nfapi.test",
+    apiKey: "secret",
+    fetchFn: async (url, options) => {
+      calls.push({ url, options });
+      return jsonResponse(200, { success: true });
+    },
+  });
+
+  const result = await client.refreshAccountCredentials(1871);
+
+  assert.equal(calls[0].url, "https://nfapi.test/api/v1/admin/accounts/1871/refresh");
+  assert.equal(calls[0].options.method, "POST");
+  assert.deepEqual(result, { success: true });
 });

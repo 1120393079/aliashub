@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Activity, AlertTriangle, CheckCircle2, Copy, Eye, KeyRound, MailPlus, Play, RefreshCw, Save, Server, Square, Terminal, Trash2, UserPlus } from "lucide-react";
+import { Activity, AlertTriangle, CheckCircle2, Copy, Eye, KeyRound, MailPlus, Play, Plus, RefreshCw, Save, Server, Square, Terminal, Trash2, UserPlus } from "lucide-react";
 import { api } from "../api.js";
 import { Button, ConfirmDialog, EmptyState, FormField, IconButton, LoadingBlock, Modal, Pagination, StatusBadge, useToast } from "../components.jsx";
 import { copyText, formatDate } from "../utils.js";
@@ -73,10 +73,9 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
   const [savingRunner, setSavingRunner] = useState(false);
-  const [clearingProxy, setClearingProxy] = useState(false);
   const [savedProxyDraft, setSavedProxyDraft] = useState("");
   const [savingSavedProxy, setSavingSavedProxy] = useState(false);
-  const [deletingSavedProxy, setDeletingSavedProxy] = useState(false);
+  const [deletingSavedProxy, setDeletingSavedProxy] = useState("");
   const [startingRunner, setStartingRunner] = useState(false);
   const [stoppingRunner, setStoppingRunner] = useState(false);
   const [credentials, setCredentials] = useState(null);
@@ -85,7 +84,6 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
   const [deleting, setDeleting] = useState(false);
   const loadRequest = useRef(0);
   const runnerFormInitialized = useRef(false);
-  const [proxyInputDirty, setProxyInputDirty] = useState(false);
   const toast = useToast();
 
   const copy = async (value, message) => {
@@ -143,7 +141,6 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
   useEffect(() => { load(); }, [load, refreshKey]);
   useEffect(() => () => { loadRequest.current += 1; }, []);
   const runnerActive = ["starting", "running", "stopping"].includes(runner?.current_run?.status);
-  const savedProxyConfigured = Boolean(runner?.proxy?.saved);
   useEffect(() => {
     if (!runnerActive) return undefined;
     const timer = window.setInterval(() => load(), 3_000);
@@ -151,10 +148,6 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
   }, [runnerActive, load]);
 
   const updateRunner = (key, value) => setRunnerForm((current) => ({ ...current, [key]: value }));
-  const updateProxyInput = (value) => {
-    setProxyInputDirty(true);
-    updateRunner("proxy_input", value);
-  };
 
   const saveRunnerConfiguration = async ({ silent = false } = {}) => {
     const payload = { ...runnerForm };
@@ -166,9 +159,7 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
     } else {
       payload.proxy_source = "manual";
       delete payload.saved_proxy_selection;
-      // Leaving a saved IP must explicitly switch the runner back to direct
-      // when the proxy input has not been edited.
-      if (!proxyInputDirty && runner?.proxy?.source !== "saved_pool") delete payload.proxy_input;
+      payload.proxy_input = "";
     }
     const saved = await api("/api/microsoft-registration/runner/config", { method: "PUT", body: payload });
     setRunner(saved);
@@ -186,61 +177,64 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
       chrome_version: saved.chrome_version,
       country_code: saved.country_code || defaultRunnerForm.country_code,
     }));
-    setProxyInputDirty(false);
     if (!silent) toast("服务器注册配置已保存");
     return saved;
   };
 
-  const clearSavedProxy = async () => {
-    setClearingProxy(true);
-    try {
-      const saved = await api("/api/microsoft-registration/runner/proxy", { method: "DELETE" });
-      setRunner(saved);
-      setRunnerForm((current) => ({ ...current, proxy_input: "", saved_proxy_selection: "" }));
-      setProxyInputDirty(false);
-      toast("已清除当前注册代理，后续使用本机直连出口");
-    } catch (error) {
-      toast(error.message, "error");
-    } finally {
-      setClearingProxy(false);
-    }
-  };
-
   const saveSavedProxy = async () => {
-    if (!savedProxyDraft.trim()) {
-      toast("请先填写要保存的 IP 代理", "error");
+    const proxies = savedProxyDraft.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+    if (!proxies.length) {
+      toast("请先填写要加入代理池的代理", "error");
       return;
     }
     setSavingSavedProxy(true);
     try {
-      const saved = await api("/api/microsoft-registration/runner/saved-proxies", {
-        method: "POST",
-        body: { proxy: savedProxyDraft },
-      });
-      setRunner(saved);
-      setRunnerForm((current) => ({ ...current, saved_proxy_selection: saved.added?.id || current.saved_proxy_selection }));
-      setSavedProxyDraft("");
-      toast("IP 已保存并选中，点击“保存配置”后用于注册");
-    } catch (error) {
-      toast(error.message, "error");
+      let latestRunner = runner;
+      const added = [];
+      const failed = [];
+      for (const proxy of proxies) {
+        try {
+          latestRunner = await api("/api/microsoft-registration/runner/saved-proxies", {
+            method: "POST",
+            body: { proxy },
+          });
+          if (latestRunner.added?.id) added.push(latestRunner.added.id);
+        } catch (error) {
+          failed.push({ proxy, message: error.message });
+        }
+      }
+      if (added.length) {
+        setRunner(latestRunner);
+        setRunnerForm((current) => ({
+          ...current,
+          saved_proxy_selection: proxies.length === 1 ? added[0] : "auto",
+        }));
+      }
+      setSavedProxyDraft(failed.map((item) => item.proxy).join("\n"));
+      if (failed.length) {
+        toast(`已加入 ${added.length} 条，${failed.length} 条失败：${failed[0].message}`, "error");
+      } else {
+        toast(`已加入 ${added.length} 条代理${proxies.length === 1 ? "并选中" : "，已选择自动轮换"}`);
+      }
     } finally {
       setSavingSavedProxy(false);
     }
   };
 
-  const deleteSelectedSavedProxy = async () => {
-    if (!runnerForm.saved_proxy_selection || runnerForm.saved_proxy_selection === "auto") return;
-    setDeletingSavedProxy(true);
+  const deleteSavedProxy = async (id) => {
+    if (!id || id === "auto") return;
+    setDeletingSavedProxy(id);
     try {
-      const saved = await api(`/api/microsoft-registration/runner/saved-proxies/${encodeURIComponent(runnerForm.saved_proxy_selection)}`, { method: "DELETE" });
+      const saved = await api(`/api/microsoft-registration/runner/saved-proxies/${encodeURIComponent(id)}`, { method: "DELETE" });
       setRunner(saved);
-      setRunnerForm((current) => ({ ...current, saved_proxy_selection: "", proxy_input: "" }));
-      setProxyInputDirty(false);
-      toast("已删除所选 IP");
+      setRunnerForm((current) => current.saved_proxy_selection === id
+        ? { ...current, saved_proxy_selection: "", proxy_input: "" }
+        : current);
+      toast("已从代理池删除");
     } catch (error) {
       toast(error.message, "error");
     } finally {
-      setDeletingSavedProxy(false);
+      setDeletingSavedProxy("");
     }
   };
 
@@ -330,66 +324,41 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
   const savedProxyPool = runner.saved_proxy_pool || { compatible_count: 0, options: [] };
   const savedProxyOptions = savedProxyPool.options || [];
   const selectedSavedProxy = savedProxyOptions.find((item) => item.id === runnerForm.saved_proxy_selection);
-  const usesSavedProxy = Boolean(runnerForm.saved_proxy_selection);
-  const savedProxyHint = usesSavedProxy
-    ? runnerForm.saved_proxy_selection === "auto"
-      ? `保存配置后自动轮换 ${savedProxyPool.compatible_count || 0} 个可用已保存 IP。`
-      : `保存配置后使用 ${selectedSavedProxy?.label || "所选已保存 IP"} 注册。`
-    : "不选时使用上方输入的代理；上方也留空则使用本机直连出口。";
 
   return <div className="page-stack microsoft-registration-page">
     <section className="panel microsoft-registration-runner">
-      <header className="panel-header"><div><h2>服务器直接注册</h2><p>不用下载或打开 Windows 程序；保存配置后直接点击开始注册。</p></div><RunnerStatus run={visibleRun} /></header>
+      <header className="panel-header"><div><h2>Microsoft 邮箱注册</h2><p>选择代理后直接开始，配置会自动保存。</p></div><RunnerStatus run={visibleRun} /></header>
       {!runner.available && <div className="inline-alert error"><AlertTriangle size={16} /><span>{!runner.encryption_ready ? "服务器加密配置未完成，暂时不能保存注册参数。" : "服务器注册机尚未部署完成。"}</span></div>}
       {runner.proxy?.error && <div className="inline-alert error"><AlertTriangle size={16} /><span>{runner.proxy.error}</span></div>}
       <div className="microsoft-registration-runner-layout">
         <section className="microsoft-registration-runner-form">
-          <header><span><Server size={19} /></span><div><b>填写一次，后面直接开始</b><small>打码 Key 与代理会加密保存；再次使用时可以留空。</small></div></header>
-          <div className="form-grid two">
+          <div className="microsoft-registration-compact-fields">
             <FormField label="打码平台"><select value={runnerForm.captcha_type} onChange={(event) => updateRunner("captcha_type", event.target.value)}><option value="3">CaptchaRun Two</option><option value="1">CaptchaRun</option><option value="2">EZ-Captcha</option></select></FormField>
-            <FormField label="打码 Key" hint={runner.captcha_key_configured ? "已保存；留空不会覆盖原 Key。" : "注册机必须填写。"}><input type="password" autoComplete="new-password" value={runnerForm.captcha_key} onChange={(event) => updateRunner("captcha_key", event.target.value)} placeholder={runner.captcha_key_configured ? "已保存" : "粘贴打码平台 Key"} /></FormField>
-          </div>
-          <FormField label="代理（可选）" hint="每行一个账号密码代理，或只填一条动态代理 API。输入后会加密保存；不填时使用本机直连出口。">
-            <textarea value={runnerForm.proxy_input} onChange={(event) => updateProxyInput(event.target.value)} rows={4} placeholder={"username:password@host:port\nusername:password:host:port\n或 https://代理平台 API"} />
-          </FormField>
-          <div className="form-grid two">
-            <FormField label="注册 IP" hint={savedProxyHint}>
-              <select value={runnerForm.saved_proxy_selection} onChange={(event) => updateRunner("saved_proxy_selection", event.target.value)}>
-                <option value="">本机直连 / 使用上方代理</option>
-                {savedProxyPool.compatible_count > 0 && <option value="auto">自动轮换已保存 IP（{savedProxyPool.compatible_count} 个）</option>}
-                {savedProxyOptions.map((item) => <option key={item.id} value={item.id} disabled={!item.compatible}>{item.label}{item.compatible ? "" : `（不可用：${item.reason}）`}</option>)}
-              </select>
-            </FormField>
-            <FormField label="保存 IP" hint="仅保存账号密码 HTTP 代理：username:password@host:port">
-              <div className="copy-input"><input value={savedProxyDraft} onChange={(event) => setSavedProxyDraft(event.target.value)} placeholder="username:password@host:port" /><Button icon={Save} loading={savingSavedProxy} disabled={runnerActive} onClick={saveSavedProxy}>保存 IP</Button></div>
-            </FormField>
-          </div>
-          <div className={`inline-alert ${savedProxyConfigured ? "success" : ""}`}>
-            <span>{usesSavedProxy
-              ? `${savedProxyHint} 上方代理输入不会覆盖或删除，切换回“使用上方代理 / 本机直连”后才会使用它。`
-              : proxyInputDirty
-              ? (runnerForm.proxy_input.trim() ? "保存后将自动识别并替换当前代理。" : "保存后将删除当前代理，注册使用本机直连出口。")
-              : savedProxyConfigured
-                ? runner.proxy.error
-                  ? "已保存的代理当前不可用；可输入新代理替换，或直接删除后使用本机直连出口。"
-                  : runner.proxy?.source === "saved_pool"
-                    ? "保存后将切换为上方代理 / 本机直连；已保存 IP 不会被删除。"
-                    : `已保存：${runner.proxy.label || "代理"}。为保护凭据不会回显；输入新代理可替换。`
-                : "当前未配置外部代理，注册使用本机直连出口。"}</span>
-          </div>
-          {selectedSavedProxy && <Button variant="danger" icon={Trash2} loading={deletingSavedProxy} disabled={runnerActive} onClick={deleteSelectedSavedProxy}>删除所选 IP</Button>}
-          {savedProxyConfigured && <Button variant="danger" icon={Trash2} loading={clearingProxy} disabled={runnerActive} onClick={clearSavedProxy}>清除当前注册代理</Button>}
-          <div className="form-grid three">
-            <FormField label="账号格式" hint="a=小写、A=大写、1=数字"><input value={runnerForm.account_format} onChange={(event) => updateRunner("account_format", event.target.value)} /></FormField>
+            <FormField label="打码 Key" hint={runner.captcha_key_configured ? "已保存，留空不覆盖" : "必须填写"}><input type="password" autoComplete="new-password" value={runnerForm.captcha_key} onChange={(event) => updateRunner("captcha_key", event.target.value)} placeholder={runner.captcha_key_configured ? "已保存" : "粘贴打码平台 Key"} /></FormField>
+            <FormField label="账号格式" hint="a=小写 A=大写 1=数字"><input value={runnerForm.account_format} onChange={(event) => updateRunner("account_format", event.target.value)} /></FormField>
             <FormField label="注册数量"><input type="number" min="1" max="10000" value={runnerForm.quantity} onChange={(event) => updateRunner("quantity", event.target.value)} /></FormField>
             <FormField label="并发数"><input type="number" min="1" max="100" value={runnerForm.concurrency} onChange={(event) => updateRunner("concurrency", event.target.value)} /></FormField>
           </div>
+          <section className="microsoft-registration-proxy-pool">
+            <header><b>代理池</b><span>已保留 {savedProxyOptions.length} 条</span></header>
+            <div className="microsoft-registration-proxy-menu">
+              <select aria-label="选择注册代理" value={runnerForm.saved_proxy_selection} onChange={(event) => updateRunner("saved_proxy_selection", event.target.value)}>
+                <option value="">本机直连</option>
+                {savedProxyPool.compatible_count > 0 && <option value="auto">自动轮换（{savedProxyPool.compatible_count} 条）</option>}
+                {savedProxyOptions.map((item) => <option key={item.id} value={item.id} disabled={!item.compatible}>{item.label}{item.compatible ? "" : `（不可用：${item.reason}）`}</option>)}
+              </select>
+              <input aria-label="添加代理" value={savedProxyDraft} disabled={runnerActive} onChange={(event) => setSavedProxyDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); saveSavedProxy(); } }} placeholder="username:password@host:port" />
+              <Button size="sm" icon={Plus} loading={savingSavedProxy} disabled={runnerActive} onClick={saveSavedProxy}>加入</Button>
+              <Button size="sm" variant="danger" icon={deletingSavedProxy ? RefreshCw : Trash2} loading={Boolean(deletingSavedProxy)} disabled={runnerActive || !selectedSavedProxy} onClick={() => deleteSavedProxy(selectedSavedProxy?.id)}>删除</Button>
+            </div>
+            <small>下拉选择哪条，下一次注册就使用哪条；未删除的代理会一直保留。</small>
+          </section>
           <div className="microsoft-registration-runner-actions"><Button icon={Save} loading={savingRunner} disabled={!runner.available || runnerActive} onClick={saveRunner}>保存配置</Button>{runnerActive ? <Button variant="danger" icon={Square} loading={stoppingRunner} onClick={stopRunner}>停止注册</Button> : <Button variant="primary" icon={Play} loading={startingRunner} disabled={!runner.available} onClick={startRunner}>保存并开始注册</Button>}</div>
         </section>
         <aside className="microsoft-registration-runner-status">
           <header><span><Activity size={18} /></span><div><b>{visibleRun ? `任务 #${visibleRun.id}` : "还没有任务"}</b><small>{visibleRun?.message || "保存配置后，点击“保存并开始注册”。"}</small></div><RunnerStatus run={visibleRun} /></header>
-          {visibleRun && <dl><div><dt>计划注册</dt><dd>{visibleRun.quantity} 个</dd></div><div><dt>已回传</dt><dd>{visibleRun.received_count} 个</dd></div><div><dt>网络</dt><dd>{visibleRun.proxy_label || (visibleRun.proxy_mode === "direct" ? "直连" : "已保存代理")}</dd></div><div><dt>代理</dt><dd>{visibleRun.proxy_mode === "direct" ? "直连" : `${visibleRun.proxy_count || 0} 条`}</dd></div><div><dt>并发</dt><dd>{visibleRun.concurrency || 1}</dd></div></dl>}
-          <div className="microsoft-registration-runner-log"><div><Terminal size={15} /><b>运行日志</b></div>{runnerLogs.length ? <pre>{runnerLogs.slice(-8).map((item) => `[${item.stream}] ${item.message}`).join("\n")}</pre> : <p>启动后会在这里显示服务器注册机状态。</p>}</div>
+          {visibleRun && <dl><div><dt>计划</dt><dd>{visibleRun.quantity} 个</dd></div><div><dt>回传</dt><dd>{visibleRun.received_count} 个</dd></div><div><dt>代理</dt><dd>{visibleRun.proxy_mode === "direct" ? "直连" : `${visibleRun.proxy_count || 0} 条`}</dd></div><div><dt>并发</dt><dd>{visibleRun.concurrency || 1}</dd></div></dl>}
+          <div className="microsoft-registration-runner-log"><div><Terminal size={15} /><b>运行日志</b></div>{runnerLogs.length ? <pre>{runnerLogs.slice(-6).map((item) => `[${item.stream}] ${item.message}`).join("\n")}</pre> : <p>启动后会在这里显示服务器注册机状态。</p>}</div>
         </aside>
       </div>
     </section>

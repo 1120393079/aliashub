@@ -5,6 +5,7 @@ import { formatDate, relativeTime } from "../../utils.js";
 import {
   accountAvailabilityMeta,
   accountGroupMeta,
+  accountNeedsAccessTokenRefresh,
   accountSignalText,
   accountSignalValue,
   accountTypeMeta,
@@ -77,7 +78,7 @@ function accountSignalTime(value) {
   return Number.isFinite(Date.parse(text)) ? `${formatDate(text)}（${relativeTime(text)}）` : text;
 }
 
-export function AccountSignalCell({ item, compact = false }) {
+export function AccountSignalCell({ item, compact = false, onRefreshAccessToken, refreshingAccessToken = false, disabled = false }) {
   const statusCode = accountSignalText(item, [
     "status_code", "statusCode", "validity_code", "validityCode", "validity_status_code", "validityStatusCode",
     "validity_error_code", "validityErrorCode", "check_code", "checkCode", "code",
@@ -99,9 +100,13 @@ export function AccountSignalCell({ item, compact = false }) {
   const transientCode = transientStatusCodes.has(statusCode)
     || /(?:TIMEOUT|NETWORK|PROXY|RATE_LIMIT|UPSTREAM|HTTP_5\d\d|CLOUDFLARE|CHALLENGE|TEMPORAR|UNRECOGNIZED)/.test(statusCode);
   const transient = availability !== "unavailable" && (checkFailed || retryable || transientCode);
-  const meta = transient && availability === "unchecked"
-    ? { label: "待复检", badge: "warning" }
-    : accountAvailabilityMeta[availability];
+  const terminalAccountInvalid = availability === "unavailable"
+    && /^(?:ACCOUNT|USER)_(?:BANNED|DISABLED|DEACTIVATED|DELETED|SUSPENDED)$/.test(statusCode);
+  const meta = terminalAccountInvalid
+    ? { label: "AT 失效", badge: "failed" }
+    : transient && availability === "unchecked"
+      ? { label: "待复检", badge: "warning" }
+      : accountAvailabilityMeta[availability];
   const type = accountTypeMeta(item);
   const attemptedAt = accountSignalText(item, ["status_check_attempted_at", "statusCheckAttemptedAt", "check_attempted_at", "checkAttemptedAt", "attempted_at", "attemptedAt"], 80);
   const confirmedAt = accountSignalText(item, ["status_confirmed_at", "statusConfirmedAt", "validity_confirmed_at", "validityConfirmedAt"], 80);
@@ -141,7 +146,13 @@ export function AccountSignalCell({ item, compact = false }) {
     confirmedAt && confirmedAt !== checkedAt && `确认时间=${accountSignalTime(confirmedAt)}`,
   ].filter(Boolean).join(" · ");
   const captionClass = transient ? "check-failed" : availability === "unavailable" ? "check-invalid" : detail ? "check-detail" : "";
-  return <div className={`registration-account-signal ${compact ? "compact" : ""}`} title={title}><div><StatusBadge status={meta.badge}>{meta.label}</StatusBadge><span className={`registration-account-type type-${type.type}`}>{type.label}</span></div><small className={captionClass}>{checkCaption}</small>{sourceAndTime && <small className="check-meta">{sourceAndTime}</small>}</div>;
+  const accessTokenMissing = !item.access_token_available;
+  const accessTokenRefreshRequired = accessTokenMissing || accountNeedsAccessTokenRefresh(statusCode);
+  const accessTokenActionLabel = refreshingAccessToken ? "邮箱登录中" : accessTokenMissing ? "邮箱登录" : "刷新 AT";
+  const accessTokenActionTitle = accessTokenMissing
+    ? "使用已绑定邮箱验证码重新登录并获取 Session 和 Access Token"
+    : "仅使用现有网页登录 Session 刷新 Access Token，不获取 RT";
+  return <div className={`registration-account-signal ${compact ? "compact" : ""}`} title={title}><div><StatusBadge status={meta.badge}>{meta.label}</StatusBadge><span className={`registration-account-type type-${type.type}`}>{type.label}</span>{accessTokenRefreshRequired && onRefreshAccessToken && <button type="button" className="registration-refresh-at-button" disabled={disabled || refreshingAccessToken} title={accessTokenActionTitle} onClick={() => onRefreshAccessToken(item)}>{refreshingAccessToken ? <LoaderCircle className="spin" size={12} /> : <Mail size={12} />}<span>{accessTokenActionLabel}</span></button>}</div><small className={captionClass}>{checkCaption}</small>{sourceAndTime && <small className="check-meta">{sourceAndTime}</small>}</div>;
 }
 
 export function JobCommands({ job, onLogs, onPause, onResume, onCancel, onRelease, onDelete, busy = false }) {

@@ -30,12 +30,13 @@ function authError() {
   });
 }
 
-test("normalizes only supported iCloud Mail domains and exposes provider capabilities", () => {
+test("accepts any valid Apple account email and exposes provider capabilities", () => {
   assert.equal(normalizeIcloudEmail(" User@iCloud.com "), "user@icloud.com");
   assert.equal(normalizeIcloudEmail("user@me.com"), "user@me.com");
   assert.equal(normalizeIcloudEmail("user@mac.com"), "user@mac.com");
-  assert.equal(normalizeIcloudEmail("user@gmail.com"), "");
-  assert.equal(normalizeIcloudEmail("user@custom.example"), "");
+  assert.equal(normalizeIcloudEmail("Apple.User@QQ.com"), "apple.user@qq.com");
+  assert.equal(normalizeIcloudEmail("user@custom.example"), "user@custom.example");
+  assert.equal(normalizeIcloudEmail("not-an-email"), "");
   assert.equal(normalizeProvider("icloud"), "icloud");
   assert.equal(providerMeta("icloud").authMode, "app_password");
   assert.equal(accountSupportsPlusAliases({ provider: "icloud" }), false);
@@ -94,13 +95,13 @@ test("connects iCloud with fixed TLS settings and stores only encrypted credenti
   });
 
   const result = await client.connectAccount({
-    email: "source@icloud.com",
+    email: "apple-source@qq.com",
     displayName: "iCloud Source",
     appSpecificPassword: APP_PASSWORD,
   });
 
   assert.equal(configurations.length, 2);
-  assert.deepEqual(configurations.map((item) => item.auth.user), ["source", "source@icloud.com"]);
+  assert.deepEqual(configurations.map((item) => item.auth.user), ["apple-source", "apple-source@qq.com"]);
   configurations.forEach((config) => {
     assert.equal(config.host, "imap.mail.me.com");
     assert.equal(config.port, 993);
@@ -121,10 +122,10 @@ test("connects iCloud with fixed TLS settings and stores only encrypted credenti
   assert.equal(JSON.stringify(result).includes(APP_PASSWORD), false);
 
   const stored = db.prepare("SELECT * FROM icloud_credentials WHERE account_id = ?").get(result.account.id);
-  assert.equal(stored.username, "source@icloud.com");
+  assert.equal(stored.username, "apple-source@qq.com");
   assert.notEqual(stored.app_password_encrypted, APP_PASSWORD);
   assert.equal(client.decrypt(stored.app_password_encrypted), APP_PASSWORD);
-  assert.equal(db.prepare("SELECT address FROM addresses WHERE account_id = ? AND kind = 'primary'").get(result.account.id).address, "source@icloud.com");
+  assert.equal(db.prepare("SELECT address FROM addresses WHERE account_id = ? AND kind = 'primary'").get(result.account.id).address, "apple-source@qq.com");
 
   const before = stored.app_password_encrypted;
   client.imapFactory = (config) => ({

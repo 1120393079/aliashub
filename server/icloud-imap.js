@@ -194,7 +194,7 @@ export class ICloudImapClient {
     this.requireEncryptionKey();
     const normalizedEmail = normalizeIcloudEmail(email);
     if (!normalizedEmail) {
-      throw errorWithStatus("请输入有效的 @icloud.com、@me.com 或 @mac.com 邮箱", 400, "INVALID_ICLOUD_EMAIL");
+      throw errorWithStatus("请输入有效的 Apple 账户邮箱", 400, "INVALID_ICLOUD_EMAIL");
     }
     const password = String(appSpecificPassword || "").replace(/\s+/g, "");
     if (password.length < 8 || password.length > 128) {

@@ -238,6 +238,7 @@ const schema = `
   CREATE TABLE IF NOT EXISTS inbox_link_mailboxes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     email TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    source_account_id INTEGER REFERENCES source_accounts(id) ON DELETE SET NULL,
     inbox_key_hash TEXT NOT NULL UNIQUE,
     inbox_key_encrypted TEXT NOT NULL,
     inbox_key_preview TEXT NOT NULL DEFAULT '',
@@ -685,6 +686,11 @@ export function createDatabase({ filename, seedDemo = false } = {}) {
   if (!registrationColumns.includes("failure_reason")) {
     db.exec("ALTER TABLE registration_jobs ADD COLUMN failure_reason TEXT NOT NULL DEFAULT ''");
   }
+  const inboxLinkColumns = db.pragma("table_info(inbox_link_mailboxes)").map((column) => column.name);
+  if (!inboxLinkColumns.includes("source_account_id")) {
+    db.exec("ALTER TABLE inbox_link_mailboxes ADD COLUMN source_account_id INTEGER REFERENCES source_accounts(id) ON DELETE SET NULL");
+  }
+  db.exec("CREATE INDEX IF NOT EXISTS idx_inbox_link_mailboxes_source_account ON inbox_link_mailboxes(source_account_id)");
   const microsoftRunnerRunColumns = db.pragma("table_info(microsoft_registration_runner_runs)").map((column) => column.name);
   if (!microsoftRunnerRunColumns.includes("proxy_source")) {
     db.exec("ALTER TABLE microsoft_registration_runner_runs ADD COLUMN proxy_source TEXT NOT NULL DEFAULT 'manual'");

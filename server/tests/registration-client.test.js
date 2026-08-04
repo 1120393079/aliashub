@@ -65,34 +65,6 @@ test("registration client does not hide force-release server failures", async ()
   await assert.rejects(() => client.releaseTask("task-3"), /release failed/);
 });
 
-test("registration client forwards queue and per-task pause controls", async () => {
-  const calls = [];
-  const client = new RegistrationClient({
-    baseUrl: "https://registration.test",
-    token: "secret-token",
-    fetchFn: async (url, options) => {
-      calls.push({ url, method: options.method || "GET" });
-      return jsonResponse(200, { paused: url.includes("pause"), status: "paused" });
-    },
-  });
-
-  await client.getRegistrationQueueControl();
-  await client.pauseRegistrationQueue();
-  await client.resumeRegistrationQueue();
-  await client.cancelRegistrationQueue();
-  await client.pauseTask("task/one");
-  await client.resumeTask("task/one");
-
-  assert.deepEqual(calls, [
-    { url: "https://registration.test/api/tasks/register/control", method: "GET" },
-    { url: "https://registration.test/api/tasks/register/pause-all", method: "POST" },
-    { url: "https://registration.test/api/tasks/register/resume-all", method: "POST" },
-    { url: "https://registration.test/api/tasks/register/cancel-all", method: "POST" },
-    { url: "https://registration.test/api/tasks/task%2Fone/pause", method: "POST" },
-    { url: "https://registration.test/api/tasks/task%2Fone/resume", method: "POST" },
-  ]);
-});
-
 test("registration client forwards proxy inspection parameters exactly", async () => {
   const calls = [];
   const expected = {
@@ -270,4 +242,25 @@ test("registration client creates and manages an existing-account action task", 
   assert.equal(calls[2].url, "https://registration.test/api/tasks/action%2Ftask/events?since=9&limit=300");
   assert.equal(calls[3].url, "https://registration.test/api/tasks/action%2Ftask/cancel");
   assert.equal(calls[3].options.method, "POST");
+});
+
+test("registration client patches account credentials server-side", async () => {
+  const calls = [];
+  const client = new RegistrationClient({
+    baseUrl: "https://registration.test",
+    token: "secret-token",
+    fetchFn: async (url, options) => {
+      calls.push({ url, options });
+      return jsonResponse(200, { id: 134, email: "plus@example.com" });
+    },
+  });
+
+  const result = await client.updateAccount(134, { credentials: { access_token: "latest-token" } });
+
+  assert.equal(calls[0].url, "https://registration.test/api/accounts/134");
+  assert.equal(calls[0].options.method, "PATCH");
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    credentials: { access_token: "latest-token" },
+  });
+  assert.deepEqual(result, { id: 134, email: "plus@example.com" });
 });

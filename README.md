@@ -25,8 +25,17 @@ the installation that you control.
   Free, Go, Plus, Pro, Team, Business, Enterprise, Edu, Trial, and unknown
   future plans. Dynamic proxies are rechecked across independent sessions, and
   transient upstream failures preserve the last confirmed result.
+- Refresh an existing account's Access Token from its authenticated web session
+  or original-mailbox OTP login, and mark deleted or disabled accounts with a
+  red `AT invalid` state. Access-token recovery and new-account registration use
+  independent worker lanes so one queue does not block the other.
 - Group accounts automatically by detected plan or override groups manually in
-  the account workspace.
+  the account workspace, including bulk group edits and email search.
+- Restore accounts removed from the worker's local account pool from JSON, CSV,
+  JSONL, TXT, or email-only input while reconnecting their retained AliasHub
+  registration and mailbox resources.
+- Obtain Refresh Tokens through OpenAI OAuth, copy Access Tokens, and export
+  selected accounts as SUB2 session JSON or Refresh Token JSON.
 - Optionally import registered accounts into one SUB2-compatible service through
   OpenAI OAuth or a locally generated Ed25519 Agent Identity. Agent Identity
   imports validate the target account, use idempotent replay, recover ambiguous
@@ -55,6 +64,9 @@ The deployment remains modular:
 
 SUB2 is not a bundled service and is never required. Each deployment may connect
 its own SUB2-compatible service URL and Admin API Key, or leave both empty.
+Publishing selected accounts to an external pickup storefront is intentionally
+not included. This does not remove the independent mailbox inbox-link binding,
+message retrieval, OTP, or registration-source workflow.
 
 ## Quick start
 
@@ -81,6 +93,17 @@ mode also binds the worker UI to `127.0.0.1:8000` and noVNC to
 
 For native Node.js setup and remote-server deployment, see
 [LOCAL-DEPLOY.md](LOCAL-DEPLOY.md).
+
+To overwrite an existing Git-based installation with the latest source while
+preserving local configuration and runtime data:
+
+```bash
+./scripts/update-local.sh --full
+```
+
+Use `--core` for the core Compose deployment or `--native` for a native
+installation. The updater backs up and verifies the root `.env`, optional
+`registration-worker/.env`, and complete `data/` tree before rebuilding.
 
 ## Development
 

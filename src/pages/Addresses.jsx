@@ -56,9 +56,11 @@ export default function AddressesPage({ refreshKey, onDataChange, onNavigate, in
   const accountById = new Map(accounts.map((account) => [account.id, account]));
   const itemProvider = (item) => providerMeta(item.source_provider || accountById.get(item.account_id)?.provider);
   const isImportedIcloudAddress = (item) => itemProvider(item).id === "icloud"
-    && ["icloud_mail_alias", "icloud_hide_my_email"].includes(item.strategy);
+    && ["icloud_mail_alias", "icloud_hide_my_email", "icloud_custom_domain"].includes(item.strategy);
   const addressTypeLabel = (item) => item.strategy === "icloud_hide_my_email"
     ? "隐藏邮箱"
+    : item.strategy === "icloud_custom_domain"
+      ? "iCloud 自定义域名邮箱"
     : item.strategy === "icloud_mail_alias"
       ? "iCloud 邮箱别名"
       : kindText[item.kind];
@@ -68,14 +70,14 @@ export default function AddressesPage({ refreshKey, onDataChange, onNavigate, in
     const count = Number(value);
     return value === true || String(value).toLowerCase() === "true" || (Number.isFinite(count) && count > 0);
   };
-  const kindItems = [{ value: "all", label: "全部" }, { value: "primary", label: "源头号" }, ...(supportsAddressAliases ? [{ value: "official", label: selectedAccount?.provider === "icloud" ? "iCloud 邮箱别名" : "官方别名" }] : []), { value: "split", label: "分裂地址" }];
+  const kindItems = [{ value: "all", label: "全部" }, { value: "primary", label: "源头号" }, ...(supportsAddressAliases ? [{ value: "official", label: selectedAccount?.provider === "icloud" ? "iCloud 地址" : "官方别名" }] : []), { value: "split", label: "分裂地址" }];
   useEffect(() => { if (!supportsAddressAliases && kind === "official") setKind("all"); }, [supportsAddressAliases, kind]);
   const copy = async (address) => { await copyText(address); toast("地址已复制"); };
   const remove = async (item) => {
     try {
       if (isImportedIcloudAddress(item)) {
         await api(`/api/addresses/${item.id}`, { method: "DELETE" });
-        toast("iCloud 本地别名映射已移除");
+        toast("iCloud 本地地址映射已移除");
       } else {
         await api("/api/addresses/bulk-delete", { method: "POST", body: { ids: [item.id], accountId } });
         toast("分裂地址已删除");

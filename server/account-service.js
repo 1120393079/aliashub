@@ -1,9 +1,11 @@
 import {
+  ICLOUD_CUSTOM_DOMAIN_STRATEGY,
   ICLOUD_HIDE_MY_EMAIL_STRATEGY,
   ICLOUD_MAIL_ALIAS_STRATEGY,
   isIcloudPrivateRelay,
   isIcloudImportedStrategy,
   normalizeIcloudAliasEmail,
+  normalizeIcloudCustomDomainEmail,
   normalizeTag,
   splitAddress,
 } from "./address-generator.js";
@@ -26,6 +28,7 @@ export function publicAccount(db, row) {
       SUM(CASE WHEN kind = 'official' AND status = 'active' THEN 1 ELSE 0 END) AS official_count,
       SUM(CASE WHEN kind = 'official' AND status = 'active' AND strategy = 'icloud_mail_alias' THEN 1 ELSE 0 END) AS icloud_mail_alias_count,
       SUM(CASE WHEN kind = 'official' AND status = 'active' AND strategy = 'icloud_hide_my_email' THEN 1 ELSE 0 END) AS icloud_hide_my_email_count,
+      SUM(CASE WHEN kind = 'official' AND status = 'active' AND strategy = 'icloud_custom_domain' THEN 1 ELSE 0 END) AS icloud_custom_domain_count,
       SUM(CASE WHEN kind = 'split' AND status = 'active' THEN 1 ELSE 0 END) AS split_count,
       COUNT(*) AS address_count
     FROM addresses WHERE account_id = ?
@@ -37,8 +40,10 @@ export function publicAccount(db, row) {
       ? Boolean(db.prepare("SELECT 1 FROM microsoft_tokens WHERE account_id = ?").get(row.id))
       : provider === "icloud"
         ? Boolean(db.prepare("SELECT 1 FROM icloud_credentials WHERE account_id = ?").get(row.id))
-        : false;
-  const oauthConnected = provider !== "icloud" && credentialConnected;
+        : provider === "inbox_link"
+          ? Boolean(db.prepare("SELECT 1 FROM inbox_link_mailboxes WHERE source_account_id = ? AND status = 'active'").get(row.id))
+          : false;
+  const oauthConnected = !["icloud", "inbox_link"].includes(provider) && credentialConnected;
   return {
     ...row,
     provider,
@@ -47,12 +52,13 @@ export function publicAccount(db, row) {
     official_aliases: counts.official_count || 0,
     icloud_mail_aliases: counts.icloud_mail_alias_count || 0,
     icloud_hide_my_emails: counts.icloud_hide_my_email_count || 0,
+    icloud_custom_domain_emails: counts.icloud_custom_domain_count || 0,
     split_count: counts.split_count || 0,
     address_count: counts.address_count || 0,
     oauth_connected: oauthConnected,
     credential_connected: credentialConnected,
     connection_connected: credentialConnected,
-    auth_mode: provider === "icloud" ? "app_password" : "oauth",
+    auth_mode: provider === "icloud" ? "app_password" : provider === "inbox_link" ? "inbox_link" : "oauth",
     supports_official_aliases: provider === "microsoft",
     supports_plus_aliases: ["microsoft", "google"].includes(provider),
     supports_imported_aliases: provider === "icloud",
@@ -60,31 +66,39 @@ export function publicAccount(db, row) {
   };
 }
 
-export function importIcloudAliases(db, account, values = [], { type = "" } = {}) {
+export function importIcloudAliases(db, account, values = [], { type = "", replace = false } = {}) {
   if (account?.provider !== "icloud") {
     throw Object.assign(new Error("这个源头邮箱不是 iCloud 账号"), { status: 409, code: "ICLOUD_ACCOUNT_REQUIRED" });
   }
   const raw = Array.isArray(values) ? values : [];
-  if (raw.length > 500) throw Object.assign(new Error("单次最多导入 500 个 iCloud 别名"), { status: 400 });
-  const invalid = raw.map((value) => String(value || "").trim()).filter((value) => value && !normalizeIcloudAliasEmail(value));
-  if (invalid.length) {
-    throw Object.assign(new Error(`不支持的 iCloud 别名：${invalid[0]}`), { status: 400 });
-  }
-  const aliases = [...new Set(raw.map(normalizeIcloudAliasEmail).filter(Boolean))]
-    .filter((address) => address !== account.email.toLowerCase());
-  if (!aliases.length) {
-    throw Object.assign(new Error("请至少填写一个 iCloud 别名"), { status: 400 });
-  }
-  if (!["", "mail_alias", "hide_my_email"].includes(type)) {
+  if (raw.length > 500) throw Object.assign(new Error("单次最多导入 500 个 iCloud 地址"), { status: 400 });
+  if (!["", "mail_alias", "hide_my_email", "custom_domain"].includes(type)) {
     throw Object.assign(new Error("iCloud 地址类型无效"), { status: 400 });
+  }
+  const normalizeAddress = type === "custom_domain"
+    ? normalizeIcloudCustomDomainEmail
+    : normalizeIcloudAliasEmail;
+  const invalid = raw.map((value) => String(value || "").trim()).filter((value) => value && !normalizeAddress(value));
+  if (invalid.length) {
+    const prefix = type === "custom_domain"
+      ? "自定义域名邮箱必须使用已在 iCloud 激活的非 Apple 域名"
+      : "不支持的 iCloud 地址";
+    throw Object.assign(new Error(`${prefix}：${invalid[0]}`), { status: 400 });
+  }
+  const aliases = [...new Set(raw.map(normalizeAddress).filter(Boolean))]
+    .filter((address) => address !== account.email.toLowerCase());
+  if (!aliases.length && !replace) {
+    throw Object.assign(new Error("请至少填写一个 iCloud 地址"), { status: 400 });
   }
   const wrongType = aliases.find((address) => {
     const isHiddenEmail = isIcloudPrivateRelay(address);
-    return (type === "mail_alias" && isHiddenEmail) || (type === "hide_my_email" && !isHiddenEmail);
+    const domain = address.split("@")[1];
+    return (type === "mail_alias" && isHiddenEmail)
+      || (type === "hide_my_email" && domain !== "icloud.com" && !isHiddenEmail);
   });
   if (wrongType) {
     const message = type === "hide_my_email"
-      ? "隐藏邮箱必须是 @privaterelay.appleid.com 地址"
+      ? "隐藏邮箱必须是 @icloud.com 或 @privaterelay.appleid.com 地址"
       : "iCloud 邮箱别名必须是 @icloud.com、@me.com 或 @mac.com 地址";
     throw Object.assign(new Error(`${message}：${wrongType}`), { status: 400 });
   }
@@ -103,6 +117,9 @@ export function importIcloudAliases(db, account, values = [], { type = "" } = {}
     );
   }
   const now = nowIso();
+  const targetStrategy = type === "custom_domain"
+    ? ICLOUD_CUSTOM_DOMAIN_STRATEGY
+    : type === "hide_my_email" ? ICLOUD_HIDE_MY_EMAIL_STRATEGY : ICLOUD_MAIL_ALIAS_STRATEGY;
   const insert = db.prepare(`
     INSERT INTO addresses (
       account_id, address, kind, status, strategy, label, purpose, remote_confirmed, created_at, updated_at
@@ -114,23 +131,45 @@ export function importIcloudAliases(db, account, values = [], { type = "" } = {}
   `);
   db.transaction(() => {
     aliases.forEach((address) => {
-      const relay = isIcloudPrivateRelay(address);
+      const hidden = type === "hide_my_email"
+        || (type !== "mail_alias" && isIcloudPrivateRelay(address));
+      const customDomain = type === "custom_domain";
       insert.run(
         account.id,
         address,
-        relay ? ICLOUD_HIDE_MY_EMAIL_STRATEGY : ICLOUD_MAIL_ALIAS_STRATEGY,
-        relay ? "iCloud 隐藏邮箱" : "iCloud 邮箱别名",
+        customDomain
+          ? ICLOUD_CUSTOM_DOMAIN_STRATEGY
+          : hidden ? ICLOUD_HIDE_MY_EMAIL_STRATEGY : ICLOUD_MAIL_ALIAS_STRATEGY,
+        customDomain
+          ? "iCloud 自定义域名邮箱"
+          : hidden ? "iCloud 隐藏邮箱" : "iCloud 邮箱别名",
         now,
         now,
       );
     });
+    let removed = 0;
+    if (replace && type) {
+      const placeholders = aliases.map(() => "?").join(",");
+      const statement = aliases.length
+        ? `DELETE FROM addresses
+           WHERE account_id = ? AND kind = 'official' AND strategy = ?
+             AND address NOT IN (${placeholders})`
+        : `DELETE FROM addresses
+           WHERE account_id = ? AND kind = 'official' AND strategy = ?`;
+      removed = db.prepare(statement).run(account.id, targetStrategy, ...aliases).changes;
+    }
+    const auditAction = type === "custom_domain"
+      ? `${replace ? "同步" : "导入"} iCloud 自定义域名邮箱`
+      : type === "hide_my_email"
+        ? `${replace ? "同步" : "导入"} iCloud 隐藏邮箱`
+        : `${replace ? "同步" : "导入"} iCloud 邮箱别名`;
     audit(
       db,
       account.id,
       "alias",
-      type === "hide_my_email" ? "导入 iCloud 隐藏邮箱" : "导入 iCloud 邮箱别名",
-      `本次导入 ${aliases.length} 个地址`,
-      { count: aliases.length },
+      auditAction,
+      `本次保存 ${aliases.length} 个地址，移除 ${removed} 个本地映射`,
+      { count: aliases.length, removed },
     );
   })();
   return db.prepare(`
@@ -434,7 +473,9 @@ export class JobRunner {
       status: "running",
       message: account.provider === "google"
         ? "正在读取 Gmail 收件箱"
-        : account.provider === "icloud" ? "正在读取 iCloud Mail 收件箱" : "正在读取 Outlook 收件箱",
+        : account.provider === "icloud"
+          ? "正在读取 iCloud Mail 收件箱"
+          : account.provider === "inbox_link" ? "正在读取链接取件邮箱" : "正在读取 Outlook 收件箱",
       started_at: nowIso(),
     });
     try {

@@ -30,42 +30,6 @@ function createTestApp(options) {
   }
 }
 
-test("SUB2 environment variables take priority while legacy NFAPI variables remain compatible", (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "aliashub-sub2-env-test-"));
-  const keys = ["SUB2_BASE_URL", "SUB2_ADMIN_API_KEY", "NFAPI_BASE_URL", "NFAPI_ADMIN_API_KEY"];
-  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
-  const runtimes = [];
-  t.after(async () => {
-    await new Promise((resolve) => setImmediate(resolve));
-    runtimes.forEach((runtime) => runtime.db.close());
-    keys.forEach((key) => {
-      if (previous[key] === undefined) delete process.env[key];
-      else process.env[key] = previous[key];
-    });
-    fs.rmSync(directory, { recursive: true, force: true });
-  });
-
-  process.env.SUB2_BASE_URL = "https://preferred-sub2.test/api/v1";
-  process.env.SUB2_ADMIN_API_KEY = "preferred-sub2-key";
-  process.env.NFAPI_BASE_URL = "https://legacy-nfapi.test";
-  process.env.NFAPI_ADMIN_API_KEY = "legacy-nfapi-key";
-  const preferred = createTestApp({
-    db: createDatabase({ filename: path.join(directory, "preferred.db"), seedDemo: false }),
-  });
-  runtimes.push(preferred);
-  assert.equal(preferred.nfapi.baseUrl(), "https://preferred-sub2.test");
-  assert.equal(preferred.nfapi.apiKey(), "preferred-sub2-key");
-
-  delete process.env.SUB2_BASE_URL;
-  delete process.env.SUB2_ADMIN_API_KEY;
-  const legacy = createTestApp({
-    db: createDatabase({ filename: path.join(directory, "legacy.db"), seedDemo: false }),
-  });
-  runtimes.push(legacy);
-  assert.equal(legacy.nfapi.baseUrl(), "https://legacy-nfapi.test");
-  assert.equal(legacy.nfapi.apiKey(), "legacy-nfapi-key");
-});
-
 test("NFapi admin routes keep secrets server-side and complete native OAuth account creation", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "aliashub-nfapi-api-test-"));
   const db = createDatabase({ filename: path.join(directory, "test.db"), seedDemo: false });

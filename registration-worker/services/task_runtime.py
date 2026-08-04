@@ -16,14 +16,22 @@ from application.tasks import (
 @dataclass(slots=True)
 class TaskWorkerState:
     thread: threading.Thread
-    platform: str = ""
+    runtime_lane: str = ""
     account_keys: set[str] = field(default_factory=set)
 
 
 class TaskRuntime:
-    def __init__(self, *, max_parallel_tasks: int = 3, max_parallel_per_platform: int = 1, poll_interval: float = 0.5):
+    def __init__(
+        self,
+        *,
+        max_parallel_tasks: int = 3,
+        max_parallel_per_platform: int = 1,
+        max_parallel_at_recovery: int = 2,
+        poll_interval: float = 0.5,
+    ):
         self.max_parallel_tasks = max_parallel_tasks
         self.max_parallel_per_platform = max_parallel_per_platform
+        self.max_parallel_at_recovery = max(int(max_parallel_at_recovery), 1)
         self.poll_interval = poll_interval
         self._running = False
         self._dispatcher: threading.Thread | None = None
@@ -67,14 +75,20 @@ class TaskRuntime:
                 running_platform_counts: dict[str, int] = {}
                 busy_account_keys: set[str] = set()
                 for state in self._workers.values():
-                    if state.platform:
-                        running_platform_counts[state.platform] = running_platform_counts.get(state.platform, 0) + 1
+                    if state.runtime_lane:
+                        running_platform_counts[state.runtime_lane] = running_platform_counts.get(state.runtime_lane, 0) + 1
                     busy_account_keys.update(state.account_keys)
             while available_slots > 0 and self._running:
                 task_info = claim_next_runnable_task(
                     running_platform_counts=running_platform_counts,
                     busy_account_keys=busy_account_keys,
                     max_parallel_per_platform=self.max_parallel_per_platform,
+                    max_parallel_by_lane={
+                        "chatgpt:at_recovery": min(
+                            self.max_parallel_at_recovery,
+                            self.max_parallel_tasks,
+                        ),
+                    },
                 )
                 if not task_info:
                     break
@@ -86,13 +100,16 @@ class TaskRuntime:
                     name=f"task-worker-{task_id}",
                 )
                 with self._lock:
+                    runtime_lane = str(
+                        task_info.get("runtime_lane") or task_info.get("platform", "") or ""
+                    )
                     self._workers[task_id] = TaskWorkerState(
                         thread=worker,
-                        platform=str(task_info.get("platform", "") or ""),
+                        runtime_lane=runtime_lane,
                         account_keys=set(task_info.get("account_keys") or []),
                     )
-                    if task_info.get("platform"):
-                        running_platform_counts[str(task_info["platform"])] = running_platform_counts.get(str(task_info["platform"]), 0) + 1
+                    if runtime_lane:
+                        running_platform_counts[runtime_lane] = running_platform_counts.get(runtime_lane, 0) + 1
                     busy_account_keys.update(set(task_info.get("account_keys") or []))
                 worker.start()
                 available_slots -= 1

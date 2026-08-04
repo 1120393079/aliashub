@@ -56,7 +56,7 @@ export default function InboxPage({ refreshKey, onDataChange, initialAccountId }
     setListError("");
     try {
       const [accountData, messageData] = await Promise.all([
-        api("/api/accounts"),
+        api("/api/accounts?includeInboxLinks=true"),
         api(`/api/messages${queryString({ accountId, q: search, hidden: folder === "trash" ? "true" : undefined, page, limit: pageSize })}`),
       ]);
       if (requestId !== listRequest.current) return;
@@ -127,9 +127,9 @@ export default function InboxPage({ refreshKey, onDataChange, initialAccountId }
 
   const scanSelected = () => {
     const targets = accountId === "all"
-      ? accounts.filter((item) => item.status === "connected")
+      ? accounts.filter((item) => item.status === "connected" && item.provider !== "inbox_link")
       : accounts.filter((item) => item.id === Number(accountId) && item.status === "connected");
-    if (!targets.length) return toast("没有可扫描的已连接邮箱", "error");
+    if (!targets.length) return toast("请选择一个可扫描的链接取件邮箱", "error");
     targets.forEach(scanAccount);
   };
 
@@ -169,6 +169,8 @@ export default function InboxPage({ refreshKey, onDataChange, initialAccountId }
   const shownCount = folder === "trash" ? trashCount : inboxCount;
   const detailBody = detail?.body || detail?.preview || "";
   const accountById = new Map(accounts.map((account) => [account.id, account]));
+  const sourceAccounts = accounts.filter((account) => account.provider !== "inbox_link");
+  const inboxLinkAccounts = accounts.filter((account) => account.provider === "inbox_link");
   const detailProvider = providerMeta(detail?.source_provider || accountById.get(detail?.account_id)?.provider);
   const retryDetail = () => setDetailReloadKey((value) => value + 1);
   const emptyCopy = search.trim()
@@ -193,8 +195,13 @@ export default function InboxPage({ refreshKey, onDataChange, initialAccountId }
         <div className="mail-toolbar-controls">
           <label className="search-box"><Search size={16} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索发件人、主题或内容" /></label>
           <select className="compact-select" value={accountId} onChange={(event) => setAccountId(event.target.value)}>
-            <option value="all">全部源头邮箱</option>
-            {accounts.map((account) => <option key={account.id} value={account.id}>{accountOptionLabel(account)}</option>)}
+            <option value="all">全部邮件</option>
+            <optgroup label="源头邮箱">
+              {sourceAccounts.map((account) => <option key={account.id} value={account.id}>{accountOptionLabel(account)}</option>)}
+            </optgroup>
+            <optgroup label="链接取件邮箱">
+              {inboxLinkAccounts.map((account) => <option key={account.id} value={account.id}>{account.email}</option>)}
+            </optgroup>
           </select>
           <Button variant="primary" icon={isScanning ? LoaderCircle : RefreshCw} className={isScanning ? "spin-icon" : ""} disabled={isScanning} onClick={scanSelected}>扫描收件箱</Button>
         </div>
@@ -235,7 +242,7 @@ export default function InboxPage({ refreshKey, onDataChange, initialAccountId }
             </header>
             <dl className="mail-detail-meta">
               <div><dt>收件地址</dt><dd>{detail.recipient_address || detail.address || "-"}</dd></div>
-              <div><dt>源头邮箱</dt><dd className="provider-inline"><ProviderMark provider={detailProvider.id} size={18} />{detail.source_email || "-"}</dd></div>
+              <div><dt>{detailProvider.id === "inbox_link" ? "取件邮箱" : "源头邮箱"}</dt><dd className="provider-inline"><ProviderMark provider={detailProvider.id} size={18} />{detail.source_email || "-"}</dd></div>
               {detail.parent_address && <div><dt>基础地址</dt><dd>{detail.parent_address}</dd></div>}
               <div><dt>邮件状态</dt><dd><span className={`mail-read-state ${detail.is_read ? "read" : "unread"}`}>{detail.is_read ? "已读" : "未读"}</span>{detail.has_attachments && <span className="mail-attachment-state"><Paperclip size={12} />包含附件</span>}</dd></div>
               <div><dt>接收时间</dt><dd>{formatDate(detail.received_at)}</dd></div>

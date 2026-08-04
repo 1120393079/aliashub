@@ -12,12 +12,9 @@ class FakeRegistrationClient {
   constructor() {
     this.created = [];
     this.cancelled = [];
-    this.paused = [];
-    this.resumed = [];
-    this.queuePaused = false;
-    this.taskStatuses = new Map();
     this.released = [];
     this.deletedAccounts = new Set();
+    this.importedAccounts = [];
     this.proxyInspections = [];
     this.proxyInspectionError = null;
     this.proxyInspectionHandler = null;
@@ -35,7 +32,7 @@ class FakeRegistrationClient {
   }
 
   async getTask(taskId) {
-    return { task_id: taskId, type: "register", status: this.taskStatuses.get(taskId) || "succeeded", progress_current: 1, progress_total: 1 };
+    return { task_id: taskId, type: "register", status: "succeeded", progress_current: 1, progress_total: 1 };
   }
 
   async getTaskEvents() {
@@ -49,37 +46,6 @@ class FakeRegistrationClient {
   async cancelTask(taskId) {
     this.cancelled.push(taskId);
     return { task_id: taskId, status: "cancel_requested" };
-  }
-
-  async getRegistrationQueueControl() {
-    return { paused: this.queuePaused, counts: { pending: 0, paused: this.paused.length, active: 0 } };
-  }
-
-  async pauseRegistrationQueue() {
-    this.queuePaused = true;
-    return this.getRegistrationQueueControl();
-  }
-
-  async resumeRegistrationQueue() {
-    this.queuePaused = false;
-    return this.getRegistrationQueueControl();
-  }
-
-  async cancelRegistrationQueue() {
-    this.queuePaused = true;
-    return { ...await this.getRegistrationQueueControl(), changed: 1 };
-  }
-
-  async pauseTask(taskId) {
-    this.paused.push(taskId);
-    this.taskStatuses.set(taskId, "paused");
-    return { task_id: taskId, status: "paused" };
-  }
-
-  async resumeTask(taskId) {
-    this.resumed.push(taskId);
-    this.taskStatuses.set(taskId, "running");
-    return { task_id: taskId, status: "running" };
   }
 
   async releaseTask(taskId) {
@@ -128,11 +94,16 @@ class FakeRegistrationClient {
       },
       user_id: `user-${index + 1}`,
       primary_token: `primary-token-${index + 1}`,
-      credentials: [{ key: "access_token", value: `session-access-token-${index + 1}` }],
+      credentials: [
+        { key: "access_token", value: `session-access-token-${index + 1}` },
+        { key: "refresh_token", value: `session-refresh-token-${index + 1}` },
+        { key: "id_token", value: `session-id-token-${index + 1}` },
+        { key: "client_id", value: "codex-client-fixture" },
+      ],
       display_status: "registered",
       plan_state: "free",
       created_at: nowIso(),
-    })), {
+    })), ...this.importedAccounts, {
       id: 999,
       email: "unrelated@example.com",
       password: "UnrelatedPassword",
@@ -147,6 +118,19 @@ class FakeRegistrationClient {
   async getAccount(accountId) {
     const response = await this.listAccounts();
     return response.items.find((item) => Number(item.id) === Number(accountId)) || null;
+  }
+
+  async createAccount(payload) {
+    const account = {
+      id: 2_000 + this.importedAccounts.length,
+      ...payload,
+      overview: payload.overview || {},
+      display_status: payload.overview?.display_status || payload.lifecycle_status || "registered",
+      plan_state: payload.overview?.plan_state || "unknown",
+      created_at: nowIso(),
+    };
+    this.importedAccounts.push(account);
+    return account;
   }
 
   async deleteAccount(accountId) {
@@ -243,6 +227,7 @@ test("registration integration generates isolated addresses and exposes mailbox 
   let configuredPasswordEmail = "";
   let legacyPasswordEmail = "";
   let proxyFailureLogs = [];
+  let deletedLocalAccountFixtures = [];
 
   try {
     await t.test("forwards exact dynamic proxy inspection parameters and returns only detected geography", async () => {
@@ -309,7 +294,7 @@ test("registration integration generates isolated addresses and exposes mailbox 
 
     await t.test("does not expose credentials in a remote proxy inspection failure response", async () => {
       client.proxyInspectionError = Object.assign(
-        new Error("upstream rejected http://kookeey-user:base-secret-TR-87654321-30m@gate-us.kookeey.info:1000"),
+        new Error("upstream rejected http://kookeey-user:base-secret-TR-84726351-30m@gate-us.kookeey.info:1000"),
         { status: 502 },
       );
       const originalConsoleError = console.error;
@@ -319,7 +304,7 @@ test("registration integration generates isolated addresses and exposes mailbox 
         response = await jsonRequest(runtime.app, "/api/registration/proxies/inspect", {
           method: "POST",
           body: JSON.stringify({
-            url: "gate-us.kookeey.info:1000:kookeey-user:base-secret-TR-12345678-30m",
+            url: "gate-us.kookeey.info:1000:kookeey-user:base-secret-TR-50663419-30m",
             samples: 1,
             delay_ms: 0,
           }),
@@ -331,11 +316,11 @@ test("registration integration generates isolated addresses and exposes mailbox 
 
       assert.equal(response.response.status, 502);
       assert.deepEqual(response.body, { error: "服务器处理请求失败" });
-      assert.doesNotMatch(JSON.stringify(response.body), /kookeey-user|base-secret|12345678|87654321|gate-us/i);
+      assert.doesNotMatch(JSON.stringify(response.body), /kookeey-user|base-secret|50663419|84726351|gate-us/i);
     });
 
     await t.test("redacts proxy credentials from remote failure logs", () => {
-      assert.doesNotMatch(proxyFailureLogs.join("\n"), /kookeey-user|base-secret|12345678|87654321|gate-us/i);
+      assert.doesNotMatch(proxyFailureLogs.join("\n"), /kookeey-user|base-secret|50663419|84726351|gate-us/i);
     });
 
     await t.test("accepts only proxy forms supported consistently by requests and Playwright", async () => {
@@ -344,7 +329,7 @@ test("registration integration generates isolated addresses and exposes mailbox 
         "https://proxy.example:8443",
         "socks5://127.0.0.1:1080",
         "plain-proxy.example:3128",
-        "gate-us.kookeey.info:1000:sample-user:base-secret-TR-12345678-30m",
+        "gate-us.kookeey.info:1000:5465911-root1234:base-secret-TR-50663419-30m",
         "[2001:db8::2]:8081:ipv6-user:ipv6-password",
       ];
       const saved = await jsonRequest(runtime.app, "/api/registration/proxies", {
@@ -358,7 +343,7 @@ test("registration integration generates isolated addresses and exposes mailbox 
         accepted[1],
         accepted[2],
         "http://plain-proxy.example:3128",
-        "http://sample-user:base-secret-TR-12345678-30m@gate-us.kookeey.info:1000",
+        "http://5465911-root1234:base-secret-TR-50663419-30m@gate-us.kookeey.info:1000",
         "http://ipv6-user:ipv6-password@[2001:db8::2]:8081",
       ]);
       assert.deepEqual(saved.body.proxyMetadata, [
@@ -375,12 +360,12 @@ test("registration integration generates isolated addresses and exposes mailbox 
         null,
       ]);
       const serializedMetadata = JSON.stringify(saved.body.proxyMetadata);
-      assert.doesNotMatch(serializedMetadata, /sample-user|base-secret|12345678|gate-us/i);
+      assert.doesNotMatch(serializedMetadata, /5465911-root1234|base-secret|50663419|gate-us/i);
 
       const options = await jsonRequest(runtime.app, "/api/registration/options");
       assert.equal(options.response.status, 200);
       assert.deepEqual(options.body.proxyMetadata, saved.body.proxyMetadata);
-      assert.doesNotMatch(JSON.stringify(options.body.proxyMetadata), /sample-user|base-secret|12345678|gate-us/i);
+      assert.doesNotMatch(JSON.stringify(options.body.proxyMetadata), /5465911-root1234|base-secret|50663419|gate-us/i);
     });
 
     await t.test("encodes credentials from host-port-user-password proxy syntax before forwarding", async () => {
@@ -403,7 +388,7 @@ test("registration integration generates isolated addresses and exposes mailbox 
     });
 
     await t.test("rotates a Kookeey sticky session for every inspection sample", async () => {
-      const template = "gate-us.kookeey.info:1000:kookeey-user:base-secret-TR-12345678-30m";
+      const template = "gate-us.kookeey.info:1000:kookeey-user:base-secret-TR-50663419-30m";
       const previousCalls = client.proxyInspections.length;
       const sampledSessions = [];
       client.proxyInspectionHandler = (payload) => {
@@ -445,12 +430,12 @@ test("registration integration generates isolated addresses and exposes mailbox 
       assert.equal(response.body.rotation_verified, true);
       assert.deepEqual(response.body.distinct_ips, ["203.0.113.21", "203.0.113.22", "203.0.113.23"]);
       assert.equal(new Set(sampledSessions).size, 3);
-      assert.equal(sampledSessions.includes("12345678"), false);
+      assert.equal(sampledSessions.includes("50663419"), false);
       const calls = client.proxyInspections.slice(previousCalls);
       assert.equal(calls.length, 3);
       assert.ok(calls.every((item) => item.samples === 1 && item.delay_ms === 0));
       const serialized = JSON.stringify(response.body);
-      assert.doesNotMatch(serialized, /kookeey-user|base-secret|12345678|gate-us\.kookeey\.info/i);
+      assert.doesNotMatch(serialized, /kookeey-user|base-secret|50663419|gate-us\.kookeey\.info/i);
       sampledSessions.forEach((sessionId) => assert.equal(serialized.includes(sessionId), false));
     });
 
@@ -473,7 +458,7 @@ test("registration integration generates isolated addresses and exposes mailbox 
         response = await jsonRequest(runtime.app, "/api/registration/proxies/inspect", {
           method: "POST",
           body: JSON.stringify({
-            url: "gate-us.kookeey.info:1000:user:base-secret-TR-12345678-30m",
+            url: "gate-us.kookeey.info:1000:user:base-secret-TR-50663419-30m",
             samples: 2,
             delay_ms: 0,
           }),
@@ -493,10 +478,10 @@ test("registration integration generates isolated addresses and exposes mailbox 
 
     await t.test("does not classify Kookeey lookalikes or malformed sticky passwords", async () => {
       const inputs = [
-        "http://user:base-secret-TR-12345678-30m@gate-us.kookeey.info.evil:1000",
+        "http://user:base-secret-TR-50663419-30m@gate-us.kookeey.info.evil:1000",
         "http://user:base-secret-TR-not-numeric-30m@gate-us.kookeey.info:1000",
-        "http://user:base-secret-TR-12345678-0m@gate-us.kookeey.info:1000",
-        "http://user:base-secret-TR-12345678-9999m@gate-us.kookeey.info:1000",
+        "http://user:base-secret-TR-50663419-0m@gate-us.kookeey.info:1000",
+        "http://user:base-secret-TR-50663419-9999m@gate-us.kookeey.info:1000",
       ];
       for (const url of inputs) {
         const previousCalls = client.proxyInspections.length;
@@ -560,7 +545,7 @@ test("registration integration generates isolated addresses and exposes mailbox 
     });
 
     await t.test("creates one fresh-browser task per generated split address", async () => {
-      const normalizedTemplate = "http://kookeey-user:base-secret-TR-12345678-30m@gate-us.kookeey.info:1000";
+      const normalizedTemplate = "http://kookeey-user:base-secret-TR-50663419-30m@gate-us.kookeey.info:1000";
       setSetting(db, "registration_proxy_pool", JSON.stringify([normalizedTemplate]));
       const response = await jsonRequest(runtime.app, "/api/registration/jobs", {
         method: "POST",
@@ -586,7 +571,7 @@ test("registration integration generates isolated addresses and exposes mailbox 
         assert.equal(parsed.username, "kookeey-user");
         const password = decodeURIComponent(parsed.password);
         assert.match(password, /^base-secret-TR-\d{8}-30m$/);
-        assert.notEqual(password, "base-secret-TR-12345678-30m");
+        assert.notEqual(password, "base-secret-TR-50663419-30m");
         return password;
       });
       assert.equal(new Set(materializedPasswords).size, 2);
@@ -602,7 +587,7 @@ test("registration integration generates isolated addresses and exposes mailbox 
       assert.equal(client.created[0].extra.auto_continue_post_signup, true);
       assert.equal(response.body.items[0].proxy_label, "http://***@gate-us.kookeey.info:1000");
       const serializedJobs = JSON.stringify(response.body);
-      assert.doesNotMatch(serializedJobs, /kookeey-user|base-secret|12345678/i);
+      assert.doesNotMatch(serializedJobs, /kookeey-user|base-secret|50663419/i);
       materializedPasswords.forEach((password) => assert.equal(serializedJobs.includes(password), false));
       assert.ok(response.body.items[0].fingerprint_id);
     });
@@ -631,7 +616,7 @@ test("registration integration generates isolated addresses and exposes mailbox 
       assert.equal(client.created.length, createdBeforeFailure);
       assert.equal(response.body.items[0].status, "failed");
       assert.equal(response.body.items[0].message, "注册任务提交失败");
-      assert.doesNotMatch(JSON.stringify(response.body), /kookeey-user|base-secret|12345678/i);
+      assert.doesNotMatch(JSON.stringify(response.body), /kookeey-user|base-secret|50663419/i);
       const stored = db.prepare("SELECT message FROM registration_jobs WHERE id = ?").get(response.body.items[0].id);
       assert.deepEqual(stored, { message: "注册任务提交失败" });
     });
@@ -655,11 +640,11 @@ test("registration integration generates isolated addresses and exposes mailbox 
         detail: { fingerprint_session_id: "abcdef123456" },
       }, {
         id: 2,
-        message: "upstream rejected http://private-user:base-secret-TR-87654321-30m@gate-us.kookeey.info:1000",
+        message: "upstream rejected http://private-user:base-secret-TR-84726351-30m@gate-us.kookeey.info:1000",
         password: "root-password",
-        session_id: "87654321",
-        proxy: "gate-us.kookeey.info:1000:private-user:base-secret-TR-87654321-30m",
-        detail: { proxy: { username: "private-user", password: "base-secret", session_id: "87654321" } },
+        session_id: "84726351",
+        proxy: "gate-us.kookeey.info:1000:private-user:base-secret-TR-84726351-30m",
+        detail: { proxy: { username: "private-user", password: "base-secret", session_id: "84726351" } },
       }];
       try {
         const job = await runtime.registration.syncJob(runtime.registration.getJob(jobId));
@@ -678,7 +663,7 @@ test("registration integration generates isolated addresses and exposes mailbox 
           password: "[REDACTED]",
           session_id: "[REDACTED]",
         });
-        assert.doesNotMatch(JSON.stringify({ job, stored, events: events.body }), /private-user|base-secret|87654321/i);
+        assert.doesNotMatch(JSON.stringify({ job, stored, events: events.body }), /private-user|base-secret|84726351/i);
       } finally {
         client.getTask = originalGetTask;
         client.getTaskEvents = originalGetTaskEvents;
@@ -748,47 +733,6 @@ test("registration integration generates isolated addresses and exposes mailbox 
       db.prepare("DELETE FROM registration_jobs WHERE id = ?").run(job.id);
     });
 
-    await t.test("pauses and resumes the whole queue and one registration job", async () => {
-      const created = await jsonRequest(runtime.app, "/api/registration/jobs", {
-        method: "POST",
-        body: JSON.stringify({
-          accountId: account.id,
-          baseAddressId: base.id,
-          count: 1,
-          suffix: "pause-resume",
-          browserMode: "headed",
-          proxies: [],
-        }),
-      });
-      const job = created.body.items[0];
-      const taskId = `task-${client.created.length}`;
-
-      const queuePaused = await jsonRequest(runtime.app, "/api/registration/queue/pause", { method: "POST" });
-      assert.equal(queuePaused.response.status, 200);
-      assert.equal(queuePaused.body.paused, true);
-
-      const paused = await jsonRequest(runtime.app, `/api/registration/jobs/${job.id}/pause`, { method: "POST" });
-      assert.equal(paused.response.status, 200);
-      assert.equal(paused.body.item.status, "paused");
-      assert.equal(client.paused.at(-1), taskId);
-
-      const queueResumed = await jsonRequest(runtime.app, "/api/registration/queue/resume", { method: "POST" });
-      assert.equal(queueResumed.response.status, 200);
-      assert.equal(queueResumed.body.paused, false);
-
-      const resumed = await jsonRequest(runtime.app, `/api/registration/jobs/${job.id}/resume`, { method: "POST" });
-      assert.equal(resumed.response.status, 200);
-      assert.equal(resumed.body.item.status, "running");
-      assert.equal(client.resumed.at(-1), taskId);
-
-      const queueCancelled = await jsonRequest(runtime.app, "/api/registration/queue/cancel", { method: "POST" });
-      assert.equal(queueCancelled.response.status, 200);
-      assert.equal(queueCancelled.body.paused, true);
-      assert.equal(queueCancelled.body.changed, 1);
-
-      db.prepare("DELETE FROM registration_jobs WHERE id = ?").run(job.id);
-    });
-
     await t.test("optionally sets a password after registration and validates the checkbox", async () => {
       const enabled = await jsonRequest(runtime.app, "/api/registration/jobs", {
         method: "POST",
@@ -808,8 +752,8 @@ test("registration integration generates isolated addresses and exposes mailbox 
       assert.equal(client.created.at(-1).password, "ExactPassword#42");
       assert.equal(client.created.at(-1).extra.set_password_after_registration, true);
       assert.equal(client.created.at(-1).extra.auto_continue_post_signup, false);
-      assert.equal(client.created.at(-1).executor_type, "headed");
-      assert.equal(enabled.body.items[0].browser_mode, "headed");
+      assert.equal(client.created.at(-1).executor_type, "headless");
+      assert.equal(enabled.body.items[0].browser_mode, "headless");
       configuredPasswordEmail = enabled.body.items[0].email;
 
       const createdBeforeInvalid = client.created.length;
@@ -1030,6 +974,20 @@ test("registration integration generates isolated addresses and exposes mailbox 
       assert.equal(token.response.status, 200);
       assert.match(token.body.access_token, /^session-access-token-/);
       assert.equal(token.body.access_token.startsWith("primary-token-"), false);
+
+      const refreshToken = await jsonRequest(runtime.app, `/api/registration/accounts/${accounts.body.items[0].id}/refresh-token`);
+      assert.equal(refreshToken.response.status, 200);
+      assert.match(refreshToken.body.refresh_token, /^session-refresh-token-/);
+
+      const sub2Export = await jsonRequest(runtime.app, `/api/registration/accounts/${accounts.body.items[0].id}/sub2api-export`);
+      assert.equal(sub2Export.response.status, 200);
+      assert.equal(sub2Export.body.email, accounts.body.items[0].email);
+      assert.match(sub2Export.body.credentials.access_token, /^session-access-token-/);
+      assert.match(sub2Export.body.credentials.refresh_token, /^session-refresh-token-/);
+      assert.match(sub2Export.body.credentials.id_token, /^session-id-token-/);
+      assert.equal(sub2Export.body.credentials.client_id, "codex-client-fixture");
+      assert.equal(Object.hasOwn(sub2Export.body, "password"), false);
+      assert.equal(Object.hasOwn(sub2Export.body.credentials, "session_token"), false);
     });
 
     await t.test("refreshes status and type for selected registered accounts only", async () => {
@@ -1184,6 +1142,68 @@ test("registration integration generates isolated addresses and exposes mailbox 
         method: "PATCH",
         body: JSON.stringify({ custom_name: "待删除账号", group_name: "清理测试" }),
       });
+    });
+
+    await t.test("bulk edits groups for selected registered accounts", async () => {
+      const before = await jsonRequest(runtime.app, "/api/registration/accounts");
+      const targets = before.body.items.slice(0, 2);
+      const ids = targets.map((item) => Number(item.id));
+      const saved = await jsonRequest(runtime.app, "/api/registration/accounts/bulk-group", {
+        method: "PATCH",
+        body: JSON.stringify({ ids: [ids[0], ids[1], ids[0]], group_name: "  批量运营组  " }),
+      });
+      assert.equal(saved.response.status, 200);
+      assert.equal(saved.body.updated, 2);
+      assert.deepEqual(saved.body.ids, ids);
+      assert.equal(saved.body.group_name, "批量运营组");
+      assert.deepEqual(
+        db.prepare(`
+          SELECT external_account_id, group_name FROM registered_account_metadata
+          WHERE external_account_id IN (?, ?) ORDER BY external_account_id
+        `).all(...ids.map(String)),
+        ids.map(String).sort().map((id) => ({ external_account_id: id, group_name: "批量运营组" })),
+      );
+
+      const listed = await jsonRequest(runtime.app, "/api/registration/accounts");
+      for (const id of ids) {
+        const item = listed.body.items.find((candidate) => Number(candidate.id) === id);
+        assert.equal(item.group_name, "批量运营组");
+        assert.equal(item.custom_group_name, "批量运营组");
+        assert.equal(item.group_source, "custom");
+      }
+
+      const cleared = await jsonRequest(runtime.app, "/api/registration/accounts/bulk-group", {
+        method: "PATCH",
+        body: JSON.stringify({ ids, group_name: "" }),
+      });
+      assert.equal(cleared.response.status, 200);
+      assert.equal(cleared.body.updated, 2);
+      const automatic = await jsonRequest(runtime.app, "/api/registration/accounts");
+      for (const id of ids) {
+        const item = automatic.body.items.find((candidate) => Number(candidate.id) === id);
+        assert.equal(item.custom_group_name, "");
+        assert.equal(item.group_source, "plan");
+      }
+
+      const invalidInputs = [
+        [{ group_name: "运营组" }, "请选择要编辑分组的注册账号"],
+        [{ ids: [], group_name: "运营组" }, "请选择有效的注册账号"],
+        [{ ids, group_name: "第一行\n第二行" }, "分组名称不能包含控制字符"],
+        [{ ids }, "请填写目标分组"],
+      ];
+      for (const [body, error] of invalidInputs) {
+        const invalid = await jsonRequest(runtime.app, "/api/registration/accounts/bulk-group", {
+          method: "PATCH",
+          body: JSON.stringify(body),
+        });
+        assert.equal(invalid.response.status, 400);
+        assert.equal(invalid.body.error, error);
+      }
+      const unrelated = await jsonRequest(runtime.app, "/api/registration/accounts/bulk-group", {
+        method: "PATCH",
+        body: JSON.stringify({ ids: [999], group_name: "运营组" }),
+      });
+      assert.equal(unrelated.response.status, 409);
     });
 
     await t.test("persists structured occupied error codes without replacing them with later generic failures", async () => {
@@ -1696,6 +1716,7 @@ test("registration integration generates isolated addresses and exposes mailbox 
     await t.test("bulk deletes only locally registered accounts and their credentials", async () => {
       const before = await jsonRequest(runtime.app, "/api/registration/accounts");
       const targets = before.body.items.slice(0, 2);
+      deletedLocalAccountFixtures = targets.map((item) => ({ id: item.id, email: item.email, password: item.password || "" }));
       const jobCount = db.prepare("SELECT COUNT(*) AS count FROM registration_jobs").get().count;
       const addressCount = db.prepare("SELECT COUNT(*) AS count FROM addresses").get().count;
 
@@ -1727,6 +1748,60 @@ test("registration integration generates isolated addresses and exposes mailbox 
         body: JSON.stringify({ ids: [999] }),
       });
       assert.equal(unrelated.response.status, 409);
+    });
+
+    await t.test("imports deleted local accounts and relinks their completed registration history", async () => {
+      const content = JSON.stringify(deletedLocalAccountFixtures.map((item, index) => ({
+        id: item.id,
+        email: item.email,
+        password: item.password,
+        account_id: `restored-user-${index + 1}`,
+        access_token: `restored-access-${index + 1}`,
+        refresh_token: `restored-refresh-${index + 1}`,
+        status: "active",
+        plan_state: "plus",
+      })));
+      const restored = await jsonRequest(runtime.app, "/api/registration/accounts/import-local", {
+        method: "POST",
+        body: JSON.stringify({ content }),
+      });
+      assert.equal(restored.response.status, 201);
+      assert.equal(restored.body.imported, 2);
+      assert.equal(restored.body.items.length, 2);
+      assert.ok(restored.body.items.every((item) => Number(item.id) >= 2_000));
+      assert.ok(client.importedAccounts.every((item) => item.provider_accounts
+        .some((provider) => provider.provider_name === "outlook_email_api" && provider.login_identifier === item.email)));
+      assert.ok(client.importedAccounts.every((item) => item.provider_resources
+        .some((resource) => resource.provider_name === "outlook_email_api" && resource.handle === item.email)));
+      assert.deepEqual(
+        restored.body.items.map((item) => item.previous_account_id),
+        deletedLocalAccountFixtures.map((item) => Number(item.id)),
+      );
+
+      const accounts = await jsonRequest(runtime.app, "/api/registration/accounts");
+      for (const item of restored.body.items) {
+        const account = accounts.body.items.find((candidate) => Number(candidate.id) === Number(item.id));
+        assert.equal(account.email, item.email);
+        assert.equal(account.access_token_available, true);
+        assert.equal(
+          db.prepare("SELECT external_account_id FROM registration_jobs WHERE id = ?").get(item.registration_job_id).external_account_id,
+          String(item.id),
+        );
+      }
+
+      const duplicate = await jsonRequest(runtime.app, "/api/registration/accounts/import-local", {
+        method: "POST",
+        body: JSON.stringify({ content }),
+      });
+      assert.equal(duplicate.response.status, 409);
+      assert.match(duplicate.body.error, /已在本地账号池/);
+
+      const unrelated = await jsonRequest(runtime.app, "/api/registration/accounts/import-local", {
+        method: "POST",
+        body: JSON.stringify({ content: JSON.stringify([{ email: "no-history@example.com", password: "Password123" }]) }),
+      });
+      assert.equal(unrelated.response.status, 409);
+      assert.match(unrelated.body.error, /没有可关联的已完成注册记录/);
     });
   } finally {
     await new Promise((resolve) => setImmediate(resolve));

@@ -58,6 +58,17 @@ export const definitiveUnavailableCodes = new Set([
   "USER_DISABLED", "USER_BANNED", "USER_DEACTIVATED", "USER_DELETED", "USER_SUSPENDED",
 ]);
 
+export function accountNeedsAccessTokenRefresh(value) {
+  const statusCode = String(value || "").trim().toUpperCase().replace(/[\s-]+/g, "_");
+  if (!statusCode) return false;
+  if ([
+    "ACCESS_TOKEN_REFRESH_REQUIRED",
+    "AUTH_UNAUTHORIZED_UNCONFIRMED",
+    "AUTHENTICATION_UNCONFIRMED",
+  ].includes(statusCode)) return true;
+  return /(?:AUTH|ACCESS|CREDENTIAL|SESSION|TOKEN).*(?:EXPIRED|REVOKED|MISSING|UNAUTHORIZED|REFRESH_REQUIRED)/.test(statusCode);
+}
+
 export function accountSignalValue(item, keys) {
   const containers = [item, item?.overview, item?.status_details, item?.statusDetails]
     .filter((value) => value && typeof value === "object" && !Array.isArray(value));

@@ -44,7 +44,7 @@ function responseMessage(payload, status, secrets = []) {
       if (typeof payload[key] === "string" && payload[key].trim()) return redactNfapiMessage(payload[key], secrets);
     }
   }
-  return `SUB2 兼容服务请求失败 (HTTP ${status})`;
+  return `NFapi 请求失败 (HTTP ${status})`;
 }
 
 export function unwrapNfapiPayload(payload) {
@@ -72,7 +72,7 @@ export class NfapiClient {
     idempotencyKey = "",
     timeoutMs,
   } = {}) {
-    if (!this.configured) throw Object.assign(new Error("SUB2 兼容服务连接尚未配置"), { status: 503 });
+    if (!this.configured) throw Object.assign(new Error("NFapi 连接尚未配置"), { status: 503 });
     const controller = new AbortController();
     const effectiveTimeoutMs = Math.max(1_000, Number(timeoutMs) || this.timeoutMs);
     const timer = setTimeout(() => controller.abort(), effectiveTimeoutMs);
@@ -82,7 +82,7 @@ export class NfapiClient {
         method,
         signal: controller.signal,
         // A cross-origin redirect keeps custom headers in Node's fetch. Never
-        // allow a SUB2-compatible endpoint to forward the administrator API key.
+        // allow an NFapi endpoint to forward the administrator API key.
         redirect: "error",
         headers: {
           Accept: "application/json",
@@ -107,7 +107,7 @@ export class NfapiClient {
       return unwrapNfapiPayload(payload);
     } catch (error) {
       if (error?.name === "AbortError") {
-        throw Object.assign(new Error("SUB2 兼容服务请求超时"), { status: 504 });
+        throw Object.assign(new Error("NFapi 请求超时"), { status: 504 });
       }
       throw error;
     } finally {
@@ -149,6 +149,13 @@ export class NfapiClient {
 
   getAccount(id) {
     return this.request(`/api/v1/admin/accounts/${encodeURIComponent(id)}`);
+  }
+
+  refreshAccountCredentials(id) {
+    return this.request(`/api/v1/admin/accounts/${encodeURIComponent(id)}/refresh`, {
+      method: "POST",
+      timeoutMs: 120_000,
+    });
   }
 
   generateOpenAiOAuthUrl(payload = {}) {

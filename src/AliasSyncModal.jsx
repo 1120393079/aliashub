@@ -19,14 +19,26 @@ const ICLOUD_IMPORT_TYPES = {
   hide_my_email: {
     strategy: "icloud_hide_my_email",
     title: "导入 iCloud 隐藏邮箱",
-    description: "从 iCloud+ Hide My Email 导入已创建的 @privaterelay.appleid.com 地址",
+    description: "从 iCloud+ Hide My Email 导入已创建的 @icloud.com 地址",
     fieldLabel: "iCloud 隐藏邮箱（每行一个）",
-    placeholder: "例如 xxxxx@privaterelay.appleid.com",
+    placeholder: "例如 life-corers-77@icloud.com",
     officialUrl: "https://www.icloud.com/icloudplus/",
     openLabel: "打开 iCloud+ 隐藏邮箱",
     popupName: "aliashub-icloud-hide-my-email",
-    note: "隐藏邮箱由 iCloud+ 创建，邮件会转发到该源头 iCloud 邮箱。",
+    note: "隐藏邮箱由 iCloud+ 创建，通常是 @icloud.com；同时兼容 @privaterelay.appleid.com。",
     resultLabel: "iCloud 隐藏邮箱",
+  },
+  custom_domain: {
+    strategy: "icloud_custom_domain",
+    title: "导入 iCloud 自定义域名邮箱",
+    description: "手工导入已在 iCloud+ 自定义电子邮件域中创建并启用的邮箱地址",
+    fieldLabel: "iCloud 自定义域名邮箱（每行一个）",
+    placeholder: "例如 apple@ningdabbs.cn\nname@naturalflower.cn",
+    officialUrl: "https://www.icloud.com/icloudplus/",
+    openLabel: "打开 iCloud+ 自定义域名",
+    popupName: "aliashub-icloud-custom-domain",
+    note: "这里保存本地登记列表；删掉一行后确认可移除本地记录，不会删除 iCloud 中的真实域名和邮箱。",
+    resultLabel: "iCloud 自定义域名邮箱",
   },
 };
 
@@ -61,12 +73,14 @@ export default function AliasSyncModal({ account, icloudKind, onClose, onSynced 
         method: "POST",
         body: {
           aliases: aliases.split(/[\s,;]+/).map((value) => value.trim()).filter(Boolean),
-          ...(isIcloud ? { type: selectedKind } : {}),
+          ...(isIcloud ? { type: selectedKind, replace: true } : {}),
         },
       });
       const importedCount = selectedKind === "hide_my_email"
         ? result.account.icloud_hide_my_emails
-        : result.account.icloud_mail_aliases;
+        : selectedKind === "custom_domain"
+          ? result.account.icloud_custom_domain_emails
+          : result.account.icloud_mail_aliases;
       toast(isIcloud
         ? `登记完成，当前共 ${importedCount || 0} 个${cloudType.resultLabel}`
         : `登记完成，当前共 ${result.account.official_aliases} 个官方别名`);
@@ -109,7 +123,7 @@ export default function AliasSyncModal({ account, icloudKind, onClose, onSynced 
   const footer = <>
     <Button onClick={onClose}>取消</Button>
     <Button icon={ExternalLink} loading={opening} onClick={openOfficial}>{isIcloud ? cloudType.openLabel : "微软官网创建"}</Button>
-    <Button variant="primary" icon={ListPlus} loading={loading} onClick={sync}>确认登记</Button>
+    <Button variant="primary" icon={ListPlus} loading={loading} onClick={sync}>{isIcloud ? "保存列表" : "确认登记"}</Button>
   </>;
 
   return (

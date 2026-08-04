@@ -219,6 +219,30 @@ def _task_account_keys(task_type: str, payload: dict[str, Any]) -> list[str]:
     return []
 
 
+def _task_runtime_lane(task_type: str, platform: str, payload: dict[str, Any]) -> str:
+    """Keep mailbox registration and existing-account AT recovery independent."""
+    normalized_platform = str(platform or payload.get("platform", "") or "").strip()
+    if not normalized_platform:
+        return ""
+    if task_type == TASK_TYPE_REGISTER:
+        return f"{normalized_platform}:registration"
+    if (
+        task_type == TASK_TYPE_PLATFORM_ACTION
+        and str(payload.get("action_id", "") or "").strip() == "refresh_access_token"
+    ):
+        return f"{normalized_platform}:at_recovery"
+    return normalized_platform
+
+
+def _task_dispatch_priority(task_type: str, payload: dict[str, Any]) -> int:
+    if (
+        task_type == TASK_TYPE_PLATFORM_ACTION
+        and str(payload.get("action_id", "") or "").strip() == "refresh_access_token"
+    ):
+        return 0
+    return 10
+
+
 def serialize_task(task: TaskModel) -> dict[str, Any]:
     result = task.get_result()
     progress_total = int(task.progress_total or 0)
@@ -685,9 +709,11 @@ def claim_next_runnable_task(
     running_platform_counts: dict[str, int] | None = None,
     busy_account_keys: set[str] | None = None,
     max_parallel_per_platform: int = 1,
+    max_parallel_by_lane: dict[str, int] | None = None,
 ) -> Optional[dict[str, Any]]:
     running_platform_counts = dict(running_platform_counts or {})
     busy_account_keys = set(busy_account_keys or set())
+    max_parallel_by_lane = dict(max_parallel_by_lane or {})
     registration_queue_paused = is_registration_queue_paused()
     with Session(engine) as session:
         tasks = session.exec(
@@ -695,13 +721,25 @@ def claim_next_runnable_task(
             .where(TaskModel.status == TASK_STATUS_PENDING)
             .order_by(TaskModel.created_at)
         ).all()
+        tasks.sort(
+            key=lambda item: (
+                _task_dispatch_priority(item.type, item.get_payload()),
+                item.created_at,
+                item.id,
+            )
+        )
         for task in tasks:
             if registration_queue_paused and task.type == TASK_TYPE_REGISTER:
                 continue
             payload = task.get_payload()
             platform = task.platform or str(payload.get("platform", "") or "")
+            runtime_lane = _task_runtime_lane(task.type, platform, payload)
             account_keys = _task_account_keys(task.type, payload)
-            if platform and running_platform_counts.get(platform, 0) >= max_parallel_per_platform:
+            lane_limit = max(
+                int(max_parallel_by_lane.get(runtime_lane, max_parallel_per_platform) or 1),
+                1,
+            )
+            if runtime_lane and running_platform_counts.get(runtime_lane, 0) >= lane_limit:
                 continue
             if account_keys and busy_account_keys.intersection(account_keys):
                 continue
@@ -710,7 +748,12 @@ def claim_next_runnable_task(
             task.updated_at = _utcnow()
             session.add(task)
             session.commit()
-            return {"id": task.id, "platform": platform, "account_keys": account_keys}
+            return {
+                "id": task.id,
+                "platform": platform,
+                "runtime_lane": runtime_lane,
+                "account_keys": account_keys,
+            }
     return None
 
 

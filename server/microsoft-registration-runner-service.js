@@ -15,6 +15,9 @@ const AUTH_PORT = 8081;
 const PROXY_SOURCE_MANUAL = "manual";
 const PROXY_SOURCE_SAVED_POOL = "saved_pool";
 const DIRECT_PROXY_HEADER_LIMIT = 64 * 1024;
+const RUNNER_INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
+const RUNNER_HARD_TIMEOUT_MS = 20 * 60 * 1000;
+const RUNNER_WATCHDOG_INTERVAL_MS = 15 * 1000;
 const COUNTRY_PROMPT_LABELS = {
   JP: "日本",
   US: "美国",
@@ -302,6 +305,17 @@ function detectedProxyRegion(config) {
   return new Set(codes).size === 1 ? codes[0] : "";
 }
 
+function proxyHost(value) {
+  const normalized = normalizeProxyLine(value);
+  const match = /^[^:@\s]+:[^@\s]+@([^:@\s]+):\d{1,5}$/.exec(normalized);
+  return match?.[1] || "";
+}
+
+function runnerDisplayNumber(runId, offset = 0) {
+  const id = Math.max(1, Number(runId) || 1);
+  return 2_000 + ((id % 20_000) * 2) + Number(offset || 0);
+}
+
 function countryPromptValue(config) {
   const configured = normalizeCountryCode(config?.country_code);
   const code = configured === "auto" ? detectedProxyRegion(config) : configured;
@@ -388,6 +402,28 @@ function classifyRegistrarFailure(value) {
     }
   }
   return latest?.message || "";
+}
+
+function registrarEmails(value) {
+  const text = stripAnsi(value);
+  const expression = /\b[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:outlook|hotmail|live)\s*\.\s*[a-z]{2,}\b/gi;
+  return [...new Set([...text.matchAll(expression)].map((match) => match[0].replace(/\s+/g, "").toLowerCase()))];
+}
+
+function registrarFailureAccounts(value, fallbackReason = "") {
+  const text = stripAnsi(value).replace(/\s+/g, " ");
+  const marker = /\bemail\s*[:=]\s*/gi;
+  const accounts = [];
+  let match;
+  while ((match = marker.exec(text))) {
+    const detail = text.slice(marker.lastIndex, marker.lastIndex + 500);
+    const email = registrarEmails(detail)[0] || "";
+    if (!email || detail.indexOf(email.split("@")[0]) > 4) continue;
+    const failureDetail = detail.split("]", 1)[0];
+    const message = classifyRegistrarFailure(failureDetail) || fallbackReason || "Microsoft 注册失败";
+    accounts.push({ email, message });
+  }
+  return accounts;
 }
 
 function payloadState(text, valueStart) {
@@ -530,6 +566,7 @@ export class MicrosoftRegistrationRunnerService {
     proxyPoolService,
     spawnFn = nodeSpawn,
     waitForPort,
+    proxyCountryResolver,
   } = {}) {
     this.db = db;
     this.encryptionKey = encryptionKey
@@ -547,6 +584,7 @@ export class MicrosoftRegistrationRunnerService {
     this.proxyPoolService = proxyPoolService || null;
     this.spawn = spawnFn;
     this.waitForPort = waitForPort || this.waitForLocalPort.bind(this);
+    this.proxyCountryResolver = proxyCountryResolver || this.detectProxyCountry.bind(this);
     this.processes = new Map();
     this.recoverInterruptedRuns();
   }
@@ -1043,7 +1081,17 @@ export class MicrosoftRegistrationRunnerService {
     }
     const proxyType = config.proxy_mode === "api" ? "2" : "1";
     const scopeProxyType = config.proxy_mode === "direct" ? "0" : proxyType;
-    const captchaProxyType = config.proxy_mode === "list" ? "2" : "1";
+    const defaultCaptchaProxyType = config.proxy_mode === "list" ? "2" : "1";
+    const configuredCaptchaProxyType = trimText(process.env.MICROSOFT_REGISTRATION_CAPTCHA_PROXY_TYPE, 1);
+    const captchaProxyType = ["1", "2"].includes(configuredCaptchaProxyType)
+      ? configuredCaptchaProxyType
+      : defaultCaptchaProxyType;
+    const captchaErrorLimit = integer(
+      process.env.MICROSOFT_REGISTRATION_CAPTCHA_ERROR_LIMIT,
+      3,
+      1,
+      100,
+    );
     const contents = [
       `px_captcha_type = ${toml(config.captcha_type)}`,
       `px_captcha_key = ${toml(config.captcha_key)}`,
@@ -1062,7 +1110,7 @@ export class MicrosoftRegistrationRunnerService {
       `password_string = ${toml(config.password_format)}`,
       `concurrency_num = ${toml(config.concurrency)}`,
       `register_max_num = ${toml(config.quantity)}`,
-      'captcha_error_num = "100000"',
+      `captcha_error_num = ${toml(captchaErrorLimit)}`,
       `imap_and_oauth_enabled = ${toml(config.oauth_mode)}`,
       `chrome_version = ${toml(config.chrome_version)}`,
       'auth_service_url = "http://127.0.0.1:8081/api/scope"',
@@ -1103,7 +1151,59 @@ export class MicrosoftRegistrationRunnerService {
     };
   }
 
-  async createDirectProxyBridge() {
+  async detectProxyCountry(config) {
+    if (config?.proxy_mode !== "list") return "";
+    const hosts = [...new Set(splitLines(config.proxy_value).map(proxyHost).filter(Boolean))].slice(0, 5);
+    if (!hosts.length) return "";
+    const countries = [];
+    for (const host of hosts) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 5_000);
+      timer.unref?.();
+      try {
+        const response = await fetch(
+          `https://ipwho.is/${encodeURIComponent(host)}?fields=success,country_code`,
+          { headers: { Accept: "application/json" }, signal: controller.signal },
+        );
+        if (!response.ok) return "";
+        const payload = await response.json();
+        const code = String(payload?.country_code || "").toUpperCase();
+        if (!payload?.success || !Object.hasOwn(COUNTRY_PROMPT_LABELS, code)) return "";
+        countries.push(code);
+      } catch {
+        return "";
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    return countries.length && new Set(countries).size === 1 ? countries[0] : "";
+  }
+
+  async runtimeConfiguration(config) {
+    if (normalizeCountryCode(config?.country_code) !== "auto" || detectedProxyRegion(config)) return config;
+    let country = "";
+    try {
+      country = String(await this.proxyCountryResolver(config) || "").toUpperCase();
+    } catch {
+      country = "";
+    }
+    return Object.hasOwn(COUNTRY_PROMPT_LABELS, country) ? { ...config, country_code: country } : config;
+  }
+
+  async createDirectProxyBridge(publicBaseUrl) {
+    let advertisedHost = trimText(process.env.MICROSOFT_REGISTRATION_DIRECT_PROXY_HOST, 255);
+    if (!advertisedHost) {
+      try {
+        advertisedHost = new URL(publicBaseUrl).hostname;
+      } catch {
+        advertisedHost = "";
+      }
+    }
+    advertisedHost = advertisedHost.replace(/^\[|\]$/g, "");
+    if (!advertisedHost || advertisedHost.includes(":")) {
+      throw failure("直连代理桥缺少可公开访问的 IPv4 地址或域名", 500, "MICROSOFT_RUNNER_DIRECT_PROXY_FAILED");
+    }
+    const bindHost = trimText(process.env.MICROSOFT_REGISTRATION_DIRECT_PROXY_BIND_HOST, 255) || "0.0.0.0";
     const username = `direct-${crypto.randomBytes(12).toString("base64url")}`;
     const password = crypto.randomBytes(24).toString("base64url");
     const expectedAuthorization = `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`;
@@ -1190,7 +1290,7 @@ export class MicrosoftRegistrationRunnerService {
     return new Promise((resolve, reject) => {
       const fail = (error) => reject(failure(`直连代理桥启动失败: ${error.message}`, 500, "MICROSOFT_RUNNER_DIRECT_PROXY_FAILED"));
       server.once("error", fail);
-      server.listen(0, "127.0.0.1", () => {
+      server.listen(0, bindHost, () => {
         server.removeListener("error", fail);
         server.unref?.();
         const address = server.address();
@@ -1206,7 +1306,7 @@ export class MicrosoftRegistrationRunnerService {
           port,
           username,
           password,
-          proxyLine: `${username}:${password}@127.0.0.1:${port}`,
+          proxyLine: `${username}:${password}@${advertisedHost}:${port}`,
           close() {
             sockets.forEach((socket) => {
               try { socket.destroy(); } catch { /* socket already closed */ }
@@ -1239,6 +1339,7 @@ export class MicrosoftRegistrationRunnerService {
       const decoder = new StringDecoder("utf8");
       let pending = "";
       source.on("data", (chunk) => {
+        this.touchRunActivity(runId);
         pending += decoder.write(chunk);
         const lines = pending.split(/\r\n|[\r\n]/);
         pending = lines.pop() || "";
@@ -1278,6 +1379,11 @@ export class MicrosoftRegistrationRunnerService {
       if (/请选择.*邮箱后缀\s*:/.test(pending)) answer("domain", "");
       const classifiedFailure = classifyRegistrarFailure(pending);
       if (classifiedFailure) failureReason = classifiedFailure;
+      const processInfo = this.processes.get(runId);
+      if (processInfo) {
+        registrarEmails(pending).forEach((email) => processInfo.candidateEmails.add(email));
+        registrarFailureAccounts(pending, failureReason).forEach((item) => processInfo.failedAccounts.set(item.email, item));
+      }
       if (failureReason && failureReason !== loggedFailureReason) {
         loggedFailureReason = failureReason;
         this.appendLog(runId, "system", `注册机失败阶段：${failureReason}`, "error");
@@ -1285,6 +1391,10 @@ export class MicrosoftRegistrationRunnerService {
       if (/程序执行结果汇总/.test(pending) && /程序运行时长/.test(pending)) {
         const successes = Number(/注册成功次数\s*[:：]\s*(\d+)/.exec(pending)?.[1] || 0);
         const failed = successes === 0 && Boolean(failureReason);
+        if (failed && processInfo?.failedAccounts.size === 0 && processInfo.candidateEmails.size === 1) {
+          const [email] = processInfo.candidateEmails;
+          processInfo.failedAccounts.set(email, { email, message: failureReason });
+        }
         this.scheduleTerminalFinish(
           runId,
           failed ? "failed" : "completed",
@@ -1296,8 +1406,18 @@ export class MicrosoftRegistrationRunnerService {
     child.stdout.once("end", () => processChunk(decoder.end()));
   }
 
-  spawnWindowsProcess(executable, runDir, environment, { interactive = false } = {}) {
-    const xvfbArguments = ["-a", "-f", path.join(runDir, "Xauthority"), "-e", path.join(runDir, "xvfb.log")];
+  spawnWindowsProcess(executable, runDir, environment, {
+    interactive = false,
+    displayNumber,
+    role = "runner",
+  } = {}) {
+    const serverNumber = integer(displayNumber, 2_000, 1, 65_000);
+    const safeRole = String(role || "runner").replace(/[^a-z0-9_-]+/gi, "-").slice(0, 32) || "runner";
+    const xvfbArguments = [
+      "-n", String(serverNumber),
+      "-f", path.join(runDir, `Xauthority-${safeRole}`),
+      "-e", path.join(runDir, `xvfb-${safeRole}.log`),
+    ];
     if (interactive) {
       const command = [
         shellQuote(this.xvfbBinary),
@@ -1358,6 +1478,50 @@ export class MicrosoftRegistrationRunnerService {
     return this.run(runId);
   }
 
+  touchRunActivity(runId) {
+    const info = this.processes.get(Number(runId));
+    if (info) info.lastActivityAt = Date.now();
+  }
+
+  startWatchdog(runId) {
+    const info = this.processes.get(Number(runId));
+    if (!info || info.watchdogTimer) return;
+    const inactivityTimeout = integer(
+      process.env.MICROSOFT_REGISTRATION_INACTIVITY_TIMEOUT_MS,
+      RUNNER_INACTIVITY_TIMEOUT_MS,
+      60_000,
+      60 * 60 * 1000,
+    );
+    const hardTimeout = integer(
+      process.env.MICROSOFT_REGISTRATION_HARD_TIMEOUT_MS,
+      RUNNER_HARD_TIMEOUT_MS,
+      2 * 60_000,
+      4 * 60 * 60 * 1000,
+    );
+    const timer = setInterval(() => {
+      const active = this.processes.get(Number(runId));
+      if (!active) {
+        clearInterval(timer);
+        return;
+      }
+      const row = this.run(runId);
+      if (!activeStatus(row.status)) {
+        clearInterval(timer);
+        return;
+      }
+      const now = Date.now();
+      if (now - Number(active.startedAt || now) >= hardTimeout) {
+        this.appendLog(runId, "system", "注册任务超过最长运行时间，已自动停止", "error");
+        this.finish(runId, "failed", { message: "注册任务运行超时，已自动停止" });
+      } else if (now - Number(active.lastActivityAt || active.startedAt || now) >= inactivityTimeout) {
+        this.appendLog(runId, "system", "注册机长时间没有输出，已自动停止", "error");
+        this.finish(runId, "failed", { message: "注册机长时间无进展，已自动停止" });
+      }
+    }, RUNNER_WATCHDOG_INTERVAL_MS);
+    timer.unref?.();
+    info.watchdogTimer = timer;
+  }
+
   run(id) {
     const runId = Number(id);
     if (!Number.isSafeInteger(runId) || runId <= 0) throw failure("注册任务 ID 无效");
@@ -1400,6 +1564,38 @@ export class MicrosoftRegistrationRunnerService {
     }
   }
 
+  importFailedResults(runId, failedAccounts) {
+    if (!this.registrationService?.ingestTrusted || !failedAccounts) return { received: 0 };
+    try {
+      const row = this.run(runId);
+      const values = failedAccounts instanceof Map ? [...failedAccounts.values()] : failedAccounts;
+      const items = values
+        .filter((item) => item?.email)
+        .slice(0, 100)
+        .map((item) => ({
+          email: item.email,
+          display_name: item.message || "Microsoft 注册失败",
+          status: "failed",
+          error: item.message || "Microsoft 注册失败",
+          runner_run_id: String(runId),
+        }));
+      if (!items.length) return { received: 0 };
+      const payload = withRunMetadata({
+        data: items,
+        server_upload_other: { source: "go-ms-server-runner-failure", runner_run_id: String(runId) },
+      }, row, "go-ms-server-runner-failure");
+      const result = this.registrationService.ingestTrusted(payload, {
+        fallbackProxyLabel: row.proxy_label,
+      });
+      const received = Number(result.accepted || 0) + Number(result.updated || 0);
+      if (received) this.appendLog(runId, "system", `已从注册机日志导入 ${received} 条失败记录`, "info");
+      return { received };
+    } catch (error) {
+      this.appendLog(runId, "system", `注册失败记录导入失败: ${error.message}`, "error");
+      return { received: 0 };
+    }
+  }
+
   finish(runId, status, { message = "", exitCode = null } = {}) {
     const row = this.run(runId);
     if (FINISHED_STATUSES.has(row.status)) return row;
@@ -1407,8 +1603,15 @@ export class MicrosoftRegistrationRunnerService {
     const recovered = row.received_count || ["cancelled", "interrupted"].includes(status)
       ? { received: 0 }
       : this.importSavedResults(runId, processInfo?.runDir);
-    const receivedCount = Number(row.received_count || 0) + recovered.received;
-    const finalMessage = recovered.received ? `${message || "注册机已完成"}；已从结果文件导入 ${recovered.received} 条注册邮箱` : message;
+    const failed = ["cancelled", "interrupted"].includes(status)
+      ? { received: 0 }
+      : this.importFailedResults(runId, processInfo?.failedAccounts);
+    const receivedCount = Number(row.received_count || 0) + recovered.received + failed.received;
+    const imported = [
+      recovered.received ? `已从结果文件导入 ${recovered.received} 条注册邮箱` : "",
+      failed.received ? `已从注册机日志导入 ${failed.received} 条失败记录` : "",
+    ].filter(Boolean).join("；");
+    const finalMessage = imported ? `${message || "注册机已完成"}；${imported}` : message;
     const timestamp = nowIso();
     this.db.prepare(`
       UPDATE microsoft_registration_runner_runs
@@ -1417,6 +1620,7 @@ export class MicrosoftRegistrationRunnerService {
     `).run(status, status, finalMessage, exitCode, receivedCount, timestamp, timestamp, runId);
     this.processes.delete(runId);
     if (processInfo?.terminalTimer) clearTimeout(processInfo.terminalTimer);
+    if (processInfo?.watchdogTimer) clearInterval(processInfo.watchdogTimer);
     this.killChild(processInfo?.registrar);
     this.killChild(processInfo?.auth);
     this.closeDirectProxyBridge(processInfo?.directProxyBridge);
@@ -1428,13 +1632,54 @@ export class MicrosoftRegistrationRunnerService {
     return this.run(runId);
   }
 
-  killChild(child) {
-    if (!child?.pid) return;
+  descendantPids(rootPid) {
+    if (process.platform === "win32") return [];
+    const children = new Map();
     try {
-      if (process.platform !== "win32") process.kill(-child.pid, "SIGTERM");
-      else child.kill("SIGTERM");
+      for (const entry of fs.readdirSync("/proc", { withFileTypes: true })) {
+        if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
+        let stat = "";
+        try { stat = fs.readFileSync(`/proc/${entry.name}/stat`, "utf8"); } catch { continue; }
+        const match = /^\d+\s+\(.*\)\s+\S+\s+(\d+)\s/.exec(stat);
+        const parent = Number(match?.[1]);
+        if (!Number.isSafeInteger(parent)) continue;
+        if (!children.has(parent)) children.set(parent, []);
+        children.get(parent).push(Number(entry.name));
+      }
     } catch {
-      try { child.kill("SIGTERM"); } catch { /* process already stopped */ }
+      return [];
+    }
+    const result = [];
+    const visit = (pid) => {
+      for (const childPid of children.get(pid) || []) {
+        visit(childPid);
+        result.push(childPid);
+      }
+    };
+    visit(Number(rootPid));
+    return result;
+  }
+
+  killChild(child) {
+    const rootPid = Number(child?.pid);
+    if (!Number.isSafeInteger(rootPid) || rootPid <= 0) return;
+    const descendants = this.descendantPids(rootPid);
+    for (const pid of descendants) {
+      try { process.kill(pid, "SIGTERM"); } catch { /* process already stopped */ }
+    }
+    try {
+      if (process.platform !== "win32") process.kill(-rootPid, "SIGTERM");
+      else child.kill("SIGTERM");
+    } catch { /* process group already stopped */ }
+    try { child.kill("SIGTERM"); } catch { /* process already stopped */ }
+    if (process.platform !== "win32") {
+      const targets = [...descendants, rootPid];
+      const timer = setTimeout(() => {
+        for (const pid of targets) {
+          try { process.kill(pid, "SIGKILL"); } catch { /* process already stopped */ }
+        }
+      }, 3_000);
+      timer.unref?.();
     }
   }
 
@@ -1482,7 +1727,12 @@ export class MicrosoftRegistrationRunnerService {
     this.requireTool();
     if (this.currentRun()) throw failure("已有服务器注册任务正在运行", 409, "MICROSOFT_RUNNER_ALREADY_ACTIVE");
     if (await this.portInUse()) throw failure("服务器本地 8081 端口正在被占用，请先停止其他注册机", 409, "MICROSOFT_RUNNER_PORT_BUSY");
-    const { config } = this.requireSavedConfiguration();
+    const { config: savedConfig } = this.requireSavedConfiguration();
+    const config = await this.runtimeConfiguration(savedConfig);
+    const autoDetectedCountry = normalizeCountryCode(savedConfig.country_code) === "auto"
+      && normalizeCountryCode(config.country_code) !== "auto"
+      ? normalizeCountryCode(config.country_code)
+      : "";
     const timestamp = nowIso();
     const token = crypto.randomBytes(32).toString("base64url");
     const expiresAt = new Date(Date.now() + CALLBACK_TTL_MS).toISOString();
@@ -1513,14 +1763,38 @@ export class MicrosoftRegistrationRunnerService {
     let secrets = [config.captcha_key, config.proxy_value, token, callback];
     try {
       if (config.proxy_mode === "direct") {
-        directProxyBridge = await this.createDirectProxyBridge();
+        directProxyBridge = await this.createDirectProxyBridge(publicBaseUrl);
         secrets = [...secrets, directProxyBridge.username, directProxyBridge.password, directProxyBridge.proxyLine];
       }
       this.writeRunFiles(runDir, config, runId, callback, directProxyBridge);
       const environment = this.runnerEnvironment(runDir);
+      if (autoDetectedCountry) {
+        this.appendLog(
+          runId,
+          "system",
+          `已根据代理 IP 自动选择注册地区：${COUNTRY_PROMPT_LABELS[autoDetectedCountry]}`,
+          "info",
+          secrets,
+        );
+      }
       this.appendLog(runId, "system", "正在启动服务器授权服务", "info", secrets);
-      const auth = this.spawnWindowsProcess(this.authExecutable, runDir, environment);
-      this.processes.set(runId, { runDir, auth, registrar: null, directProxyBridge, secrets, terminalTimer: null });
+      const auth = this.spawnWindowsProcess(this.authExecutable, runDir, environment, {
+        displayNumber: runnerDisplayNumber(runId, 0),
+        role: "auth",
+      });
+      this.processes.set(runId, {
+        runDir,
+        auth,
+        registrar: null,
+        directProxyBridge,
+        secrets,
+        terminalTimer: null,
+        watchdogTimer: null,
+        candidateEmails: new Set(),
+        failedAccounts: new Map(),
+        startedAt: Date.now(),
+        lastActivityAt: Date.now(),
+      });
       this.watchChild(runId, auth, "auth", secrets);
       this.updateRun(runId, { auth_pid: Number(auth.pid) || null });
       const ready = await this.waitForPort(AUTH_PORT, 20_000);
@@ -1528,7 +1802,11 @@ export class MicrosoftRegistrationRunnerService {
       if (!activeStatus(active.status)) return publicRun(active);
       if (!ready) throw failure("授权服务启动超时", 500, "MICROSOFT_RUNNER_AUTH_TIMEOUT");
       this.appendLog(runId, "system", "授权服务已就绪，正在启动注册机", "info", secrets);
-      const registrar = this.spawnWindowsProcess(this.registrarExecutable, runDir, environment, { interactive: true });
+      const registrar = this.spawnWindowsProcess(this.registrarExecutable, runDir, environment, {
+        interactive: true,
+        displayNumber: runnerDisplayNumber(runId, 1),
+        role: "registrar",
+      });
       const info = this.processes.get(runId);
       if (info) info.registrar = registrar;
       this.watchChild(runId, registrar, "registrar", secrets);
@@ -1540,6 +1818,7 @@ export class MicrosoftRegistrationRunnerService {
         started_at: nowIso(),
         message: "服务器注册机正在运行",
       });
+      this.startWatchdog(runId);
       audit(this.db, null, "microsoft_registration_runner", "启动服务器微软注册机", `任务 #${runId}`, {
         quantity: config.quantity,
         concurrency: config.concurrency,

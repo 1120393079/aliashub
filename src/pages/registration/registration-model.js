@@ -47,6 +47,8 @@ export function occupiedAliasInfo(item) {
 export function baseOptionLabel(item) {
   const type = item.strategy === "icloud_hide_my_email"
     ? "隐藏邮箱"
+    : item.strategy === "icloud_custom_domain"
+      ? "自定义域名"
     : item.strategy === "icloud_mail_alias" ? "邮箱别名" : "";
   const occupied = occupiedAliasInfo(item);
   const state = item.registration_state === "in_progress"

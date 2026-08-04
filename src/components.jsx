@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
-import { AlertCircle, Check, ChevronLeft, ChevronRight, Cloud, LoaderCircle, X } from "lucide-react";
+import { AlertCircle, Check, ChevronLeft, ChevronRight, Cloud, Link2, LoaderCircle, X } from "lucide-react";
 
 const ToastContext = createContext(() => {});
 
@@ -42,9 +42,14 @@ export function ICloudMark({ size = 34 }) {
   return <span className="provider-mark icloud-mark" style={{ "--mark-size": `${size}px` }} aria-hidden="true"><Cloud size={Math.max(12, Number(size) * 0.62)} /></span>;
 }
 
+export function InboxLinkMark({ size = 34 }) {
+  return <span className="provider-mark inbox-link-mark" style={{ "--mark-size": `${size}px` }} aria-hidden="true"><Link2 size={Math.max(12, Number(size) * 0.58)} /></span>;
+}
+
 export function ProviderMark({ provider, size = 34 }) {
   if (provider === "google") return <GoogleMark size={size} />;
   if (provider === "icloud") return <ICloudMark size={size} />;
+  if (provider === "inbox_link") return <InboxLinkMark size={size} />;
   return <MicrosoftMark size={size} />;
 }
 

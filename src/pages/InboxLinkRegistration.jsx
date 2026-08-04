@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { CheckCircle2, KeyRound, Link2, MailPlus, Play, ShieldCheck, Trash2 } from "lucide-react";
+import { CheckCircle2, Inbox, KeyRound, Link2, MailPlus, Play, ShieldCheck, Trash2 } from "lucide-react";
 import { api } from "../api.js";
-import { Button, EmptyState, FormField, LoadingBlock, StatusBadge, useToast } from "../components.jsx";
+import { Button, ConfirmDialog, EmptyState, FormField, LoadingBlock, Segmented, StatusBadge, useToast } from "../components.jsx";
 import { formatDate } from "../utils.js";
 
 function poolLineCount(value) {
@@ -19,17 +19,33 @@ function registrationState(item) {
   return { status: "active", label: "可用" };
 }
 
+function gptState(item) {
+  if (!item.chatgpt) return null;
+  const plan = item.chatgpt.plan === "free" ? "GPT Free" : `GPT ${String(item.chatgpt.plan || "未知").toUpperCase()}`;
+  return {
+    plan,
+    planStatus: item.chatgpt.plan === "free" ? "paused" : "completed",
+    atLabel: item.chatgpt.at_invalid ? "AT 失效" : "AT 正常",
+    atStatus: item.chatgpt.at_invalid ? "failed" : "active",
+  };
+}
+
 export default function InboxLinkRegistrationPage({ onNavigate }) {
   const [poolText, setPoolText] = useState("");
   const [data, setData] = useState(null);
   const [importing, setImporting] = useState(false);
   const [deletingId, setDeletingId] = useState(null);
+  const [selected, setSelected] = useState([]);
+  const [filter, setFilter] = useState("all");
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
   const toast = useToast();
   const detectedCount = useMemo(() => poolLineCount(poolText), [poolText]);
 
   const load = useCallback(async () => {
     const result = await api("/api/inbox-link-mailboxes");
     setData(result);
+    setSelected((current) => current.filter((id) => result.items.some((item) => item.id === id)));
     return result;
   }, []);
 
@@ -44,9 +60,9 @@ export default function InboxLinkRegistrationPage({ onNavigate }) {
         method: "POST",
         body: { poolText },
       });
-      setData(result);
       setPoolText("");
       toast(`已绑定 ${result.imported} 个链接邮箱；新增 ${result.created}，更新 ${result.updated}`);
+      await load();
     } catch (error) {
       toast(error.message, "error");
     } finally {
@@ -57,13 +73,52 @@ export default function InboxLinkRegistrationPage({ onNavigate }) {
   const remove = async (item) => {
     setDeletingId(item.id);
     try {
-      await api(`/api/inbox-link-mailboxes/${item.id}`, { method: "DELETE" });
-      toast(`${item.email} 已解除绑定`);
+      const result = await api(`/api/inbox-link-mailboxes/${item.id}`, { method: "DELETE" });
+      toast(result.gpt_deleted
+        ? `${item.email} 的 GPT 账号已删除并解除绑定`
+        : `${item.email} 已解除绑定`);
       await load();
     } catch (error) {
       toast(error.message, "error");
     } finally {
       setDeletingId(null);
+    }
+  };
+
+  const visibleItems = useMemo(() => {
+    const items = data?.items || [];
+    return filter === "free_invalid_at" ? items.filter((item) => item.unlink_recommended) : items;
+  }, [data, filter]);
+  const selectableIds = visibleItems
+    .filter((item) => item.registration_state !== "in_progress")
+    .map((item) => item.id);
+  const allVisibleSelected = selectableIds.length > 0 && selectableIds.every((id) => selected.includes(id));
+  const toggle = (id) => setSelected((current) => current.includes(id)
+    ? current.filter((item) => item !== id)
+    : [...current, id]);
+  const toggleVisible = () => setSelected((current) => allVisibleSelected
+    ? current.filter((id) => !selectableIds.includes(id))
+    : [...new Set([...current, ...selectableIds])]);
+
+  const bulkDelete = async () => {
+    setBulkDeleting(true);
+    try {
+      const result = await api("/api/inbox-link-mailboxes/bulk-delete", {
+        method: "POST",
+        body: { ids: selected },
+      });
+      if (result.gpt_failed?.length) {
+        toast(`已删除 GPT 账号 ${result.gpt_deleted} 个并解绑 ${result.deleted} 个，另有 ${result.gpt_failed.length} 个 GPT 账号删除失败`, "error");
+      } else {
+        toast(`已删除 GPT 账号 ${result.gpt_deleted} 个，并解除绑定 ${result.deleted} 个链接邮箱`);
+      }
+      setSelected([]);
+      setBulkDeleteOpen(false);
+      await load();
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      setBulkDeleting(false);
     }
   };
 
@@ -79,17 +134,17 @@ export default function InboxLinkRegistrationPage({ onNavigate }) {
 
       <section className="inbox-link-layout">
         <article className="panel inbox-link-editor-panel">
-          <header className="panel-header"><div><h2>绑定链接取件邮箱</h2><p>这里只保存邮箱和取件链接；注册请前往 ChatGPT 注册页面</p></div><MailPlus size={20} /></header>
+          <header className="panel-header"><div><h2>绑定链接取件邮箱</h2><p>绑定后会作为独立邮箱加入邮件中心，与源头邮箱分开显示</p></div><MailPlus size={20} /></header>
           <div className="inbox-link-form">
             <FormField
               label="邮箱 + 取件链接"
-              hint="每行一组，邮箱与链接用空格隔开；重复邮箱会更新原绑定"
+              hint="每行一组，邮箱与链接用空格隔开；支持任意邮箱和 HTTPS 取件链接"
             >
               <textarea
                 className="inbox-link-editor"
                 value={poolText}
                 onChange={(event) => setPoolText(event.target.value)}
-                placeholder={"alpha@example.com https://dispose.lol/ib/xxxxxxxx\nbeta@example.com https://dispose.lol/ib/yyyyyyyy"}
+                placeholder={"name@example.com https://pickup.example.com/?token=xxxxxxxx\nuser@custom-domain.com https://mail.example.net/p/yyyyyyyy"}
                 spellCheck={false}
                 autoComplete="off"
               />
@@ -110,26 +165,35 @@ export default function InboxLinkRegistrationPage({ onNavigate }) {
               <li><b>绑定邮箱</b><span>在本页粘贴邮箱和取件链接。</span></li>
               <li><b>选择邮箱来源</b><span>前往 ChatGPT 注册，选择“链接取件邮箱池”。</span></li>
               <li><b>填写注册数量</b><span>输入几个就从可用绑定中取几个。</span></li>
-              <li><b>自动收码</b><span>每个任务使用对应链接读取新验证码。</span></li>
+              <li><b>邮件中心</b><span>每个链接邮箱独立显示，可单独同步邮件和验证码。</span></li>
             </ol>
           </article>
-          <article className="panel inbox-link-security"><KeyRound size={18} /><span><b>链接密钥已加密保存</b><small>列表和任务日志只显示脱敏链接。</small></span></article>
+          <article className="panel inbox-link-security"><KeyRound size={18} /><span><b>完整取件链接已加密保存</b><small>不限制邮箱或链接域名；列表和任务日志只显示脱敏链接。</small></span></article>
         </aside>
       </section>
 
       <section className="table-panel inbox-link-table-panel">
-        <header className="panel-header"><div><h2>已绑定链接邮箱</h2><p>共 {data.total} 个，可用于注册 {data.available} 个</p></div><Button size="sm" onClick={() => load().catch((error) => toast(error.message, "error"))}>刷新</Button></header>
+        <header className="panel-header"><div><h2>已绑定链接邮箱</h2><p>共 {data.total} 个，可用于注册 {data.available} 个；Free 且 AT 失效 {data.free_invalid_at || 0} 个</p></div><Button size="sm" onClick={() => load().catch((error) => toast(error.message, "error"))}>刷新</Button></header>
         {data.items.length ? <>
-          <div className="data-table-wrap"><table className="data-table"><thead><tr><th>邮箱</th><th>取件链接</th><th>状态</th><th>绑定时间</th><th aria-label="操作" /></tr></thead><tbody>{data.items.map((item) => {
+          <div className="inbox-link-bulk-toolbar">
+            <Segmented value={filter} onChange={(value) => { setFilter(value); setSelected([]); }} ariaLabel="链接邮箱筛选" items={[{ value: "all", label: "全部", count: data.total }, { value: "free_invalid_at", label: "Free + AT 失效", count: data.free_invalid_at || 0 }]} />
+            <div className="registration-bulk-bar"><label><input type="checkbox" checked={allVisibleSelected} disabled={!selectableIds.length} onChange={toggleVisible} />全选当前筛选</label><span>已选择 <b>{selected.length}</b> 个</span><Button size="sm" variant="danger" icon={Trash2} disabled={!selected.length} onClick={() => setBulkDeleteOpen(true)}>批量删除并解绑</Button></div>
+          </div>
+          <div className="data-table-wrap"><table className="data-table"><thead><tr><th className="select-column"><input type="checkbox" aria-label="选择当前筛选中的链接邮箱" checked={allVisibleSelected} disabled={!selectableIds.length} onChange={toggleVisible} /></th><th>邮箱</th><th>取件链接</th><th>注册状态</th><th>GPT / AT</th><th>绑定时间</th><th aria-label="操作" /></tr></thead><tbody>{visibleItems.map((item) => {
             const state = registrationState(item);
-            return <tr key={item.id}><td><b>{item.email}</b></td><td><code>{item.masked_link}</code></td><td><StatusBadge status={state.status}>{state.label}</StatusBadge></td><td><span className="muted-cell">{formatDate(item.created_at)}</span></td><td><Button size="sm" variant="danger" icon={Trash2} loading={deletingId === item.id} disabled={item.registration_state === "in_progress"} onClick={() => remove(item)}>解除绑定</Button></td></tr>;
+            const chatgpt = gptState(item);
+            const selectable = item.registration_state !== "in_progress";
+            return <tr className={selected.includes(item.id) ? "selected-row" : ""} key={item.id}><td className="select-column"><input type="checkbox" aria-label={`选择 ${item.email}`} checked={selected.includes(item.id)} disabled={!selectable} onChange={() => toggle(item.id)} /></td><td><b>{item.email}</b></td><td><code>{item.masked_link}</code></td><td><StatusBadge status={state.status}>{state.label}</StatusBadge></td><td>{chatgpt ? <div className="inbox-link-gpt-status"><StatusBadge status={chatgpt.planStatus}>{chatgpt.plan}</StatusBadge><StatusBadge status={chatgpt.atStatus}>{chatgpt.atLabel}</StatusBadge></div> : <span className="muted-cell">尚无 GPT 账号</span>}</td><td><span className="muted-cell">{formatDate(item.created_at)}</span></td><td><div className="row-actions"><Button size="sm" icon={Inbox} disabled={!item.source_account_id} onClick={() => onNavigate("inbox", { accountId: item.source_account_id })}>邮件中心</Button><Button size="sm" variant="danger" icon={Trash2} loading={deletingId === item.id} disabled={!selectable} onClick={() => remove(item)}>删除并解绑</Button></div></td></tr>;
           })}</tbody></table></div>
-          <div className="inbox-link-mobile-list">{data.items.map((item) => {
+          <div className="inbox-link-mobile-list">{visibleItems.map((item) => {
             const state = registrationState(item);
-            return <article key={item.id}><header><b>{item.email}</b><StatusBadge status={state.status}>{state.label}</StatusBadge></header><code>{item.masked_link}</code><footer><span>{formatDate(item.created_at)}</span><Button size="sm" variant="danger" icon={Trash2} loading={deletingId === item.id} disabled={item.registration_state === "in_progress"} onClick={() => remove(item)}>解除</Button></footer></article>;
+            const chatgpt = gptState(item);
+            const selectable = item.registration_state !== "in_progress";
+            return <article className={selected.includes(item.id) ? "selected" : ""} key={item.id}><header><label><input type="checkbox" checked={selected.includes(item.id)} disabled={!selectable} onChange={() => toggle(item.id)} /><b>{item.email}</b></label><StatusBadge status={state.status}>{state.label}</StatusBadge></header><code>{item.masked_link}</code>{chatgpt && <div className="inbox-link-gpt-status"><StatusBadge status={chatgpt.planStatus}>{chatgpt.plan}</StatusBadge><StatusBadge status={chatgpt.atStatus}>{chatgpt.atLabel}</StatusBadge></div>}<footer><span>{formatDate(item.created_at)}</span><span className="row-actions"><Button size="sm" icon={Inbox} disabled={!item.source_account_id} onClick={() => onNavigate("inbox", { accountId: item.source_account_id })}>邮件</Button><Button size="sm" variant="danger" icon={Trash2} loading={deletingId === item.id} disabled={!selectable} onClick={() => remove(item)}>删除并解绑</Button></span></footer></article>;
           })}</div>
         </> : <EmptyState icon={Link2} title="还没有绑定链接邮箱" description="在上方按“邮箱 空格 取件链接”的格式粘贴并绑定。" />}
       </section>
+      <ConfirmDialog open={bulkDeleteOpen} onClose={() => setBulkDeleteOpen(false)} onConfirm={bulkDelete} loading={bulkDeleting} danger title="批量删除 GPT 账号并解绑？" description={`将永久删除选中邮箱对应的 GPT 账号，同时解除 ${selected.length} 个取件链接绑定并移除邮件中心本地邮件。正在注册的邮箱不会被选中。`} confirmText="确认删除并解绑" />
     </div>
   );
 }

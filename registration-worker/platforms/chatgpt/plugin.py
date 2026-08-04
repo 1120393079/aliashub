@@ -994,6 +994,7 @@ class ChatGPTPlatform(BasePlatform):
             {"id": "switch_account", "label": "切换到 Codex 桌面端", "params": []},
             {"id": "get_account_state", "label": "查询账号状态/订阅", "params": []},
             {"id": "refresh_token", "label": "刷新 Token", "params": []},
+            {"id": "refresh_access_token", "label": "刷新 AT（仅网页登录 Session）", "params": []},
             {"id": "set_password", "label": "设置账号密码",
              "params": [
                  {"key": "password", "label": "密码（留空自动生成）", "type": "password"},
@@ -1072,6 +1073,8 @@ class ChatGPTPlatform(BasePlatform):
         return get_codex_desktop_state()
 
     def execute_action(self, action_id: str, account: Account, params: dict) -> dict:
+        if action_id == "refresh_access_token":
+            return self._handle_refresh_access_token(account, params)
         if action_id == "set_password":
             return self._handle_set_password(account, params)
         if action_id == "payment_link":
@@ -1167,6 +1170,142 @@ class ChatGPTPlatform(BasePlatform):
         raise NotImplementedError(f"Unknown action: {action_id}")
 
     # Override specific capability handlers
+    def _access_token_rejected_by_upstream(
+        self,
+        account: Account,
+        access_token: str,
+        proxy: str | None,
+    ) -> bool:
+        from platforms.chatgpt.payment import ConclusiveAccountStatusError, _fetch_usage_data
+
+        class _ProbeAccount:
+            pass
+
+        probe = _ProbeAccount()
+        probe.access_token = access_token
+        probe.token = access_token
+        probe.extra = dict(account.extra or {})
+        probe.user_id = account.user_id or ""
+        try:
+            _fetch_usage_data(
+                probe,
+                proxy=proxy,
+                max_attempts=1,
+                require_identity=True,
+            )
+            return False
+        except ConclusiveAccountStatusError as exc:
+            return exc.credential_state in {"expired", "revoked"}
+        except Exception:
+            # A network or plan-response failure does not prove that the AT is invalid.
+            return False
+
+    def _refresh_access_token_by_email_otp(
+        self,
+        account: Account,
+        params: dict,
+        proxy: str | None,
+    ) -> dict:
+        from platforms._browser_backend import parse_checkout_mode
+        from platforms.chatgpt.browser_register import (
+            ChatGPTBrowserRegister,
+            _build_proxy_config,
+            _restore_existing_account_session,
+        )
+
+        log_fn = getattr(self, "log", print)
+        browser_mode = str(params.get("browser_mode") or "camoufox_headless")
+        if not browser_mode.startswith("camoufox_"):
+            browser_mode = "camoufox_headless"
+        backend_config = parse_checkout_mode(browser_mode)
+        otp_callback, otp_error = self._build_get_rt_mailbox_otp_callback(
+            account,
+            log_fn,
+            proxy,
+            purpose="刷新 AT",
+        )
+        if not otp_callback:
+            raise RuntimeError(otp_error or "原邮箱 OTP 读取不可用")
+
+        reg = ChatGPTBrowserRegister(
+            headless=backend_config.is_headless,
+            proxy=proxy,
+            log_fn=log_fn,
+            backend_config=backend_config,
+        )
+        launch_opts = {"headless": reg.headless}
+        cam_proxy = _build_proxy_config(reg.proxy)
+        if cam_proxy:
+            launch_opts["proxy"] = cam_proxy
+        try:
+            with reg._open_browser(launch_opts) as browser:
+                page = browser.new_page()
+                session_info = _restore_existing_account_session(
+                    page,
+                    email=account.email,
+                    cookies="",
+                    otp_callback=otp_callback,
+                    expected_account_id=account.user_id or "",
+                    log=log_fn,
+                    cancel_check=getattr(self, "_cancel_check_fn", None),
+                )
+        finally:
+            cancel_wait = getattr(otp_callback, "cancel_wait", None)
+            if callable(cancel_wait):
+                cancel_wait()
+
+        access_token = str(session_info.get("access_token") or "").strip()
+        if not access_token:
+            raise RuntimeError("邮箱 OTP 登录未返回 Access Token")
+        if self._access_token_rejected_by_upstream(account, access_token, proxy):
+            raise RuntimeError("邮箱 OTP 登录返回的 Access Token 仍被上游拒绝")
+        return {
+            "access_token": access_token,
+            "session_token": str(session_info.get("session_token") or "").strip(),
+            "cookies": str(session_info.get("cookies") or "").strip(),
+            "account_id": str(session_info.get("account_id") or account.user_id or "").strip(),
+            "message": "AT 已通过原邮箱 OTP 重新登录刷新（未获取 RT）",
+        }
+
+    def _handle_refresh_access_token(self, account: Account, params: dict) -> dict:
+        """Refresh only the web access token; never enter OAuth or use a refresh token."""
+        proxy = str(params.get("proxy") or "").strip() or (self.config.proxy if self.config else None)
+        try:
+            current_access_token = str(
+                (account.extra or {}).get("access_token") or account.token or ""
+            ).strip()
+            access_token = ""
+            try:
+                details = _fetch_authenticated_session_status_details(account, proxy=proxy)
+                credential_updates = details.get("_credential_updates")
+                credential_updates = credential_updates if isinstance(credential_updates, dict) else {}
+                access_token = str(credential_updates.get("access_token") or "").strip()
+            except Exception as exc:
+                self.log(f"  现有网页登录 Session 未能直接刷新 AT: {exc}")
+            session_returned_same_token = bool(
+                access_token and current_access_token and access_token == current_access_token
+            )
+            if access_token and not session_returned_same_token \
+                    and not self._access_token_rejected_by_upstream(account, access_token, proxy):
+                return {
+                    "ok": True,
+                    "data": {
+                        "access_token": access_token,
+                        "message": "AT 刷新成功（仅使用网页登录 Session）",
+                    },
+                }
+            if session_returned_same_token:
+                self.log("  Session 返回的 AT 没有更新，切换原邮箱 OTP 重新登录")
+            elif access_token:
+                self.log("  Session 返回的 AT 已被上游拒绝，切换原邮箱 OTP 重新登录")
+            data = self._refresh_access_token_by_email_otp(account, params, proxy)
+            return {
+                "ok": True,
+                "data": data,
+            }
+        except Exception as exc:
+            return {"ok": False, "error": f"AT 刷新失败: {exc}"}
+
     def _handle_query_state(self, account: Account, params: dict) -> dict:
         """Handle query_state capability for ChatGPT."""
         proxy = self.config.proxy if self.config else None

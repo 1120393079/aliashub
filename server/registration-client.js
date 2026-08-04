@@ -144,7 +144,7 @@ export class RegistrationClient {
       return { ...(result && typeof result === "object" ? result : {}), release_mode: "force_release" };
     } catch (error) {
       if (error.status === 404 || error.status === 405) {
-        throw Object.assign(new Error("注册服务尚未部署强制释放接口，请先更新兼容注册服务"), {
+        throw Object.assign(new Error("注册服务尚未部署强制释放接口，请先更新 FrciblyK12"), {
           status: 503,
           cause: error,
         });
@@ -181,6 +181,20 @@ export class RegistrationClient {
 
   getAccount(accountId) {
     return this.request(`/api/accounts/${encodeURIComponent(accountId)}`);
+  }
+
+  createAccount(payload) {
+    return this.request("/api/accounts", {
+      method: "POST",
+      body: payload,
+    });
+  }
+
+  updateAccount(accountId, payload) {
+    return this.request(`/api/accounts/${encodeURIComponent(accountId)}`, {
+      method: "PATCH",
+      body: payload,
+    });
   }
 
   deleteAccount(accountId) {

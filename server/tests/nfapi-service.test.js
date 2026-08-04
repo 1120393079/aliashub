@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createDatabase, nowIso } from "../db.js";
-import { NfapiService, normalizeNfapiBaseUrl, normalizeNfapiImportOptions } from "../nfapi-service.js";
+import { NfapiService, normalizeNfapiImportOptions } from "../nfapi-service.js";
 
 function jwt(payload) {
   const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
@@ -125,12 +125,14 @@ function createService({
   agentIdentityPendingTtlMs,
   agentIdentityRegistrar,
   nowFn,
+  registrationUpdateAccount,
 }) {
   const byId = new Map(accounts.map((account) => [Number(account.id), account]));
   const service = new NfapiService({
     db,
     registrationClient: {
       async getAccount(id) { return byId.get(Number(id)) || null; },
+      ...(registrationUpdateAccount ? { updateAccount: registrationUpdateAccount } : {}),
     },
     encryptionKey: "test-encryption-key",
     baseUrl: "https://nfapi.test",
@@ -199,31 +201,7 @@ function agentImportResult(action, accountId) {
   };
 }
 
-test("SUB2 compatible service is disabled by default without making requests", async (t) => {
-  const db = testDatabase(t);
-  const service = new NfapiService({
-    db,
-    registrationClient: {},
-    encryptionKey: "test-encryption-key",
-    fetchFn: async () => { throw new Error("unconfigured service must not make a request"); },
-  });
-
-  assert.equal(db.prepare("SELECT value FROM settings WHERE key = 'nfapi_base_url'").get().value, "");
-  assert.deepEqual(service.configuration(), {
-    base_url: "",
-    api_key_configured: false,
-    configured: false,
-    connected: false,
-    last_connected_at: "",
-  });
-  const options = await service.options();
-  assert.equal(options.connection.configured, false);
-  assert.deepEqual(options.groups, []);
-  assert.deepEqual(options.proxies, []);
-  assert.equal(normalizeNfapiBaseUrl(""), "");
-});
-
-test("SUB2 compatible service configuration and options never return configured secrets", async (t) => {
+test("NFapi configuration and options never return configured secrets", async (t) => {
   const db = testDatabase(t);
   const secret = "top-secret-admin-api-key";
   const service = new NfapiService({
@@ -341,7 +319,7 @@ test("uses a validated AliasHub link to disambiguate duplicates and rejects a mi
   assert.equal(service.findExisting([first, second], source, 12).id, 12);
   assert.throws(
     () => service.findExisting([{ ...second, credentials: { ...second.credentials, email: "other@example.com" } }], source, 12),
-    /已绑定的 SUB2 兼容服务账号身份不匹配/,
+    /已绑定的 NFapi 账号身份不匹配/,
   );
 });
 
@@ -588,6 +566,7 @@ test("new accounts use NFapi OAuth then standard create and preserve every advan
   const tokenInfo = oauthTokenInfo({ email, accountId });
   const calls = [];
   let directImports = 0;
+  let savedRefreshToken = "";
   const nfapiClient = {
     async listOpenAiOauthAccounts() { calls.push("list"); return []; },
     async generateOpenAiOAuthUrl(payload) {
@@ -645,7 +624,19 @@ test("new accounts use NFapi OAuth then standard create and preserve every advan
     },
     async importCodexSession() { directImports += 1; throw new Error("direct import must not run"); },
   };
-  const service = createService({ db, accounts: [localAccount], nfapiClient });
+  const service = createService({
+    db,
+    accounts: [localAccount],
+    nfapiClient,
+    registrationUpdateAccount: async (updatedId, payload) => {
+      assert.equal(updatedId, id);
+      savedRefreshToken = payload.credentials.refresh_token;
+      const existing = Object.fromEntries(localAccount.credentials.map((item) => [item.key, item.value]));
+      localAccount.credentials = Object.entries({ ...existing, ...payload.credentials })
+        .map(([key, value]) => ({ key, value }));
+      return localAccount;
+    },
+  });
   const future = Math.floor(Date.now() / 1000) + 86_400;
   const options = {
     name_prefix: "NF-",
@@ -709,6 +700,8 @@ test("new accounts use NFapi OAuth then standard create and preserve every advan
   assert.equal(completed.action, "created");
   assert.equal(completed.nfapi_account_id, 801);
   assert.equal(completed.short_lived, false);
+  assert.equal(completed.refresh_token_saved, true);
+  assert.equal(savedRefreshToken, tokenInfo.refresh_token);
   const publicResult = JSON.stringify(completed);
   for (const secret of [tokenInfo.access_token, tokenInfo.refresh_token, "authorization-code-private", "nfapi-secret", "LoginPassword123!"]) {
     assert.equal(publicResult.includes(secret), false);
@@ -818,6 +811,81 @@ test("existing accounts are reauthorized through OAuth before incremental settin
   assert.deepEqual(calls, ["list", "generate", "exchange", "list", "get", "apply", "update", "bulk"]);
   assert.equal(result.action, "updated_credentials");
   assert.equal(result.nfapi_account_id, 902);
+});
+
+test("explicit reauthorization preserves linked scheduling settings and only replaces OAuth credentials", async (t) => {
+  const db = testDatabase(t);
+  const id = 64;
+  const email = "credential-only-reauthorize@example.com";
+  const accountId = "workspace-credential-only";
+  const local = registrationAccount({ id, email, accountId });
+  addRegisteredSource(db, { id, email });
+  const now = nowIso();
+  db.prepare(`
+    INSERT INTO registered_account_nfapi_links
+      (external_account_id, email, nfapi_base_url, nfapi_account_id, status, config_json, created_at, updated_at)
+    VALUES (?, ?, ?, ?, 'imported', ?, ?, ?)
+  `).run(String(id), email, "https://nfapi.test", 904, JSON.stringify({
+    proxy_id: 9,
+    concurrency: 23,
+    group_ids: [27],
+    update_existing: false,
+  }), now, now);
+  const existing = {
+    id: 904,
+    credentials: {
+      email,
+      chatgpt_account_id: accountId,
+      chatgpt_user_id: `user-${accountId}`,
+      access_token: "old-access",
+      refresh_token: "old-refresh",
+    },
+  };
+  const token = oauthTokenInfo({ email, accountId, refreshToken: "new-refresh" });
+  const calls = [];
+  const client = {
+    async listOpenAiOauthAccounts() { calls.push("list"); return [existing]; },
+    async generateOpenAiOAuthUrl(payload) {
+      calls.push("generate");
+      assert.deepEqual(payload, { proxy_id: 9 });
+      return { auth_url: oauthAuthUrl(), session_id: "upstream-credential-only" };
+    },
+    async exchangeOpenAiOAuthCode(payload) {
+      calls.push("exchange");
+      assert.equal(payload.proxy_id, 9);
+      return token;
+    },
+    async getAccount(targetId) { calls.push("get"); assert.equal(targetId, 904); return existing; },
+    async applyOAuthCredentials(targetId, payload) {
+      calls.push("apply");
+      assert.equal(targetId, 904);
+      assert.equal(payload.credentials.refresh_token, "new-refresh");
+      return { ...existing, credentials: payload.credentials };
+    },
+    async updateAccount() { throw new Error("reauthorization must not change account settings"); },
+    async bulkUpdateAccounts() { throw new Error("reauthorization must not change advanced settings"); },
+    async createAccount() { throw new Error("reauthorization must not create a duplicate"); },
+  };
+  const service = createService({ db, accounts: [local], nfapiClient: client });
+  const started = await service.startOAuthImport({
+    id,
+    reauthorization: true,
+    options: { proxy_id: 1, concurrency: 2, update_existing: false },
+  });
+  assert.equal(started.reauthorization, true);
+  assert.equal(started.action, "reauthorize");
+  const result = await service.completeOAuthImport(started.oauth_session_id, callbackUrl());
+
+  assert.deepEqual(calls, ["list", "generate", "exchange", "list", "get", "apply"]);
+  assert.equal(result.action, "updated_credentials");
+  assert.equal(result.reauthorization, true);
+  const saved = JSON.parse(db.prepare(`
+    SELECT config_json FROM registered_account_nfapi_links WHERE external_account_id = ?
+  `).get(String(id)).config_json);
+  assert.equal(saved.proxy_id, 9);
+  assert.equal(saved.concurrency, 23);
+  assert.deepEqual(saved.group_ids, [27]);
+  assert.equal(saved.update_existing, true);
 });
 
 test("OAuth fallback strips Agent Identity state and verifies the cleaned target", async (t) => {

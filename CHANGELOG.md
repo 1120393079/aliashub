@@ -2,7 +2,7 @@
 
 All notable changes to AliasHub are documented in this file.
 
-## Unreleased
+## [1.2.0] - 2026-08-04
 
 ### Added
 
@@ -14,11 +14,32 @@ All notable changes to AliasHub are documented in this file.
   saved mailbox to each registration task.
 - Added bundled-worker support for dispose.lol inbox-link message snapshots,
   new-message OTP polling, fixed-pool capacity checks, and per-task allocation.
+- Added existing-account AT refresh through an authenticated web session or the
+  original mailbox OTP login, deleted-account persistence, and a red `AT
+  invalid` state in account and inbox-link views.
+- Added independent registration and AT-recovery worker lanes, with AT recovery
+  prioritized without bypassing per-account locking.
+- Added local-account restoration from worker exports, JSON, JSONL, CSV, TXT,
+  or email-only input, reconnecting retained registration and mailbox records.
+- Added account email search, bulk group editing, OpenAI OAuth Refresh Token
+  acquisition, and selected-account SUB2 and Refresh Token exports.
+- Added a Git overwrite updater that backs up and verifies the root `.env`, the
+  optional worker `.env`, AliasHub SQLite, attachments, worker data, and all
+  other files under `data/` before rebuilding.
+
+### Changed
+
+- Synced the public web application and API with the complete account-operation
+  interface while excluding only external pickup-store publishing.
+- Removed deployment-specific NFapi defaults; compatible service and optional
+  credential-reader connections now require explicit local configuration.
 
 ### Security
 
 - Inbox-link keys are encrypted with AES-256-GCM in AliasHub, masked in API and
   UI responses, and omitted from registration logs and public test fixtures.
+
+[1.2.0]: https://github.com/1120393079/aliashub/releases/tag/v1.2.0
 
 ## [1.1.0] - 2026-07-26
 

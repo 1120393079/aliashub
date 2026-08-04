@@ -28,6 +28,7 @@ import {
   sanitizeRegistrationRemoteValue,
   statusCheckProxyRoute,
 } from "./registration-proxy.js";
+import { parseLocalAccountImport } from "./registration-import.js";
 import { serializeInboxLinkEntry } from "./inbox-link-pool.js";
 
 const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled", "interrupted"]);
@@ -60,6 +61,18 @@ function normalizeAccountCheckIds(input, maximum = 500) {
   return ids;
 }
 
+function normalizeAccountGroupIds(input, maximum = 500) {
+  if (!Array.isArray(input?.ids)) {
+    throw Object.assign(new Error("请选择要编辑分组的注册账号"), { status: 400 });
+  }
+  const ids = [...new Set(input.ids.map((value) => Number(value)))];
+  if (!ids.length || ids.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
+    throw Object.assign(new Error("请选择有效的注册账号"), { status: 400 });
+  }
+  if (ids.length > maximum) throw Object.assign(new Error(`单次最多编辑 ${maximum} 个注册账号`), { status: 400 });
+  return ids;
+}
+
 function timingSafeEqual(left, right) {
   const a = Buffer.from(String(left || ""));
   const b = Buffer.from(String(right || ""));
@@ -86,9 +99,58 @@ function accountCredential(item, keys) {
   return match ? String(match.value) : "";
 }
 
+function registrationMailboxBindings(email, apiUrl) {
+  const normalizedEmail = safeRemoteText(email, 320).toLowerCase();
+  const normalizedApiUrl = String(apiUrl || "").trim().replace(/\/+$/, "");
+  return {
+    providerAccounts: [
+      {
+        provider_type: "mailbox",
+        provider_name: "outlook_email",
+        login_identifier: normalizedEmail,
+        display_name: normalizedEmail,
+        credentials: {},
+        metadata: { email: normalizedEmail, api_url: normalizedApiUrl, source: "fixed" },
+      },
+      {
+        provider_type: "mailbox",
+        provider_name: "outlook_email_api",
+        login_identifier: normalizedEmail,
+        display_name: normalizedEmail,
+        credentials: {},
+        metadata: { account_id: normalizedEmail },
+      },
+    ],
+    providerResources: [
+      {
+        provider_type: "mailbox",
+        provider_name: "outlook_email",
+        resource_type: "mailbox",
+        resource_identifier: normalizedEmail,
+        handle: normalizedEmail,
+        display_name: normalizedEmail,
+        metadata: { email: normalizedEmail, api_url: normalizedApiUrl, source: "fixed" },
+      },
+      {
+        provider_type: "mailbox",
+        provider_name: "outlook_email_api",
+        resource_type: "mailbox",
+        resource_identifier: normalizedEmail,
+        handle: normalizedEmail,
+        display_name: normalizedEmail,
+        metadata: { account_id: normalizedEmail, email: normalizedEmail },
+      },
+    ],
+  };
+}
+
 function accessTokenFromAccount(item = {}) {
   return accountCredential(item, ["access_token", "accessToken"])
     || String(item.primary_token || "");
+}
+
+function refreshTokenFromAccount(item = {}) {
+  return accountCredential(item, ["refresh_token", "refreshToken"]);
 }
 
 function safeRemoteText(value, maximum = 120) {
@@ -112,6 +174,28 @@ function firstRemoteText(...values) {
     if (text) return text;
   }
   return "";
+}
+
+function plusMailEvidenceByEmail(db) {
+  const rows = db.prepare(`
+    SELECT lower(recipient_address) AS email, subject, received_at
+    FROM mail_messages
+    WHERE recipient_address <> ''
+      AND lower(subject || ' ' || preview || ' ' || body) LIKE '%chatgpt plus%'
+      AND (
+        lower(subject || ' ' || preview || ' ' || body) LIKE '%successfully subscribed%'
+        OR lower(subject || ' ' || preview || ' ' || body) LIKE '%successfully registered%'
+        OR subject || ' ' || preview || ' ' || body LIKE '%正常に登録%'
+        OR subject || ' ' || preview || ' ' || body LIKE '%成功订阅%'
+        OR subject || ' ' || preview || ' ' || body LIKE '%订阅成功%'
+      )
+    ORDER BY received_at DESC
+  `).all();
+  const evidence = new Map();
+  for (const row of rows) {
+    if (row.email && !evidence.has(row.email)) evidence.set(row.email, row);
+  }
+  return evidence;
 }
 
 const PLAN_TYPE_ALIASES = new Map([
@@ -202,7 +286,7 @@ function classifyAccountCheckError(value, fallbackCode = "check_failed") {
   if (/\b429\b|rate.?limit|too many|请求过多|限流/.test(lower)) {
     return { code: "rate_limited", reason: "状态检测请求过多，请稍后重试", retryable: true };
   }
-  if (/cloudflare|challenge|captcha|<!doctype|<html|网页/.test(lower)) {
+  if (/cloudflare|challenge|captcha|<!doctype|<html|网页验证|验证页面/.test(lower)) {
     return { code: "upstream_challenge", reason: "状态检测被上游网页验证拦截，请稍后重试", retryable: true };
   }
   if (/\bdns\b|enotfound|eai_again|getaddrinfo/.test(lower)) {
@@ -283,6 +367,85 @@ function normalizeAccountStatus(value) {
 function normalizeCredentialStatus(value) {
   const status = normalizeRemoteSignal(value, "unknown");
   return new Set(["valid", "expired", "revoked", "missing"]).has(status) ? status : "unknown";
+}
+
+function terminalAccountRefreshFailure(status, code, { ambiguous = false } = {}) {
+  const labels = {
+    banned: "封禁",
+    disabled: "禁用",
+    deactivated: "停用",
+    deleted: "删除",
+    suspended: "暂停使用",
+  };
+  const state = normalizeAccountStatus(status);
+  if (state === "unknown") return null;
+  const normalizedCode = ACCOUNT_UNAVAILABLE_CODES.has(normalizeCheckCode(code))
+    ? normalizeCheckCode(code) : `account_${state}`;
+  const stateLabel = ambiguous ? "删除或停用" : labels[state];
+  return {
+    code: normalizedCode,
+    accountStatus: state,
+    reason: `OpenAI 已确认账号已${stateLabel}，AT 已失效`,
+  };
+}
+
+function accessTokenRefreshTerminalFailure(value, seen = new WeakSet(), depth = 0) {
+  if (value === null || value === undefined || depth > 7) return null;
+  if (typeof value === "string" || typeof value === "number") {
+    const text = safeAccountCheckText(value, 1_000);
+    const code = normalizeCheckCode(text);
+    if (ACCOUNT_UNAVAILABLE_CODES.has(code)) {
+      return terminalAccountRefreshFailure(ACCOUNT_UNAVAILABLE_CODES.get(code), code);
+    }
+    const lower = text.toLowerCase();
+    const accountContext = /\b(?:account|user)\b|账号|帐号|账户/.test(lower);
+    if (!accountContext) return null;
+    const combined = /deleted\s+or\s+deactivated|删除或停用|删除或已停用/.test(lower);
+    if (/\bdeleted\b|删除|注销/.test(lower)) {
+      return terminalAccountRefreshFailure("deleted", "account_deleted", { ambiguous: combined });
+    }
+    if (/\bdeactivat(?:ed|ion)\b|停用/.test(lower)) {
+      return terminalAccountRefreshFailure("deactivated", "account_deactivated");
+    }
+    if (/\bdisabled\b|禁用/.test(lower)) {
+      return terminalAccountRefreshFailure("disabled", "account_disabled");
+    }
+    if (/\bbanned\b|封禁/.test(lower)) {
+      return terminalAccountRefreshFailure("banned", "account_banned");
+    }
+    if (/\bsuspended\b|暂停使用/.test(lower)) {
+      return terminalAccountRefreshFailure("suspended", "account_suspended");
+    }
+    return null;
+  }
+  if (typeof value !== "object" || seen.has(value)) return null;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const failure = accessTokenRefreshTerminalFailure(item, seen, depth + 1);
+      if (failure) return failure;
+    }
+    return null;
+  }
+  for (const key of ["account_status", "accountStatus", "account_state", "accountState", "lifecycle_status", "lifecycleStatus"]) {
+    const status = normalizeAccountStatus(value[key]);
+    if (status !== "unknown") return terminalAccountRefreshFailure(status, `account_${status}`);
+  }
+  for (const key of ["error_code", "errorCode", "code", "reason_code", "reasonCode", "status_code", "statusCode"]) {
+    const code = normalizeCheckCode(value[key]);
+    if (ACCOUNT_UNAVAILABLE_CODES.has(code)) {
+      return terminalAccountRefreshFailure(ACCOUNT_UNAVAILABLE_CODES.get(code), code);
+    }
+  }
+  for (const key of ["message", "error", "detail", "reason", "description"]) {
+    const failure = accessTokenRefreshTerminalFailure(value[key], seen, depth + 1);
+    if (failure) return failure;
+  }
+  for (const item of Object.values(value)) {
+    const failure = accessTokenRefreshTerminalFailure(item, seen, depth + 1);
+    if (failure) return failure;
+  }
+  return null;
 }
 
 function normalizeSubscriptionStatus(value, planState = "unknown") {
@@ -489,12 +652,13 @@ async function refreshPlansWithProxyReview(client, ids, proxyRoutesById = new Ma
     ]));
     const fallback = await requestPlanRefreshChannel(client, fallbackIds, fallbackProxies);
     appendPlanRefreshAttempts(attemptsById, fallbackIds, fallback);
+  }
 
-    const directIds = fallbackIds.filter((id) => !planRefreshAttemptsResolved(attemptsById.get(id)));
-    if (directIds.length) {
-      const direct = await requestPlanRefreshChannel(client, directIds, {});
-      appendPlanRefreshAttempts(attemptsById, directIds, direct);
-    }
+  const directIds = ids.filter((id) => primaryProxies[id]
+    && !planRefreshAttemptsResolved(attemptsById.get(id)));
+  if (directIds.length) {
+    const direct = await requestPlanRefreshChannel(client, directIds, {});
+    appendPlanRefreshAttempts(attemptsById, directIds, direct);
   }
 
   const resultById = new Map();
@@ -726,7 +890,7 @@ function accountStatusSignals(item = {}, persistedOutcome = null) {
 
   const accessTokenAvailable = Boolean(accessTokenFromAccount(item));
   const sessionTokenAvailable = Boolean(accountCredential(item, ["session_token", "sessionToken"]));
-  const refreshTokenAvailable = Boolean(accountCredential(item, ["refresh_token", "refreshToken"]));
+  const refreshTokenAvailable = Boolean(refreshTokenFromAccount(item));
   const idTokenAvailable = Boolean(accountCredential(item, ["id_token", "idToken"]));
   const anyCredentialAvailable = accessTokenAvailable || sessionTokenAvailable || refreshTokenAvailable || idTokenAvailable;
   const evidenceCode = terminalEvidence?.code || credentialEvidence?.code
@@ -886,17 +1050,24 @@ function refreshOutcomeFromResult(result, {
 
   if (requestFailure || !result || result.ok !== true || transientDetection) {
     if (!authoritativeTerminal && !credentialCodeStatus && !subscriptionCodeStatus) {
-      const failure = requestFailure || classifyAccountCheckError(
-        `${rawCode} ${rawReason}`,
-        rawCode || (!result ? "missing_result" : "check_failed"),
-      );
       detectionStatus = "inconclusive";
-      code = failure.code;
-      reason = failure.reason;
-      retryable = failure.retryable;
-      accountStatus = "unknown";
-      credentialStatus = "unknown";
-      subscriptionStatus = "unknown";
+      if (!requestFailure && result?.ok === true && rawCode && rawCode !== "ok") {
+        code = rawCode;
+        reason = rawReason || "状态检测暂未得出最终结论";
+        retryable = typeof result?.status_retryable === "boolean"
+          ? result.status_retryable : true;
+      } else {
+        const failure = requestFailure || classifyAccountCheckError(
+          `${rawCode} ${rawReason}`,
+          rawCode || (!result ? "missing_result" : "check_failed"),
+        );
+        code = failure.code;
+        reason = failure.reason;
+        retryable = failure.retryable;
+        accountStatus = "unknown";
+        credentialStatus = "unknown";
+        subscriptionStatus = "unknown";
+      }
     }
   }
   if (result?.ok === true && result?.valid === false
@@ -1065,6 +1236,27 @@ function assertPasswordSetupTask(task, expectedTaskId = "") {
   return taskId;
 }
 
+function assertAccessTokenRefreshTask(task, expectedTaskId = "") {
+  if (!task || typeof task !== "object" || Array.isArray(task)) {
+    throw Object.assign(new Error("AT 刷新服务返回了无效任务"), { status: 502 });
+  }
+  const taskId = String(task.task_id || task.id || "").trim();
+  if (!/^[A-Za-z0-9._:-]{1,200}$/.test(taskId) || (expectedTaskId && taskId !== expectedTaskId)) {
+    throw Object.assign(new Error("AT 刷新任务标识不匹配"), { status: 502 });
+  }
+  if (String(task.type || "").toLowerCase() !== "platform_action"
+    || String(task.platform || "").toLowerCase() !== "chatgpt") {
+    throw Object.assign(new Error("AT 刷新任务类型不匹配"), { status: 502 });
+  }
+  const status = statusFromExternal(task.status);
+  if (!new Set([
+    "queued", "running", "cancel_requested", "completed", "failed", "cancelled", "interrupted",
+  ]).has(status)) {
+    throw Object.assign(new Error("AT 刷新任务状态无效"), { status: 502 });
+  }
+  return { taskId, status };
+}
+
 function publicPasswordSetupTask(task) {
   const taskId = String(task.task_id || task.id || "");
   const mappedStatus = statusFromExternal(task.status);
@@ -1165,7 +1357,7 @@ function identityFromEvents(events = []) {
 }
 
 export class RegistrationService {
-  constructor({ db, graph, client, publicBaseUrl, mailboxBaseUrl, browserUrl, inboxLinkMailboxes = null } = {}) {
+  constructor({ db, graph, client, publicBaseUrl, mailboxBaseUrl, browserUrl, inboxLinkMailboxes = null, nfapiCredentialSync = null } = {}) {
     this.db = db;
     this.graph = graph;
     this.client = client;
@@ -1174,8 +1366,10 @@ export class RegistrationService {
     this.browserUrl = browserUrl || "/alias-hub/browser/vnc.html?autoconnect=true&resize=scale&path=websockify";
     this.inboxLinkMailboxes = inboxLinkMailboxes;
     this.scanPromises = new Map();
+    this.accountAccessTokenRefreshes = new Map();
     this.accountStatusRefreshAttempts = new Map();
     this.accountStatusCheckOutcomes = new Map();
+    this.nfapiCredentialSync = nfapiCredentialSync;
     try {
       for (const row of listRegisteredAccountStatusChecks(db)) {
         const outcome = normalizeStoredStatusOutcome(row);
@@ -1198,6 +1392,19 @@ export class RegistrationService {
       // Existing in-memory behavior remains available if SQLite cannot be upgraded.
     }
     return normalized;
+  }
+
+  async syncLatestNfapiCredentials(accounts) {
+    if (!this.nfapiCredentialSync) return { attempted: 0, synced: 0, failed: 0, items: [] };
+    const result = await this.nfapiCredentialSync.syncAccounts(accounts);
+    if (result.failed > 0) {
+      const failed = result.items.find((item) => !item.ok);
+      throw Object.assign(new Error(failed?.error || "NFapi 最新凭据同步失败"), {
+        status: 502,
+        code: "NFAPI_CREDENTIAL_SYNC_FAILED",
+      });
+    }
+    return result;
   }
 
   requireConnectorKey(req, res, next) {
@@ -1334,9 +1541,9 @@ export class RegistrationService {
             registration_hint: activeDirectJob
               ? "这个 iCloud 地址已有进行中的注册任务，请等待任务结束。"
               : occupiedDirectAlias
-                ? "这个 iCloud 别名已被目标站占用，不能重复注册；请导入新的别名。"
+                ? "这个 iCloud 地址已被目标站占用，不能重复注册；请导入新的地址。"
               : completedDirectJob
-                ? "这个 iCloud 别名已经用于成功注册；请导入新的别名继续注册。"
+                ? "这个 iCloud 地址已经用于成功注册；请导入新的地址继续注册。"
                 : direct
                   ? "iCloud 地址会直接用于注册，不会生成 +tag 分裂地址。"
                   : registrationState === "likely_exhausted"
@@ -1403,7 +1610,7 @@ export class RegistrationService {
     if (requestedPassword && (passwordLength < 12 || passwordLength > 128)) {
       throw Object.assign(new Error("指定密码长度必须为 12 到 128 个字符"), { status: 400 });
     }
-    const browserMode = autoContinuePostSignup ? requestedBrowserMode : "headed";
+    const browserMode = requestedBrowserMode;
     if (mailboxMode === "inbox_link") {
       if (!this.inboxLinkMailboxes) {
         throw Object.assign(new Error("链接取件邮箱服务尚未配置"), { status: 503 });
@@ -1427,13 +1634,13 @@ export class RegistrationService {
     if (!base) throw Object.assign(new Error("请选择可用的基础地址"), { status: 400 });
     const directIcloud = account.provider === "icloud";
     if (directIcloud && base.kind === "official" && !isIcloudImportedStrategy(base.strategy)) {
-      throw Object.assign(new Error("请选择已导入的 iCloud 别名"), { status: 400 });
+      throw Object.assign(new Error("请选择已导入的 iCloud 地址"), { status: 400 });
     }
     if (directIcloud && count !== 1) {
-      throw Object.assign(new Error("iCloud 别名每次只能提交 1 个注册任务"), { status: 400 });
+      throw Object.assign(new Error("iCloud 地址每次只能提交 1 个注册任务"), { status: 400 });
     }
     if (directIcloud && customSuffix) {
-      throw Object.assign(new Error("iCloud 别名不支持 Plus 分裂后缀，请直接选择已导入的别名"), { status: 400 });
+      throw Object.assign(new Error("iCloud 地址不支持 Plus 分裂后缀，请直接选择已导入的地址"), { status: 400 });
     }
     if (!directIcloud && addressMode === "base" && count !== 1) {
       throw Object.assign(new Error("基础地址直注册每次只能提交 1 个任务"), { status: 400 });
@@ -1456,15 +1663,15 @@ export class RegistrationService {
       `).all(base.id, base.id);
       const occupied = existing.find((job) => registrationFailureReason(job) === OCCUPIED_ALIAS_FAILURE_REASON);
       if (occupied) {
-        throw Object.assign(new Error("这个 iCloud 别名已被目标站占用，不能重复注册，请导入新的别名"), { status: 409 });
+        throw Object.assign(new Error("这个 iCloud 地址已被目标站占用，不能重复注册，请导入新的地址"), { status: 409 });
       }
       const activeOrCompleted = existing.find((job) => (
         RELEASABLE_JOB_STATUSES.has(String(job.status || "")) || job.status === "completed"
       ));
       if (activeOrCompleted) {
         const message = activeOrCompleted.status === "completed"
-          ? "这个 iCloud 别名已经用于成功注册，请导入新的别名"
-          : "这个 iCloud 别名已有进行中的注册任务";
+          ? "这个 iCloud 地址已经用于成功注册，请导入新的地址"
+          : "这个 iCloud 地址已有进行中的注册任务";
         throw Object.assign(new Error(message), { status: 409 });
       }
       addresses = [base];
@@ -1570,46 +1777,46 @@ export class RegistrationService {
     setPasswordAfterRegistration,
     autoContinuePostSignup,
   }) {
-    const proxies = resolveJobProxies(input, this.getProxyPool());
-    const usedProxySessions = new Set();
-    const reservations = this.db.transaction(() => {
-      for (const entry of entries) {
-        const existing = this.db.prepare(`
-          SELECT status FROM registration_jobs
-          WHERE lower(email) = lower(?)
-            AND (
-              status = 'completed'
-              OR (
-                deleted_at IS NULL
-                AND status IN ('queued', 'pending', 'claimed', 'running', 'paused', 'cancel_requested')
-              )
-            )
-          ORDER BY created_at DESC, id DESC LIMIT 1
-        `).get(entry.email);
-        if (existing) {
-          const message = existing.status === "completed"
-            ? `${entry.email} 已经用于成功注册`
-            : `${entry.email} 已有进行中的注册任务`;
-          throw Object.assign(new Error(message), { status: 409 });
-        }
+    for (const entry of entries) {
+      const existing = this.db.prepare(`
+        SELECT status FROM registration_jobs
+        WHERE lower(email) = lower(?) AND deleted_at IS NULL
+          AND status IN ('queued', 'pending', 'claimed', 'running', 'paused', 'cancel_requested', 'completed')
+        ORDER BY created_at DESC LIMIT 1
+      `).get(entry.email);
+      if (existing) {
+        const message = existing.status === "completed"
+          ? `${entry.email} 已经用于成功注册`
+          : `${entry.email} 已有进行中的注册任务`;
+        throw Object.assign(new Error(message), { status: 409 });
       }
+    }
 
-      return entries.map((entry, index) => {
-        const proxyTemplate = proxies.length ? proxies[index % proxies.length] : "";
-        const proxy = materializeProxySession(proxyTemplate, usedProxySessions);
-        const now = nowIso();
-        const result = this.db.prepare(`
-          INSERT INTO registration_jobs (
-            account_id, address_id, base_address_id, email, status, stage, browser_mode, proxy_label, fingerprint_id,
-            message, created_at, updated_at
-          ) VALUES (NULL, NULL, NULL, ?, 'queued', 'queued', ?, ?, ?, '正在提交链接取件注册任务', ?, ?)
-        `).run(entry.email, browserMode, maskProxy(proxy), crypto.randomUUID().slice(0, 12), now, now);
-        return { entry, proxy, jobId: Number(result.lastInsertRowid) };
-      });
-    })();
-
+    const proxies = resolveJobProxies(input, this.getProxyPool());
     const jobs = [];
-    for (const { entry, proxy, jobId } of reservations) {
+    const usedProxySessions = new Set();
+    for (let index = 0; index < entries.length; index += 1) {
+      const entry = entries[index];
+      const proxyTemplate = proxies.length ? proxies[index % proxies.length] : "";
+      const proxy = materializeProxySession(proxyTemplate, usedProxySessions);
+      const now = nowIso();
+      const result = this.db.prepare(`
+        INSERT INTO registration_jobs (
+          account_id, address_id, base_address_id, email, status, stage, browser_mode, proxy_label, fingerprint_id,
+          message, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'queued', 'queued', ?, ?, ?, '正在提交链接取件注册任务', ?, ?)
+      `).run(
+        entry.sourceAccountId || null,
+        entry.sourceAddressId || null,
+        entry.sourceAddressId || null,
+        entry.email,
+        browserMode,
+        maskProxy(proxy),
+        crypto.randomUUID().slice(0, 12),
+        now,
+        now,
+      );
+      const jobId = Number(result.lastInsertRowid);
       try {
         const task = await this.client.createTask({
           platform: "chatgpt",
@@ -1950,17 +2157,21 @@ export class RegistrationService {
     return { accountId, job, account, password };
   }
 
-  passwordSetupProxy(job) {
+  registeredAccountOriginalProxy(job, operationLabel) {
     const proxyLabel = String(job?.proxy_label || "").trim();
     if (proxyLabel === "直连") return "";
     if (!proxyLabel) {
-      throw Object.assign(new Error("注册记录缺少原代理信息，拒绝补设密码"), { status: 409 });
+      throw Object.assign(new Error(`注册记录缺少原代理信息，拒绝${operationLabel}`), { status: 409 });
     }
     const matches = this.getProxyPool().filter((proxy) => maskProxy(proxy) === proxyLabel);
     if (matches.length !== 1) {
-      throw Object.assign(new Error("无法唯一还原注册时使用的代理，拒绝补设密码"), { status: 409 });
+      throw Object.assign(new Error(`无法唯一还原注册时使用的代理，拒绝${operationLabel}`), { status: 409 });
     }
     return matches[0];
+  }
+
+  passwordSetupProxy(job) {
+    return this.registeredAccountOriginalProxy(job, "补设密码");
   }
 
   passwordSetupTaskMapping(id, taskId) {
@@ -2171,6 +2382,7 @@ export class RegistrationService {
     const proxyRoutesById = new Map(candidates.map(({ id, proxyRoute }) => [id, proxyRoute]));
     const attemptedAt = nowIso();
     try {
+      await this.syncLatestNfapiCredentials(candidates);
       const refresh = await refreshPlansWithProxyReview(
         this.client,
         candidates.map(({ id }) => id),
@@ -2212,6 +2424,7 @@ export class RegistrationService {
     `).all();
     const metadataByAccountId = new Map(this.db.prepare("SELECT * FROM registered_account_metadata").all()
       .map((item) => [String(item.external_account_id), item]));
+    const plusMailByEmail = plusMailEvidenceByEmail(this.db);
     const nfapiByAccountId = new Map();
     const nfapiBaseUrl = String(getSetting(this.db, "nfapi_base_url", "")).replace(/\/+$/, "");
     this.db.prepare(`
@@ -2259,10 +2472,34 @@ export class RegistrationService {
         const checkOutcomeMatches = checkOutcome
           && String(checkOutcome.email || "").toLowerCase() === String(item.email || "").toLowerCase();
         const accountSignals = accountStatusSignals(item, checkOutcomeMatches ? checkOutcome : null);
-        const checkState = checkOutcomeMatches
+        const plusMail = plusMailByEmail.get(String(item.email || "").toLowerCase());
+        const mailPromoted = Boolean(plusMail
+          && (accountSignals.account_type === "plus" || accountSignals.detection_status !== "confirmed"));
+        const effectiveSignals = mailPromoted ? {
+          ...accountSignals,
+          account_type: "plus",
+          account_type_raw: accountSignals.account_type === "plus"
+            ? accountSignals.account_type_raw : "chatgptplusplan",
+          account_type_known: true,
+          account_type_source: accountSignals.account_type === "plus"
+            ? accountSignals.account_type_source : "mail_confirmation",
+          subscription_status: "active",
+          detection_status: "confirmed",
+          status_code: "subscription_active",
+          status_reason: "检测到 ChatGPT Plus 开通确认邮件",
+          status_retryable: false,
+          status_evidence_path: "mail_messages.subject+body",
+          status_checked_at: plusMail.received_at,
+          status_confirmed_at: plusMail.received_at,
+          status_source: "mail/plus-confirmation",
+          plan_state: "subscribed",
+          plan_name: "chatgptplusplan",
+          display_status: "subscribed",
+        } : accountSignals;
+        const checkState = mailPromoted ? "checked" : checkOutcomeMatches
           ? (checkOutcome.detection_status === "confirmed" ? "checked" : "failed")
           : "";
-        const checkError = checkOutcomeMatches && checkOutcome.detection_status !== "confirmed"
+        const checkError = !mailPromoted && checkOutcomeMatches && checkOutcome.detection_status !== "confirmed"
           ? checkOutcome.reason : "";
         const metadataMatches = metadata
           && String(metadata.email || "").toLowerCase() === String(item.email || "").toLowerCase();
@@ -2270,7 +2507,7 @@ export class RegistrationService {
           && String(nfapiLink.email || "").toLowerCase() === String(item.email || "").toLowerCase();
         const storedGroupName = metadataMatches ? String(metadata.group_name || "") : "";
         const customGroupName = isPlanManagedGroupName(storedGroupName) ? "" : storedGroupName;
-        const defaultGroupName = defaultPlanGroupName(accountSignals);
+        const defaultGroupName = defaultPlanGroupName(effectiveSignals);
         return {
           id: item.id,
           email: item.email,
@@ -2278,14 +2515,17 @@ export class RegistrationService {
           password_setup_available: passwordSetup.available,
           password_setup_reason: passwordSetup.reason,
           user_id: item.user_id,
-          ...accountSignals,
+          ...effectiveSignals,
+          mail_plus_confirmed: Boolean(plusMail),
+          mail_plus_confirmed_at: plusMail?.received_at || "",
+          mail_plus_subject: plusMail?.subject || "",
           status_check_state: checkState,
           status_check_error: checkError,
           status_check_attempted_at: checkOutcomeMatches ? checkOutcome.attempted_at : "",
-          status: accountSignals.display_status !== "unknown"
-            ? accountSignals.display_status : accountSignals.lifecycle_status,
-          plan: accountSignals.account_type !== "unknown"
-            ? accountSignals.account_type : accountSignals.plan_state,
+          status: effectiveSignals.display_status !== "unknown"
+            ? effectiveSignals.display_status : effectiveSignals.lifecycle_status,
+          plan: effectiveSignals.account_type !== "unknown"
+            ? effectiveSignals.account_type : effectiveSignals.plan_state,
           display_name: job?.display_name || "",
           birth_date: job?.birth_date || "",
           exit_ip: job?.exit_ip || "",
@@ -2310,18 +2550,157 @@ export class RegistrationService {
     };
   }
 
-  async refreshRegisteredAccountSignals(input = {}) {
+  async importLocalAccounts(input = {}) {
+    const imports = parseLocalAccountImport(input);
+    const emails = imports.map((item) => item.payload.email);
+    const placeholders = emails.map(() => "?").join(",");
+    const history = this.db.prepare(`
+      SELECT * FROM registration_jobs
+      WHERE email IN (${placeholders}) COLLATE NOCASE
+        AND status = 'completed' AND deleted_at IS NULL
+      ORDER BY created_at DESC, id DESC
+    `).all(...emails);
+    const historyByEmail = new Map();
+    for (const row of history) {
+      const email = String(row.email || "").trim().toLowerCase();
+      if (!historyByEmail.has(email)) historyByEmail.set(email, []);
+      historyByEmail.get(email).push(row);
+    }
+
+    const missingHistory = emails.filter((email) => !historyByEmail.has(email));
+    if (missingHistory.length) {
+      throw Object.assign(new Error(`以下邮箱没有可关联的已完成注册记录：${missingHistory.join("、")}`), { status: 409 });
+    }
+
+    const remote = await this.client.listAccounts({ pageSize: 10_000 });
+    const remoteItems = Array.isArray(remote?.items) ? remote.items : [];
+    const remoteByEmail = new Map(remoteItems.map((item) => [String(item?.email || "").trim().toLowerCase(), item]));
+    const existing = emails.filter((email) => remoteByEmail.has(email));
+    if (existing.length) {
+      throw Object.assign(new Error(`以下邮箱已在本地账号池中：${existing.join("、")}`), { status: 409 });
+    }
+
+    const targets = imports.map((item) => {
+      const candidates = historyByEmail.get(item.payload.email);
+      const job = item.originalId
+        ? candidates.find((candidate) => Number(candidate.external_account_id) === item.originalId) || candidates[0]
+        : candidates[0];
+      const mailbox = registrationMailboxBindings(item.payload.email, this.mailboxBaseUrl);
+      return {
+        ...item,
+        job,
+        payload: {
+          ...item.payload,
+          provider_accounts: [...mailbox.providerAccounts, ...(item.payload.provider_accounts || [])],
+          provider_resources: [...mailbox.providerResources, ...(item.payload.provider_resources || [])],
+        },
+      };
+    });
+    const created = [];
+    const rollbackRemote = async () => {
+      await Promise.allSettled(created.map((item) => this.client.deleteAccount(item.id)));
+    };
+
+    try {
+      for (const target of targets) {
+        const account = await this.client.createAccount(target.payload);
+        const id = Number(account?.id);
+        const email = String(account?.email || "").trim().toLowerCase();
+        if (!Number.isSafeInteger(id) || id <= 0 || email !== target.payload.email
+          || String(account?.platform || "chatgpt").toLowerCase() !== "chatgpt") {
+          throw Object.assign(new Error(`注册机没有确认导入 ${target.payload.email}`), { status: 502 });
+        }
+        created.push({ id, email, target });
+      }
+    } catch (error) {
+      await rollbackRemote();
+      throw Object.assign(new Error(`本地账号导入失败：${error?.message || "注册机请求失败"}`), {
+        status: Number(error?.status) || 502,
+      });
+    }
+
+    try {
+      this.db.transaction(() => {
+        const updateJob = this.db.prepare(`
+          UPDATE registration_jobs SET external_account_id = ?, updated_at = ?
+          WHERE id = ? AND status = 'completed' AND deleted_at IS NULL
+        `);
+        const migrateMetadata = this.db.prepare(`
+          UPDATE registered_account_metadata SET external_account_id = ?, updated_at = ?
+          WHERE external_account_id = ? AND email = ? COLLATE NOCASE
+        `);
+        const migrateStatus = this.db.prepare(`
+          UPDATE registered_account_status_checks SET external_account_id = ?, updated_at = ?
+          WHERE external_account_id = ? AND email = ? COLLATE NOCASE
+        `);
+        const migrateNfapi = this.db.prepare(`
+          UPDATE registered_account_nfapi_links SET external_account_id = ?, updated_at = ?
+          WHERE external_account_id = ? AND email = ? COLLATE NOCASE
+        `);
+        const migratePasswordTasks = this.db.prepare(`
+          UPDATE registration_password_setup_tasks SET external_account_id = ?, updated_at = ?
+          WHERE external_account_id = ?
+        `);
+        const updatedAt = nowIso();
+        for (const item of created) {
+          const previousId = String(item.target.job.external_account_id || "");
+          const result = updateJob.run(String(item.id), updatedAt, item.target.job.id);
+          if (result.changes !== 1) throw new Error(`注册记录 ${item.target.job.id} 关联失败`);
+          if (previousId) {
+            migrateMetadata.run(String(item.id), updatedAt, previousId, item.email);
+            migrateStatus.run(String(item.id), updatedAt, previousId, item.email);
+            migrateNfapi.run(String(item.id), updatedAt, previousId, item.email);
+            migratePasswordTasks.run(item.id, updatedAt, Number(previousId));
+          }
+        }
+      })();
+    } catch (error) {
+      await rollbackRemote();
+      throw Object.assign(new Error(`本地账号已回滚：${error?.message || "注册记录关联失败"}`), { status: 500 });
+    }
+
+    for (const item of created) {
+      const previousId = String(item.target.job.external_account_id || "");
+      if (!previousId) continue;
+      const status = this.accountStatusCheckOutcomes.get(previousId);
+      this.accountStatusCheckOutcomes.delete(previousId);
+      if (status) {
+        this.accountStatusCheckOutcomes.set(String(item.id), {
+          ...status,
+          external_account_id: String(item.id),
+          email: item.email,
+        });
+      }
+    }
+
+    return {
+      imported: created.length,
+      items: created.map((item) => ({
+        id: item.id,
+        email: item.email,
+        previous_account_id: Number(item.target.job.external_account_id) || 0,
+        registration_job_id: item.target.job.id,
+      })),
+    };
+  }
+
+  async refreshRegisteredAccountSignals(input = {}, { skipNfapiSync = false } = {}) {
     const ids = normalizeAccountCheckIds(input);
     if (typeof this.client.refreshAccountPlans !== "function") {
       throw Object.assign(new Error("注册账号状态检测服务尚未配置"), { status: 503 });
     }
 
-    const before = await this.listRegisteredAccounts({ refreshUnchecked: false });
-    const selected = before.items.filter((item) => ids.includes(Number(item.id)));
+    let before = await this.listRegisteredAccounts({ refreshUnchecked: false });
+    let selected = before.items.filter((item) => ids.includes(Number(item.id)));
     if (selected.length !== ids.length) {
       throw Object.assign(new Error("选择中包含不属于本注册页面的账号"), { status: 409 });
     }
+    if (await this.scanRegisteredAccountMailEvidence(selected)) {
+      before = await this.listRegisteredAccounts({ refreshUnchecked: false });
+      selected = before.items.filter((item) => ids.includes(Number(item.id)));
+    }
     const emailById = new Map(selected.map((item) => [Number(item.id), String(item.email || "")]));
+    if (!skipNfapiSync) await this.syncLatestNfapiCredentials(selected);
     const placeholders = ids.map(() => "?").join(",");
     const jobs = this.db.prepare(`
       SELECT external_account_id, email, proxy_label
@@ -2483,6 +2862,88 @@ export class RegistrationService {
     };
   }
 
+  async updateRegisteredAccountGroups(input = {}) {
+    if (!input || typeof input !== "object" || Array.isArray(input)) {
+      throw Object.assign(new Error("账号分组格式无效"), { status: 400 });
+    }
+    const ids = normalizeAccountGroupIds(input);
+    const groupName = accountMetadataValue(input, "group_name", "分组名称", 40);
+    if (groupName === undefined) {
+      throw Object.assign(new Error("请填写目标分组"), { status: 400 });
+    }
+
+    const placeholders = ids.map(() => "?").join(",");
+    const jobs = this.db.prepare(`
+      SELECT * FROM registration_jobs
+      WHERE external_account_id IN (${placeholders}) AND status = 'completed'
+      ORDER BY created_at DESC
+    `).all(...ids.map(String));
+    const jobByAccountId = new Map();
+    for (const job of jobs) {
+      if (!jobByAccountId.has(String(job.external_account_id))) {
+        jobByAccountId.set(String(job.external_account_id), job);
+      }
+    }
+    if (ids.some((id) => !jobByAccountId.has(String(id)))) {
+      throw Object.assign(new Error("选择中包含不属于本注册页面的账号"), { status: 409 });
+    }
+
+    const accounts = await Promise.all(ids.map(async (id) => {
+      const account = await this.client.getAccount(id);
+      const job = jobByAccountId.get(String(id));
+      if (!account) throw Object.assign(new Error(`账号 #${id} 已从本地账号池删除`), { status: 404 });
+      if (String(account.platform || "chatgpt").toLowerCase() !== "chatgpt"
+        || String(account.email || "").toLowerCase() !== String(job.email || "").toLowerCase()) {
+        throw Object.assign(new Error(`账号 #${id} 与注册记录不匹配`), { status: 409 });
+      }
+      return { id, email: account.email };
+    }));
+
+    const existingByAccountId = new Map(this.db.prepare(`
+      SELECT * FROM registered_account_metadata
+      WHERE external_account_id IN (${placeholders})
+    `).all(...ids.map(String)).map((row) => [String(row.external_account_id), row]));
+    const now = nowIso();
+    const removeMetadata = this.db.prepare(
+      "DELETE FROM registered_account_metadata WHERE external_account_id = ?",
+    );
+    const upsertMetadata = this.db.prepare(`
+      INSERT INTO registered_account_metadata
+        (external_account_id, email, custom_name, group_name, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(external_account_id) DO UPDATE SET
+        email = excluded.email,
+        custom_name = excluded.custom_name,
+        group_name = excluded.group_name,
+        updated_at = excluded.updated_at
+    `);
+    this.db.transaction(() => {
+      for (const account of accounts) {
+        const existing = existingByAccountId.get(String(account.id));
+        const customName = String(existing?.custom_name || "");
+        if (!customName && !groupName) {
+          removeMetadata.run(String(account.id));
+        } else {
+          upsertMetadata.run(
+            String(account.id),
+            account.email,
+            customName,
+            groupName,
+            existing?.created_at || now,
+            now,
+          );
+        }
+      }
+    })();
+
+    return {
+      updated: accounts.length,
+      ids,
+      group_name: groupName,
+      items: accounts.map((account) => ({ ...account, group_name: groupName })),
+    };
+  }
+
   async registeredAccountAccessToken(id) {
     const accountId = Number(id);
     if (!Number.isInteger(accountId) || accountId <= 0) {
@@ -2502,6 +2963,209 @@ export class RegistrationService {
     const accessToken = accessTokenFromAccount(account);
     if (!accessToken) throw Object.assign(new Error("这个账号尚未获取到 AT"), { status: 404 });
     return { id: accountId, email: account.email, access_token: accessToken };
+  }
+
+  async registeredAccountRefreshToken(id) {
+    const accountId = Number(id);
+    if (!Number.isInteger(accountId) || accountId <= 0) {
+      throw Object.assign(new Error("注册账号 ID 无效"), { status: 400 });
+    }
+    const job = this.db.prepare(`
+      SELECT * FROM registration_jobs
+      WHERE external_account_id = ? AND status = 'completed'
+      ORDER BY created_at DESC LIMIT 1
+    `).get(String(accountId));
+    if (!job) throw Object.assign(new Error("注册账号不存在"), { status: 404 });
+    const account = await this.client.getAccount(accountId);
+    if (!account) throw Object.assign(new Error("账号已从本地账号池删除"), { status: 404 });
+    if (String(account.email || "").toLowerCase() !== String(job.email || "").toLowerCase()) {
+      throw Object.assign(new Error("注册账号与任务记录不匹配"), { status: 409 });
+    }
+    const refreshToken = refreshTokenFromAccount(account);
+    if (!refreshToken) throw Object.assign(new Error("这个账号尚未获取到 Refresh Token"), { status: 404 });
+    return { id: accountId, email: account.email, refresh_token: refreshToken };
+  }
+
+  async registeredAccountSub2Export(id) {
+    const accountId = Number(id);
+    if (!Number.isInteger(accountId) || accountId <= 0) {
+      throw Object.assign(new Error("注册账号 ID 无效"), { status: 400 });
+    }
+    const job = this.db.prepare(`
+      SELECT * FROM registration_jobs
+      WHERE external_account_id = ? AND status = 'completed'
+      ORDER BY created_at DESC LIMIT 1
+    `).get(String(accountId));
+    if (!job) throw Object.assign(new Error("注册账号不存在"), { status: 404 });
+    const account = await this.client.getAccount(accountId);
+    if (!account) throw Object.assign(new Error("账号已从本地账号池删除"), { status: 404 });
+    if (String(account.email || "").toLowerCase() !== String(job.email || "").toLowerCase()) {
+      throw Object.assign(new Error("注册账号与任务记录不匹配"), { status: 409 });
+    }
+    const accessToken = accessTokenFromAccount(account);
+    const refreshToken = refreshTokenFromAccount(account);
+    if (!accessToken) throw Object.assign(new Error("这个账号尚未获取到 AT"), { status: 404 });
+    if (!refreshToken) throw Object.assign(new Error("这个账号尚未获取到 Refresh Token"), { status: 404 });
+    const credentials = {
+      email: String(account.email || "").trim().toLowerCase(),
+      access_token: accessToken,
+      refresh_token: refreshToken,
+    };
+    for (const [target, keys] of [
+      ["id_token", ["id_token", "idToken"]],
+      ["client_id", ["client_id", "clientId", "oauth_client_id"]],
+      ["chatgpt_account_id", ["chatgpt_account_id", "account_id", "workspace_id"]],
+      ["chatgpt_user_id", ["chatgpt_user_id", "user_id"]],
+      ["organization_id", ["organization_id"]],
+      ["expires_at", ["expires_at"]],
+      ["plan_type", ["plan_type"]],
+      ["subscription_expires_at", ["subscription_expires_at"]],
+    ]) {
+      const value = accountCredential(account, keys);
+      if (value) credentials[target] = value;
+    }
+    if (!credentials.chatgpt_account_id && account.user_id) {
+      credentials.chatgpt_account_id = String(account.user_id);
+    }
+    if (!credentials.plan_type && (account.plan_name || account.plan_state)) {
+      credentials.plan_type = String(account.plan_name || account.plan_state);
+    }
+    return { id: accountId, email: credentials.email, credentials };
+  }
+
+  refreshRegisteredAccountAccessToken(id) {
+    const accountId = positiveAccountId(id);
+    const existing = this.accountAccessTokenRefreshes.get(accountId);
+    if (existing) return existing;
+    const promise = this.runRegisteredAccountAccessTokenRefresh(accountId)
+      .finally(() => this.accountAccessTokenRefreshes.delete(accountId));
+    this.accountAccessTokenRefreshes.set(accountId, promise);
+    return promise;
+  }
+
+  async runRegisteredAccountAccessTokenRefresh(accountId) {
+    const job = this.db.prepare(`
+      SELECT * FROM registration_jobs
+      WHERE external_account_id = ? AND status = 'completed'
+      ORDER BY created_at DESC LIMIT 1
+    `).get(String(accountId));
+    if (!job) throw Object.assign(new Error("注册账号不存在"), { status: 404 });
+    const account = await this.client.getAccount(accountId);
+    if (!account) throw Object.assign(new Error("账号已从本地账号池删除"), { status: 404 });
+    if (String(account.platform || "chatgpt").toLowerCase() !== "chatgpt"
+      || String(account.email || "").toLowerCase() !== String(job.email || "").toLowerCase()) {
+      throw Object.assign(new Error("注册账号与任务记录不匹配"), { status: 409 });
+    }
+
+    const terminalRefreshError = (failure, evidencePath) => {
+      const observedAt = nowIso();
+      const previous = this.accountStatusCheckOutcomes.get(String(accountId));
+      const previousMatches = previous
+        && String(previous.email || "").toLowerCase() === String(account.email || "").toLowerCase();
+      const signals = accountStatusSignals(account, previousMatches ? previous : null);
+      this.persistAccountStatusOutcome({
+        external_account_id: String(accountId),
+        email: String(account.email || job.email).toLowerCase(),
+        detection_status: "confirmed",
+        account_status: failure.accountStatus,
+        credential_status: "revoked",
+        subscription_status: signals.subscription_status,
+        account_type: signals.account_type,
+        account_type_raw: signals.account_type_raw,
+        code: failure.code,
+        reason: failure.reason,
+        retryable: false,
+        source: "registration-refresh",
+        http_status: 0,
+        evidence_path: evidencePath,
+        checked_at: observedAt,
+        attempted_at: observedAt,
+      });
+      return Object.assign(new Error(failure.reason), {
+        status: 409,
+        code: failure.code.toUpperCase(),
+      });
+    };
+
+    const proxy = this.registeredAccountOriginalProxy(job, "刷新 AT");
+    try {
+      await this.client.upsertOutlookEmailProviderSetting({
+        apiUrl: this.mailboxBaseUrl,
+        apiKey: this.connectorKey,
+      });
+    } catch {
+      throw Object.assign(new Error("邮箱连接配置同步失败"), { status: 502 });
+    }
+    const actionParams = { browser_mode: "camoufox_headless" };
+    if (proxy) actionParams.proxy = proxy;
+
+    let task;
+    try {
+      task = await this.client.createAccountAction(accountId, "refresh_access_token", actionParams);
+    } catch (error) {
+      const terminalFailure = accessTokenRefreshTerminalFailure(error);
+      if (terminalFailure) throw terminalRefreshError(terminalFailure, "refresh_access_token/create_error");
+      throw Object.assign(new Error("AT 刷新任务创建失败"), { status: 502 });
+    }
+    const started = assertAccessTokenRefreshTask(task);
+    const deadline = Date.now() + 240_000;
+    let current = task;
+    let state = started;
+    while (!TERMINAL_STATUSES.has(state.status)) {
+      if (Date.now() >= deadline) {
+        try {
+          await this.client.cancelActionTask(started.taskId);
+        } catch {
+          // Preserve the timeout result even if remote cancellation cannot be confirmed.
+        }
+        throw Object.assign(new Error("AT 刷新超时，请稍后重试"), { status: 504 });
+      }
+      await wait(500);
+      try {
+        current = await this.client.getActionTask(started.taskId);
+      } catch {
+        throw Object.assign(new Error("AT 刷新任务状态读取失败"), { status: 502 });
+      }
+      state = assertAccessTokenRefreshTask(current, started.taskId);
+    }
+    if (state.status !== "completed") {
+      let terminalFailure = accessTokenRefreshTerminalFailure(current);
+      if (!terminalFailure && typeof this.client.getActionTaskEvents === "function") {
+        try {
+          const eventResponse = await this.client.getActionTaskEvents(started.taskId);
+          terminalFailure = accessTokenRefreshTerminalFailure(eventResponse);
+        } catch {
+          // The task result remains sufficient for the generic failure path below.
+        }
+      }
+      if (terminalFailure) {
+        throw terminalRefreshError(terminalFailure, "refresh_access_token/task_error");
+      }
+      const taskError = String(current?.error || "").toLowerCase();
+      const message = taskError.includes("session 未返回 accesstoken")
+        ? "邮箱验证码已通过，但 ChatGPT 登录回调未完成，暂时没有生成新的 AT"
+        : "AT 刷新失败；网页登录 Session 可能已失效";
+      throw Object.assign(new Error(message), {
+        status: 409,
+        code: "WEB_SESSION_REFRESH_FAILED",
+      });
+    }
+
+    const refreshedAccount = await this.client.getAccount(accountId);
+    const refreshedTerminalFailure = accessTokenRefreshTerminalFailure(refreshedAccount);
+    if (refreshedTerminalFailure) {
+      throw terminalRefreshError(refreshedTerminalFailure, "refresh_access_token/account_state");
+    }
+    if (!refreshedAccount
+      || String(refreshedAccount.email || "").toLowerCase() !== String(job.email || "").toLowerCase()
+      || !accessTokenFromAccount(refreshedAccount)) {
+      throw Object.assign(new Error("AT 刷新任务完成，但账号未保存有效 AT"), { status: 502 });
+    }
+    const result = await this.refreshRegisteredAccountSignals(
+      { ids: [accountId] },
+      { skipNfapiSync: true },
+    );
+    return { ...result, access_token_refreshed: true };
   }
 
   async deleteRegisteredAccounts(input = {}) {
@@ -2578,6 +3242,43 @@ export class RegistrationService {
     }).finally(() => this.scanPromises.delete(account.id));
     this.scanPromises.set(account.id, promise);
     return promise;
+  }
+
+  async scanRegisteredAccountMailEvidence(accounts = []) {
+    const candidates = accounts.filter((item) => {
+      const type = normalizeRemoteSignal(item?.account_type, "unknown");
+      return !new Set(["plus", "pro", "team", "business", "enterprise", "edu", "trial"])
+        .has(type);
+    });
+    if (!candidates.length) return false;
+
+    const ids = candidates.map((item) => Number(item.id));
+    const emailById = new Map(candidates.map((item) => [
+      Number(item.id), String(item.email || "").toLowerCase(),
+    ]));
+    const placeholders = ids.map(() => "?").join(",");
+    const rows = this.db.prepare(`
+      SELECT source_accounts.*, registration_jobs.external_account_id, registration_jobs.email AS job_email
+      FROM registration_jobs
+      JOIN source_accounts ON source_accounts.id = registration_jobs.account_id
+      WHERE registration_jobs.external_account_id IN (${placeholders})
+        AND registration_jobs.status = 'completed'
+        AND source_accounts.status = 'connected'
+        AND source_accounts.provider = 'inbox_link'
+      ORDER BY registration_jobs.created_at DESC, registration_jobs.id DESC
+    `).all(...ids.map(String));
+    const sourceById = new Map();
+    for (const row of rows) {
+      const accountId = Number(row.external_account_id);
+      if (String(row.job_email || "").toLowerCase() !== emailById.get(accountId)) continue;
+      if (!sourceById.has(Number(row.id))) sourceById.set(Number(row.id), row);
+    }
+
+    const sources = [...sourceById.values()];
+    for (let offset = 0; offset < sources.length; offset += 8) {
+      await Promise.allSettled(sources.slice(offset, offset + 8).map((account) => this.scanAccount(account)));
+    }
+    return sources.length > 0;
   }
 
   async registeredAccountEmails(id, query = {}) {

@@ -239,23 +239,40 @@ in the connector popup.
 
 ## Updating
 
-1. Stop the selected deployment mode.
-2. Back up `.env` and `data/` together.
-3. Verify the release checksum and replace the application files.
-4. Rebuild and start the selected runtime:
+For a Git-based installation, run the matching overwrite updater from the
+repository root:
 
 ```bash
-# Docker
-docker compose up -d --build
-
 # Full suite Docker
-docker compose -f compose.yaml -f compose.full.yaml up -d --build
+./scripts/update-local.sh --full
+
+# Core Docker
+./scripts/update-local.sh --core
 
 # Native
-npm ci
-npm run build:local
-./scripts/setup-local.sh --native
-./scripts/start-local.sh
+./scripts/update-local.sh --native
 ```
 
-Do not overwrite `.env` or `data/` with files from a release archive.
+With no argument the updater detects a running Compose deployment and otherwise
+uses native mode. Native users must stop their existing AliasHub process before
+running it and restart that process after the build finishes.
+
+The updater deliberately replaces tracked source files with `origin/main`, so
+uncommitted source edits are not retained. It does not replace installation
+state. Before fetching it stops the selected Compose services and creates a
+timestamped backup under `deploy-backups/` containing:
+
+- the root `.env` and optional `registration-worker/.env`;
+- the complete `data/` tree, including AliasHub SQLite, attachments, and the
+  full-mode worker database and state;
+- SHA-256 manifests captured before and after the source replacement.
+
+The command refuses to continue if the local environment or data paths are not
+ignored by Git, and aborts if their manifests change. On a build/start failure
+it keeps the backup and attempts to restart the previously selected Compose
+mode. Do not move local databases, attachments, or credentials into tracked
+source paths.
+
+For an archive-based installation, stop the selected mode, back up the same
+paths, replace only application source files, rebuild, and start it again. Never
+overwrite `.env`, `registration-worker/.env`, or `data/` with archive contents.

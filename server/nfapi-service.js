@@ -94,12 +94,11 @@ function boolean(value, fallback, label) {
 }
 
 export function normalizeNfapiBaseUrl(value) {
-  const raw = String(value ?? "").trim();
-  if (!raw) return "";
+  const raw = String(value || DEFAULT_BASE_URL).trim();
   let parsed;
-  try { parsed = new URL(raw); } catch { throw errorWithStatus("SUB2 兼容服务地址格式无效"); }
+  try { parsed = new URL(raw); } catch { throw errorWithStatus("NFapi 地址格式无效"); }
   if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
-    throw errorWithStatus("SUB2 兼容服务地址必须是 http 或 https 地址，且不能包含账号密码");
+    throw errorWithStatus("NFapi 地址必须是 http 或 https 地址，且不能包含账号密码");
   }
   parsed.search = "";
   parsed.hash = "";
@@ -168,7 +167,7 @@ function percentFrom(value, label) {
 }
 
 export function normalizeNfapiImportOptions(input = {}, stored = {}) {
-  if (!input || typeof input !== "object" || Array.isArray(input)) throw errorWithStatus("SUB2 兼容服务导入设置格式无效");
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw errorWithStatus("NFapi 导入设置格式无效");
   const merged = { ...DEFAULT_NFAPI_IMPORT_OPTIONS, ...(stored || {}), ...input };
   const status = String(merged.status || "active").trim().toLowerCase();
   if (!["active", "inactive", "error"].includes(status)) throw errorWithStatus("账号状态无效");
@@ -180,7 +179,7 @@ export function normalizeNfapiImportOptions(input = {}, stored = {}) {
   if (!["inherit", "enabled", "disabled"].includes(imageBridgeMode)) throw errorWithStatus("图片桥接模式无效");
   const groupIds = [...new Set((Array.isArray(merged.group_ids) ? merged.group_ids : []).map(Number))];
   if (groupIds.some((id) => !Number.isSafeInteger(id) || id <= 0) || groupIds.length > 100) {
-    throw errorWithStatus("SUB2 兼容服务分组选择无效");
+    throw errorWithStatus("NFapi 分组选择无效");
   }
   return {
     name_prefix: text(merged.name_prefix || "", 80, "名称前缀"),
@@ -262,11 +261,11 @@ function jwtIdentitySources(claims = {}) {
 }
 
 function singleSourceId(input = {}) {
-  if (!input || typeof input !== "object" || Array.isArray(input)) throw errorWithStatus("SUB2 兼容服务 OAuth 导入请求格式无效");
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw errorWithStatus("NFapi OAuth 导入请求格式无效");
   const supplied = input.id === undefined ? input.ids : [input.id];
-  if (!Array.isArray(supplied) || supplied.length !== 1) throw errorWithStatus("SUB2 兼容服务 OAuth 每次只能授权一个账号");
+  if (!Array.isArray(supplied) || supplied.length !== 1) throw errorWithStatus("NFapi OAuth 每次只能授权一个账号");
   const id = Number(supplied[0]);
-  if (!Number.isSafeInteger(id) || id <= 0) throw errorWithStatus("SUB2 兼容服务 OAuth 账号选择无效");
+  if (!Number.isSafeInteger(id) || id <= 0) throw errorWithStatus("NFapi OAuth 账号选择无效");
   return id;
 }
 
@@ -283,17 +282,17 @@ function parseAuthorizationStart(result) {
   const authUrl = String(result?.auth_url || "").trim();
   const upstreamSessionId = String(result?.session_id || "").trim();
   if (!authUrl || !upstreamSessionId || upstreamSessionId.length > 1_024) {
-    throw errorWithStatus("SUB2 兼容服务没有返回有效的 OAuth 会话", 502);
+    throw errorWithStatus("NFapi 没有返回有效的 OAuth 会话", 502);
   }
   let parsed;
-  try { parsed = new URL(authUrl); } catch { throw errorWithStatus("SUB2 兼容服务返回的 OAuth 授权地址无效", 502); }
+  try { parsed = new URL(authUrl); } catch { throw errorWithStatus("NFapi 返回的 OAuth 授权地址无效", 502); }
   const states = parsed.searchParams.getAll("state").filter(Boolean);
   const redirectUris = parsed.searchParams.getAll("redirect_uri").filter(Boolean);
   if (parsed.protocol !== "https:" || parsed.hostname !== "auth.openai.com" || parsed.pathname !== "/oauth/authorize"
     || parsed.username || parsed.password
     || states.length !== 1 || states[0].length > 2_048
     || redirectUris.length !== 1 || redirectUris[0] !== NFAPI_OAUTH_CALLBACK) {
-    throw errorWithStatus("SUB2 兼容服务返回的 OAuth 授权地址不符合预期", 502);
+    throw errorWithStatus("NFapi 返回的 OAuth 授权地址不符合预期", 502);
   }
   return { authUrl: parsed.toString(), upstreamSessionId, expectedState: states[0] };
 }
@@ -330,11 +329,11 @@ function equalSecret(left, right) {
 }
 
 function tokenInfoFrom(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw errorWithStatus("SUB2 兼容服务 OAuth Token 响应无效", 502);
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw errorWithStatus("NFapi OAuth Token 响应无效", 502);
   const accessToken = String(value.access_token || "").trim();
   const refreshToken = String(value.refresh_token || "").trim();
   const idToken = String(value.id_token || "").trim();
-  if (!accessToken) throw errorWithStatus("SUB2 兼容服务 OAuth 未返回可用凭据", 502);
+  if (!accessToken) throw errorWithStatus("NFapi OAuth 未返回可用凭据", 502);
   const accessClaims = decodeJwt(accessToken);
   const idClaims = decodeJwt(idToken);
   const accessIdentity = jwtIdentitySources(accessClaims);
@@ -343,19 +342,19 @@ function tokenInfoFrom(value) {
   const identity = {
     email: consistentIdentity(
       [value.email, ...accessIdentity.emails, ...idIdentity.emails],
-      "SUB2 兼容服务 OAuth Token 邮箱",
+      "NFapi OAuth Token 邮箱",
       { caseInsensitive: true },
     ),
     accountId: consistentIdentity(
       [value.chatgpt_account_id, value.account_id, ...accessIdentity.accountIds, ...idIdentity.accountIds],
-      "SUB2 兼容服务 OAuth Token workspace",
+      "NFapi OAuth Token workspace",
     ),
     userId: consistentIdentity(
       [value.chatgpt_user_id, value.user_id, ...accessIdentity.userIds, ...idIdentity.userIds],
-      "SUB2 兼容服务 OAuth Token 用户",
+      "NFapi OAuth Token 用户",
     ),
   };
-  consistentIdentity([...accessIdentity.subjects, ...idIdentity.subjects], "SUB2 兼容服务 OAuth Token subject");
+  consistentIdentity([...accessIdentity.subjects, ...idIdentity.subjects], "NFapi OAuth Token subject");
   const credentials = { access_token: accessToken, email: identity.email, chatgpt_account_id: identity.accountId };
   if (refreshToken) credentials.refresh_token = refreshToken;
   if (idToken) credentials.id_token = idToken;
@@ -856,7 +855,7 @@ export class NfapiService {
 
   decrypt(value) {
     const [version, iv, tag, encrypted] = String(value || "").split(".");
-    if (version !== "v1" || !iv || !tag || !encrypted) throw errorWithStatus("SUB2 兼容服务加密数据无法解密", 500);
+    if (version !== "v1" || !iv || !tag || !encrypted) throw errorWithStatus("NFapi 加密数据无法解密", 500);
     const decipher = crypto.createDecipheriv("aes-256-gcm", this.encryptionKey, Buffer.from(iv, "base64url"));
     decipher.setAuthTag(Buffer.from(tag, "base64url"));
     return Buffer.concat([decipher.update(Buffer.from(encrypted, "base64url")), decipher.final()]).toString("utf8");
@@ -884,12 +883,12 @@ export class NfapiService {
   }
 
   updateConfiguration(input = {}) {
-    if (!input || typeof input !== "object" || Array.isArray(input)) throw errorWithStatus("SUB2 兼容服务连接设置格式无效");
+    if (!input || typeof input !== "object" || Array.isArray(input)) throw errorWithStatus("NFapi 连接设置格式无效");
     if (input.base_url !== undefined) setSetting(this.db, "nfapi_base_url", normalizeNfapiBaseUrl(input.base_url));
     if (input.clear_api_key === true) setSetting(this.db, "nfapi_admin_api_key_encrypted", "");
     if (input.admin_api_key !== undefined && input.admin_api_key !== "") {
-      const apiKey = text(input.admin_api_key, 1_024, "SUB2 兼容服务 API Key");
-      if (!apiKey) throw errorWithStatus("SUB2 兼容服务 API Key 不能为空");
+      const apiKey = text(input.admin_api_key, 1_024, "NFapi API Key");
+      if (!apiKey) throw errorWithStatus("NFapi API Key 不能为空");
       setSetting(this.db, "nfapi_admin_api_key_encrypted", this.encrypt(apiKey));
     }
     setSetting(this.db, "nfapi_last_connected_at", "");
@@ -927,7 +926,7 @@ export class NfapiService {
   readOAuthSessionPayload(row, expectedSourceId) {
     let payload;
     try { payload = JSON.parse(this.decrypt(row?.payload_encrypted)); }
-    catch { throw errorWithStatus("SUB2 兼容服务 OAuth 会话无法读取，请重新开始", 409); }
+    catch { throw errorWithStatus("NFapi OAuth 会话无法读取，请重新开始", 409); }
     const sourceId = Number(expectedSourceId || 0);
     if (!payload || payload.version !== OAUTH_SESSION_PAYLOAD_VERSION
       || payload.nfapiBaseUrl !== this.baseUrl()
@@ -937,7 +936,7 @@ export class NfapiService {
       || typeof payload.authUrl !== "string" || payload.authUrl !== payload.authUrl.trim()
       || typeof payload.upstreamSessionId !== "string" || payload.upstreamSessionId !== payload.upstreamSessionId.trim()
       || typeof payload.expectedState !== "string" || !payload.expectedState) {
-      throw errorWithStatus("SUB2 兼容服务 OAuth 会话数据无效，请重新开始", 409);
+      throw errorWithStatus("NFapi OAuth 会话数据无效，请重新开始", 409);
     }
     let authorization;
     try {
@@ -946,12 +945,12 @@ export class NfapiService {
         session_id: payload.upstreamSessionId,
       });
     } catch {
-      throw errorWithStatus("SUB2 兼容服务 OAuth 会话数据无效，请重新开始", 409);
+      throw errorWithStatus("NFapi OAuth 会话数据无效，请重新开始", 409);
     }
     if (authorization.authUrl !== payload.authUrl
       || authorization.upstreamSessionId !== payload.upstreamSessionId
       || !equalSecret(authorization.expectedState, payload.expectedState)) {
-      throw errorWithStatus("SUB2 兼容服务 OAuth 会话数据无效，请重新开始", 409);
+      throw errorWithStatus("NFapi OAuth 会话数据无效，请重新开始", 409);
     }
     return payload;
   }
@@ -959,17 +958,17 @@ export class NfapiService {
   resumeOAuthSession(row, sourceId) {
     if (!row) return null;
     if (row.status === "processing") {
-      throw errorWithStatus("这个账号的 SUB2 兼容服务 OAuth 回调正在处理，请等待处理完成", 409);
+      throw errorWithStatus("这个账号的 NFapi OAuth 回调正在处理，请等待处理完成", 409);
     }
     if (row.status !== "pending") return null;
     const expiresAt = new Date(row.expires_at);
     if (!Number.isFinite(expiresAt.getTime()) || expiresAt <= this.currentDate()) {
-      throw errorWithStatus("SUB2 兼容服务 OAuth 会话已过期，请重新开始", 410);
+      throw errorWithStatus("NFapi OAuth 会话已过期，请重新开始", 410);
     }
     const payload = this.readOAuthSessionPayload(row, sourceId);
     const existingAccountId = Number(payload.existingAccountId || 0);
     if (!Number.isSafeInteger(existingAccountId) || existingAccountId < 0) {
-      throw errorWithStatus("SUB2 兼容服务 OAuth 会话数据无效，请重新开始", 409);
+      throw errorWithStatus("NFapi OAuth 会话数据无效，请重新开始", 409);
     }
     return {
       authorization_required: true,
@@ -979,6 +978,7 @@ export class NfapiService {
       auth_url: payload.authUrl,
       expires_at: row.expires_at,
       nfapi_account_id: existingAccountId,
+      reauthorization: payload.reauthorization === true,
     };
   }
 
@@ -1077,7 +1077,7 @@ export class NfapiService {
       const preferred = candidates.find((item) => item.identity.id === preferredId);
       if (preferred) {
         if (!identityCompatible(expected, preferred.identity)) {
-          throw errorWithStatus("AliasHub 已绑定的 SUB2 兼容服务账号身份不匹配，已停止以免更新错误账号", 409);
+          throw errorWithStatus("AliasHub 已绑定的 NFapi 账号身份不匹配，已停止以免更新错误账号", 409);
         }
         return preferred.account;
       }
@@ -1089,15 +1089,15 @@ export class NfapiService {
     const complete = sameEmail.filter((item) => identityComplete(expected, item.identity));
     if (complete.length === 1) return complete[0].account;
     if (complete.length > 1) {
-      throw errorWithStatus("SUB2 兼容服务中存在多个完全相同身份的 OAuth 账号，无法确定更新目标", 409);
+      throw errorWithStatus("NFapi 中存在多个完全相同身份的 OAuth 账号，无法确定更新目标", 409);
     }
     const accountId = String(expected.accountId || "").trim();
     const samePair = sameEmail.filter((item) => Boolean(accountId && item.identity.accountId === accountId));
     if (samePair.length === 1 && !samePair[0].identity.userId) return samePair[0].account;
     if (samePair.length > 1) {
-      throw errorWithStatus("SUB2 兼容服务中同一邮箱和 workspace 存在多个 OAuth 账号，无法确定更新目标", 409);
+      throw errorWithStatus("NFapi 中同一邮箱和 workspace 存在多个 OAuth 账号，无法确定更新目标", 409);
     }
-    throw errorWithStatus("SUB2 兼容服务中存在同邮箱但用户、workspace 或身份字段不完整的账号，已停止以免更新错误账号", 409);
+    throw errorWithStatus("NFapi 中存在同邮箱但用户、workspace 或身份字段不完整的账号，已停止以免更新错误账号", 409);
   }
 
   findAgentIdentityExisting(accounts, source, preferredAccountId = 0) {
@@ -1128,15 +1128,26 @@ export class NfapiService {
 
   linkedAccount(source) {
     const row = this.db.prepare(`
-      SELECT email, nfapi_account_id
+      SELECT email, nfapi_account_id, config_json
       FROM registered_account_nfapi_links
       WHERE external_account_id = ? AND nfapi_base_url = ?
     `).get(String(source.id), this.baseUrl());
     if (!row) return null;
     if (String(row.email || "").trim().toLowerCase() !== String(source.account.email || "").trim().toLowerCase()) {
-      throw errorWithStatus("AliasHub 的 SUB2 兼容服务账号链接与原注册邮箱不匹配", 409);
+      throw errorWithStatus("AliasHub 的 NFapi 账号链接与原注册邮箱不匹配", 409);
     }
     return row;
+  }
+
+  linkedImportOptions(link) {
+    if (!link?.config_json) return null;
+    try {
+      const parsed = JSON.parse(link.config_json);
+      if (Number(parsed?.expires_at || 0) <= Math.floor(Date.now() / 1000)) parsed.expires_at = null;
+      return normalizeNfapiImportOptions({ ...parsed, update_existing: true });
+    } catch {
+      return null;
+    }
   }
 
   desiredName(source, options, count) {
@@ -1169,7 +1180,7 @@ export class NfapiService {
       extra: controlledExtra(options, source, { includeResets: true }),
     });
     if (Number(merged?.failed || 0) > 0) {
-      const rawMessage = merged?.results?.find((item) => !item.success)?.error || "SUB2 兼容服务账号配置合并失败";
+      const rawMessage = merged?.results?.find((item) => !item.success)?.error || "NFapi 账号配置合并失败";
       const message = safeNfapiMessage(client, rawMessage, source);
       throw errorWithStatus(message, 502);
     }
@@ -1434,9 +1445,10 @@ export class NfapiService {
 
       const target = await client.getAccount(targetId);
       try {
-        // Some SUB2-compatible services protect sensitive OAuth keys during
-        // ordinary credential merges. Clear residue only on the verified,
-        // just-imported target before applying its normal AliasHub settings.
+        // Sub2API protects sensitive OAuth keys during ordinary credential
+        // merges. A successful Agent Identity update can therefore retain old
+        // OAuth tokens; clear only that verified, just-imported target before
+        // applying its normal AliasHub settings.
         validateAgentIdentityTarget(target, source, pending.runtimeId, {
           requireLongLived: false,
           allowOAuthResidue: true,
@@ -1530,6 +1542,9 @@ export class NfapiService {
     if (input.force_restart !== undefined && typeof input.force_restart !== "boolean") {
       throw errorWithStatus("重新生成 OAuth 链接标记必须是布尔值");
     }
+    if (input.reauthorization !== undefined && typeof input.reauthorization !== "boolean") {
+      throw errorWithStatus("重新授权标记必须是布尔值");
+    }
     const forceRestart = input.force_restart === true;
     this.expireOAuthSessions();
     const activeSession = this.db.prepare(`
@@ -1554,23 +1569,26 @@ export class NfapiService {
         throw error;
       }
     }
-    const options = restartedPayload?.options
-      ? normalizeNfapiImportOptions(restartedPayload.options)
-      : normalizeNfapiImportOptions(input.options || {}, this.storedDefaults());
-
     const [source] = await this.loadSources([sourceId]);
     if (restartedPayload) assertCurrentSourceMatchesSnapshot(source, restartedPayload.source);
+    const link = this.linkedAccount(source);
+    const reauthorization = input.reauthorization === true || restartedPayload?.reauthorization === true;
+    const baseOptions = restartedPayload?.options
+      ? normalizeNfapiImportOptions(restartedPayload.options)
+      : normalizeNfapiImportOptions(input.options || {}, this.storedDefaults());
+    const options = reauthorization
+      ? this.linkedImportOptions(link) || normalizeNfapiImportOptions({ ...baseOptions, update_existing: true })
+      : baseOptions;
     const expectedIdentity = {
       email: String(source.credentials.email || source.account.email || "").trim(),
       accountId: String(source.credentials.accountId || "").trim(),
     };
     if (!expectedIdentity.email || !expectedIdentity.accountId) {
-      throw errorWithStatus("注册账号缺少可核验的邮箱或 workspace ID，无法启动 SUB2 兼容服务 OAuth", 409);
+      throw errorWithStatus("注册账号缺少可核验的邮箱或 workspace ID，无法启动 NFapi OAuth", 409);
     }
 
     const client = this.client();
     const existingAccounts = await client.listOpenAiOauthAccounts();
-    const link = this.linkedAccount(source);
     const existing = this.findExisting(existingAccounts, source, Number(link?.nfapi_account_id || 0));
     const name = restartedPayload
       ? text(restartedPayload.name, 120, "账号名称") || this.desiredName(source, options, 1)
@@ -1578,7 +1596,7 @@ export class NfapiService {
     if (existing && !options.update_existing) {
       const shortLived = !nfapiHasDurableAuth(existing);
       this.db.transaction(() => {
-        if (input.save_defaults) this.saveDefaults(options);
+        if (input.save_defaults && !reauthorization) this.saveDefaults(options);
         this.saveLink(source, {
           accountId: Number(existing.id), status: "imported", shortLived, action: "skipped", options,
         });
@@ -1620,6 +1638,7 @@ export class NfapiService {
       source: safeSource,
       options,
       name,
+      reauthorization,
       existingAccountId: Number(existing?.id || 0),
     }));
     const persistSession = this.db.transaction(() => {
@@ -1630,7 +1649,7 @@ export class NfapiService {
           WHERE id = ? AND external_account_id = ? AND status = 'pending'
         `).run(createdAt.toISOString(), restartedSession.id, sourceId);
         if (retired.changes !== 1) {
-          throw errorWithStatus("这个账号的 SUB2 兼容服务 OAuth 会话状态已变化，请重新开始", 409);
+          throw errorWithStatus("这个账号的 NFapi OAuth 会话状态已变化，请重新开始", 409);
         }
       }
       this.db.prepare(`
@@ -1649,11 +1668,11 @@ export class NfapiService {
           LIMIT 1
         `).get(sourceId);
         if (winner) return this.resumeOAuthSession(winner, sourceId);
-        throw errorWithStatus("这个账号的 SUB2 兼容服务 OAuth 会话状态已变化，请重新开始", 409);
+        throw errorWithStatus("这个账号的 NFapi OAuth 会话状态已变化，请重新开始", 409);
       }
       throw error;
     }
-    if (input.save_defaults) this.saveDefaults(options);
+    if (input.save_defaults && !reauthorization) this.saveDefaults(options);
     return {
       authorization_required: true,
       status: "pending",
@@ -1662,23 +1681,24 @@ export class NfapiService {
       auth_url: authorization.authUrl,
       expires_at: expiresAt.toISOString(),
       nfapi_account_id: Number(existing?.id || 0),
+      reauthorization,
     };
   }
 
   async completeOAuthImport(localSessionId, callbackUrl, expectedSourceId = 0) {
     const sessionId = String(localSessionId || "").trim();
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(sessionId)) {
-      throw errorWithStatus("SUB2 兼容服务 OAuth 会话不存在", 404);
+      throw errorWithStatus("NFapi OAuth 会话不存在", 404);
     }
     this.expireOAuthSessions();
     const row = this.db.prepare("SELECT * FROM nfapi_oauth_import_sessions WHERE id = ?").get(sessionId);
-    if (!row) throw errorWithStatus("SUB2 兼容服务 OAuth 会话不存在", 404);
-    if (row.status === "expired") throw errorWithStatus("SUB2 兼容服务 OAuth 会话已过期，请重新开始", 410);
-    if (row.status !== "pending") throw errorWithStatus("SUB2 兼容服务 OAuth 会话已使用，请重新开始", 409);
+    if (!row) throw errorWithStatus("NFapi OAuth 会话不存在", 404);
+    if (row.status === "expired") throw errorWithStatus("NFapi OAuth 会话已过期，请重新开始", 410);
+    if (row.status !== "pending") throw errorWithStatus("NFapi OAuth 会话已使用，请重新开始", 409);
 
     const routeSourceId = Number(expectedSourceId || 0);
     const boundSourceId = Number(row.external_account_id || 0);
-    if (routeSourceId > 0 && boundSourceId !== routeSourceId) throw errorWithStatus("SUB2 兼容服务 OAuth 会话与所选账号不匹配", 409);
+    if (routeSourceId > 0 && boundSourceId !== routeSourceId) throw errorWithStatus("NFapi OAuth 会话与所选账号不匹配", 409);
     const payload = this.readOAuthSessionPayload(row, boundSourceId);
     const callback = parseOAuthCallback(callbackUrl);
     if (!equalSecret(callback.state, payload.expectedState)) throw errorWithStatus("OAuth state 校验失败", 409);
@@ -1689,7 +1709,7 @@ export class NfapiService {
       SET status = 'processing', consumed_at = ?
       WHERE id = ? AND status = 'pending' AND expires_at > ?
     `).run(consumedAt, sessionId, consumedAt);
-    if (consumed.changes !== 1) throw errorWithStatus("SUB2 兼容服务 OAuth 会话已使用或过期，请重新开始", 409);
+    if (consumed.changes !== 1) throw errorWithStatus("NFapi OAuth 会话已使用或过期，请重新开始", 409);
 
     const client = this.client();
     const source = payload.source;
@@ -1697,6 +1717,8 @@ export class NfapiService {
     let targetId = Number(payload.existingAccountId || 0);
     let action = targetId > 0 ? "updated_credentials" : "created";
     let token = null;
+    let refreshTokenSaved = false;
+    let credentialSyncError = "";
     try {
       const [currentSource] = await this.loadSources([boundSourceId]);
       assertCurrentSourceMatchesSnapshot(currentSource, source);
@@ -1717,7 +1739,7 @@ export class NfapiService {
       } else if (currentExisting) {
         targetId = Number(currentExisting.id);
         const existingTarget = await client.getAccount(targetId);
-        if (!existingTarget) throw errorWithStatus("SUB2 兼容服务目标账号已不存在", 404);
+        if (!existingTarget) throw errorWithStatus("NFapi 目标账号已不存在", 404);
         const applied = await client.applyOAuthCredentials(targetId, {
           type: "oauth",
           credentials: oauthCredentialsForUpdate(existingTarget, token),
@@ -1747,16 +1769,39 @@ export class NfapiService {
           .digest("hex")}`;
         const created = await client.createAccount(createPayload, idempotencyKey);
         targetId = Number(created?.id || 0);
-        if (!targetId) throw errorWithStatus("SUB2 兼容服务没有返回新账号 ID", 502);
+        if (!targetId) throw errorWithStatus("NFapi 没有返回新账号 ID", 502);
         action = "created";
       }
 
-      if (action !== "skipped") {
+      if (action !== "skipped" && !(payload.reauthorization === true && action === "updated_credentials")) {
         await this.applyAllSettings(client, targetId, source, payload.name, options, { longLived: token.longLived });
       }
       const shortLived = action === "skipped"
         ? !nfapiHasDurableAuth(currentExisting)
         : !token.longLived;
+      if (token.longLived && typeof this.registrationClient?.updateAccount === "function") {
+        try {
+          const updated = await this.registrationClient.updateAccount(boundSourceId, {
+            credentials: token.credentials,
+          });
+          const updatedCredentials = registrationCredentials(updated);
+          validateTokenIdentity(source.credentials, {
+            email: updatedCredentials.email,
+            accountId: updatedCredentials.accountId,
+            userId: updatedCredentials.userId,
+          });
+          if (!updatedCredentials.refreshToken
+            || updatedCredentials.refreshToken !== token.credentials.refresh_token) {
+            throw errorWithStatus("注册账号未保存 OAuth Refresh Token", 502);
+          }
+          refreshTokenSaved = true;
+        } catch (error) {
+          credentialSyncError = redactNfapiMessage(error?.message || "Refresh Token 回写失败", token.secrets)
+            || "Refresh Token 回写失败";
+        }
+      } else if (token.longLived) {
+        credentialSyncError = "注册服务暂不支持回写 Refresh Token";
+      }
       this.db.transaction(() => {
         this.saveLink(source, {
           accountId: targetId, status: "imported", shortLived, action, options,
@@ -1768,14 +1813,17 @@ export class NfapiService {
         action,
         nfapi_account_id: targetId,
         short_lived: shortLived,
+        reauthorization: payload.reauthorization === true,
+        refresh_token_saved: refreshTokenSaved,
+        ...(credentialSyncError ? { credential_sync_error: credentialSyncError } : {}),
       };
     } catch (error) {
       const secrets = [
         callback.code, callback.state, payload.upstreamSessionId,
         ...(token?.secrets || []), this.apiKey(),
       ];
-      const message = redactNfapiMessage(error?.message || "SUB2 兼容服务 OAuth 导入失败", secrets)
-        || "SUB2 兼容服务 OAuth 导入失败";
+      const message = redactNfapiMessage(error?.message || "NFapi OAuth 导入失败", secrets)
+        || "NFapi OAuth 导入失败";
       this.finishOAuthSession(sessionId, "failed", message);
       const status = Number(error?.status);
       throw errorWithStatus(message, Number.isInteger(status) && status >= 400 && status <= 504 ? status : 502);
