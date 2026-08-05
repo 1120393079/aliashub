@@ -29,32 +29,12 @@ test("parses arbitrary HTTPS inbox links and deduplicates exact rows", () => {
   assert.doesNotMatch(generic.maskedLink, /signed-token-1234|latest/);
 });
 
-test("accepts pickup API exports separated by three or more hyphens", () => {
-  const entries = parseInboxLinkPool([
-    "first@example.com---https://pickup.example.net/api/mail?key=first-secret",
-    "second@example.com ---- https://pickup.example.net/api/mail?key=second-secret",
-  ].join("\n"));
-
-  assert.deepEqual(entries.map(({ email, inboxLink }) => ({ email, inboxLink })), [
-    {
-      email: "first@example.com",
-      inboxLink: "https://pickup.example.net/api/mail?key=first-secret",
-    },
-    {
-      email: "second@example.com",
-      inboxLink: "https://pickup.example.net/api/mail?key=second-secret",
-    },
-  ]);
-  assert.doesNotMatch(entries[0].maskedLink, /first-secret/);
-});
-
 test("rejects invalid or conflicting inbox-link rows without echoing the key", () => {
   const invalidRows = [
     "not-an-email https://dispose.lol/ib/rtuFbD4cPhNyWr0B",
     "one@example.com http://dispose.lol/ib/rtuFbD4cPhNyWr0B",
     "one@example.com ftp://example.com/mailbox/rtuFbD4cPhNyWr0B",
     "one@example.com https://user:password@example.com/mailbox/rtuFbD4cPhNyWr0B",
-    "one@example.com---not-an-https-api",
   ];
   for (const row of invalidRows) {
     assert.throws(() => parseInboxLinkPool(row), (error) => {

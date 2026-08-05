@@ -62,16 +62,6 @@ function parseInboxLink(value, lineNumber) {
   return parsed.toString();
 }
 
-function parseInboxLinkRow(line, lineNumber) {
-  const apiExport = line.match(/^(\S+@\S+?)\s*-{3,}\s*(https:\/\/\S+)$/i);
-  if (apiExport) return [apiExport[1], apiExport[2]];
-  const parts = line.split(/\s+/);
-  if (parts.length === 2) return parts;
-  throw Object.assign(new Error(
-    `第 ${lineNumber} 行格式错误，应为：邮箱---取件API，或 邮箱 空格 HTTPS取件链接`,
-  ), { status: 400 });
-}
-
 export function maskInboxLinkKey(value) {
   const key = String(value || "");
   return key.length <= 8 ? "*".repeat(key.length) : `${key.slice(0, 4)}...${key.slice(-4)}`;
@@ -117,7 +107,10 @@ export function parseInboxLinkPool(input, { maximum = 200 } = {}) {
     const lineNumber = index + 1;
     const line = lines[index].replace(/^\uFEFF/, "").trim();
     if (!line || line.startsWith("#") || line.startsWith("//")) continue;
-    const parts = parseInboxLinkRow(line, lineNumber);
+    const parts = line.split(/\s+/);
+    if (parts.length !== 2) {
+      throw Object.assign(new Error(`第 ${lineNumber} 行格式错误，应为：邮箱 空格 取件链接`), { status: 400 });
+    }
     const email = parts[0].trim();
     if (!EMAIL_PATTERN.test(email)) {
       throw Object.assign(new Error(`第 ${lineNumber} 行邮箱格式无效`), { status: 400 });
@@ -146,7 +139,7 @@ export function parseInboxLinkPool(input, { maximum = 200 } = {}) {
     }
   }
   if (!entries.length) {
-    throw Object.assign(new Error("链接取件邮箱池为空，请按“邮箱---取件API”每行填写一组"), { status: 400 });
+    throw Object.assign(new Error("链接取件邮箱池为空，请按“邮箱 空格 取件链接”每行填写一组"), { status: 400 });
   }
   return entries;
 }
