@@ -8,7 +8,7 @@ services:
       PICKUP_SERVICE_URL: http://mail-pickup:4190
       PICKUP_PUBLIC_URL: "${PICKUP_PUBLIC_BASE_URL:-http://127.0.0.1:4190}"
       PICKUP_ADMIN_USERNAME: "${PICKUP_ADMIN_USERNAME:-admin}"
-      PICKUP_ADMIN_PASSWORD: "${PICKUP_ADMIN_PASSWORD:?run ./scripts/setup-local.sh --full first}"
+      PICKUP_ADMIN_PASSWORD: "${PICKUP_ADMIN_PASSWORD:-}"
     depends_on:
       registration-worker:
         condition: service_healthy
@@ -53,10 +53,10 @@ services:
       PICKUP_DATABASE_PATH: /app/data/mail-pickup.db
       PICKUP_EMAIL_DOMAIN: "${PICKUP_EMAIL_DOMAIN:-example.com}"
       PICKUP_PUBLIC_BASE_URL: "${PICKUP_PUBLIC_BASE_URL:-http://127.0.0.1:4190}"
-      PICKUP_INBOUND_TOKEN: "${PICKUP_INBOUND_TOKEN:?run ./scripts/setup-local.sh --full first}"
-      PICKUP_TOKEN_SECRET: "${PICKUP_TOKEN_SECRET:?run ./scripts/setup-local.sh --full first}"
+      PICKUP_INBOUND_TOKEN: "${PICKUP_INBOUND_TOKEN:-}"
+      PICKUP_TOKEN_SECRET: "${PICKUP_TOKEN_SECRET:-}"
       PICKUP_ADMIN_USERNAME: "${PICKUP_ADMIN_USERNAME:-admin}"
-      PICKUP_ADMIN_PASSWORD: "${PICKUP_ADMIN_PASSWORD:?run ./scripts/setup-local.sh --full first}"
+      PICKUP_ADMIN_PASSWORD: "${PICKUP_ADMIN_PASSWORD:-}"
       PICKUP_ALIAS_HUB_DATABASE_PATH: /alias-data/outlook-alias-hub.db
       PICKUP_ALIAS_HUB_URL: http://aliashub:4180
       PICKUP_ALIAS_HUB_SCAN_SECONDS: "${PICKUP_ALIAS_HUB_SCAN_SECONDS:-15}"
