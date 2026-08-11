@@ -30,12 +30,17 @@ import {
 } from "./registration-proxy.js";
 import { parseLocalAccountImport } from "./registration-import.js";
 import { serializeInboxLinkEntry } from "./inbox-link-pool.js";
+import { checkoutTypeFromAccount, probeCheckoutType } from "./checkout-type-probe.js";
+import { probeJpTrialEligibility } from "./jp-trial-eligibility-probe.js";
 
 const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled", "interrupted"]);
 const ACTIVE_STATUSES = new Set(["pending", "claimed", "running", "paused", "cancel_requested"]);
 const RELEASABLE_JOB_STATUSES = new Set(["queued", "pending", "claimed", "running", "paused", "cancel_requested"]);
 const ACCOUNT_STATUS_REFRESH_COOLDOWN_MS = 15 * 60 * 1000;
 const ACCOUNT_STATUS_REFRESH_BATCH_SIZE = 20;
+const CHECKOUT_CHECK_CONCURRENCY = 2;
+const CHECKOUT_ACCOUNT_COOLDOWN_MS = 30 * 60 * 1000;
+const TRIAL_CHECK_CONCURRENCY = 2;
 
 function normalizeSelectedIds(input, label, maximum = 500) {
   if (!Array.isArray(input?.ids)) {
@@ -176,9 +181,17 @@ function firstRemoteText(...values) {
   return "";
 }
 
+const PLUS_MAIL_CONFIRMATION_MAX_AGE_MS = 35 * 24 * 60 * 60 * 1_000;
+
+function plusConfirmationAccountId(message = {}) {
+  const text = [message.subject, message.preview, message.body].map((value) => String(value || "")).join(" ");
+  const match = text.match(/chatgpt\.com\/account\/manage\?[^\s<>"']*\baccount_id=([a-z0-9-]{8,})/i);
+  return match?.[1] || "";
+}
+
 function plusMailEvidenceByEmail(db) {
   const rows = db.prepare(`
-    SELECT lower(recipient_address) AS email, subject, received_at
+    SELECT lower(recipient_address) AS email, subject, preview, body, received_at
     FROM mail_messages
     WHERE recipient_address <> ''
       AND lower(subject || ' ' || preview || ' ' || body) LIKE '%chatgpt plus%'
@@ -186,6 +199,7 @@ function plusMailEvidenceByEmail(db) {
         lower(subject || ' ' || preview || ' ' || body) LIKE '%successfully subscribed%'
         OR lower(subject || ' ' || preview || ' ' || body) LIKE '%successfully registered%'
         OR subject || ' ' || preview || ' ' || body LIKE '%正常に登録%'
+        OR subject || ' ' || preview || ' ' || body LIKE '%구독했습니다%'
         OR subject || ' ' || preview || ' ' || body LIKE '%成功订阅%'
         OR subject || ' ' || preview || ' ' || body LIKE '%订阅成功%'
       )
@@ -193,9 +207,41 @@ function plusMailEvidenceByEmail(db) {
   `).all();
   const evidence = new Map();
   for (const row of rows) {
-    if (row.email && !evidence.has(row.email)) evidence.set(row.email, row);
+    if (row.email && !evidence.has(row.email)) {
+      evidence.set(row.email, {
+        email: row.email,
+        subject: row.subject,
+        received_at: row.received_at,
+        account_id: plusConfirmationAccountId(row),
+      });
+    }
   }
   return evidence;
+}
+
+function plusMailMatchesAccount(mail, account = {}) {
+  const mailAccountId = safeRemoteText(mail?.account_id, 100);
+  if (!mailAccountId) return false;
+  const accountIds = new Set([
+    account?.user_id,
+    accountCredential(account, ["account_id", "accountId", "chatgpt_account_id", "chatgptAccountId"]),
+  ].map((value) => safeRemoteText(value, 100)).filter(Boolean));
+  return accountIds.has(mailAccountId);
+}
+
+function recentPlusMailConfirmation(mail, now = Date.now()) {
+  const receivedAt = Date.parse(String(mail?.received_at || ""));
+  return Number.isFinite(receivedAt)
+    && receivedAt <= now + 5 * 60 * 1_000
+    && now - receivedAt <= PLUS_MAIL_CONFIRMATION_MAX_AGE_MS;
+}
+
+function shouldPromotePlusMail(mail, account, signals) {
+  if (!mail || signals.account_type === "plus") return false;
+  const code = normalizeCheckCode(signals.status_code);
+  if (SUBSCRIPTION_STATUS_CODES.has(code)) return false;
+  if (signals.detection_status !== "confirmed") return true;
+  return recentPlusMailConfirmation(mail) && plusMailMatchesAccount(mail, account);
 }
 
 const PLAN_TYPE_ALIASES = new Map([
@@ -1257,6 +1303,22 @@ function assertAccessTokenRefreshTask(task, expectedTaskId = "") {
   return { taskId, status };
 }
 
+function checkoutCheckError(value) {
+  const source = value?.message || value?.error || value || "Checkout 检测失败";
+  return safeRemoteText(redactProxySecrets(source)
+    .replace(/\b(?:Bearer\s+)?eyJ[A-Za-z0-9._-]+/gi, "[REDACTED]")
+    .replace(/\b(?:cs_live|oaics)_[A-Za-z0-9_-]+/gi, "[REDACTED]"), 180)
+    || "Checkout 检测失败";
+}
+
+function trialCheckError(value) {
+  const source = value?.message || value?.error || value || "日本免费试用资格检测失败";
+  return safeRemoteText(redactProxySecrets(source)
+    .replace(/\b(?:Bearer\s+)?eyJ[A-Za-z0-9._-]+/gi, "[REDACTED]")
+    .replace(/\b(?:cs_live|oaics)_[A-Za-z0-9_-]+/gi, "[REDACTED]"), 180)
+    || "日本免费试用资格检测失败";
+}
+
 function publicPasswordSetupTask(task) {
   const taskId = String(task.task_id || task.id || "");
   const mappedStatus = statusFromExternal(task.status);
@@ -1357,7 +1419,7 @@ function identityFromEvents(events = []) {
 }
 
 export class RegistrationService {
-  constructor({ db, graph, client, publicBaseUrl, mailboxBaseUrl, browserUrl, inboxLinkMailboxes = null, nfapiCredentialSync = null } = {}) {
+  constructor({ db, graph, client, publicBaseUrl, mailboxBaseUrl, browserUrl, inboxLinkMailboxes = null, nfapiCredentialSync = null, checkoutProbe = probeCheckoutType, checkoutProxyResolver = null, trialProbe = probeJpTrialEligibility, trialProxyResolver = null } = {}) {
     this.db = db;
     this.graph = graph;
     this.client = client;
@@ -1367,6 +1429,15 @@ export class RegistrationService {
     this.inboxLinkMailboxes = inboxLinkMailboxes;
     this.scanPromises = new Map();
     this.accountAccessTokenRefreshes = new Map();
+    this.accountCheckoutChecks = new Map();
+    this.accountCheckoutCooldowns = new Map();
+    this.checkoutProbe = checkoutProbe;
+    this.checkoutProxyResolver = checkoutProxyResolver;
+    this.checkoutProxyCache = { proxy: "", expiresAt: 0 };
+    this.accountTrialChecks = new Map();
+    this.trialProbe = trialProbe;
+    this.trialProxyResolver = trialProxyResolver;
+    this.trialProxyCache = { proxy: "", expiresAt: 0 };
     this.accountStatusRefreshAttempts = new Map();
     this.accountStatusCheckOutcomes = new Map();
     this.nfapiCredentialSync = nfapiCredentialSync;
@@ -1419,6 +1490,7 @@ export class RegistrationService {
   saveProxyPool(input) {
     const proxies = parseProxyPool(input);
     setSetting(this.db, "registration_proxy_pool", JSON.stringify(proxies));
+    this.checkoutProxyCache = { proxy: "", expiresAt: 0 };
     return {
       count: proxies.length,
       proxies,
@@ -2424,6 +2496,20 @@ export class RegistrationService {
     `).all();
     const metadataByAccountId = new Map(this.db.prepare("SELECT * FROM registered_account_metadata").all()
       .map((item) => [String(item.external_account_id), item]));
+    let checkoutByAccountId = new Map();
+    try {
+      checkoutByAccountId = new Map(this.db.prepare("SELECT * FROM registered_account_checkout_checks").all()
+        .map((item) => [String(item.external_account_id), item]));
+    } catch {
+      // Older test databases can still list accounts before running the latest schema.
+    }
+    let trialByAccountId = new Map();
+    try {
+      trialByAccountId = new Map(this.db.prepare("SELECT * FROM registered_account_trial_checks").all()
+        .map((item) => [String(item.external_account_id), item]));
+    } catch {
+      // Older test databases can still list accounts before running the latest schema.
+    }
     const plusMailByEmail = plusMailEvidenceByEmail(this.db);
     const nfapiByAccountId = new Map();
     const nfapiBaseUrl = String(getSetting(this.db, "nfapi_base_url", "")).replace(/\/+$/, "");
@@ -2467,28 +2553,31 @@ export class RegistrationService {
         const passwordMetadata = passwordMetadataFromAccount(item);
         const passwordSetup = this.passwordSetupAvailability(job, item, passwordMetadata);
         const metadata = metadataByAccountId.get(String(item.id || ""));
+        const checkoutCheck = checkoutByAccountId.get(String(item.id || ""));
+        const trialCheck = trialByAccountId.get(String(item.id || ""));
         const nfapiLink = nfapiByAccountId.get(String(item.id || ""));
         const checkOutcome = this.accountStatusCheckOutcomes.get(String(item.id || ""));
         const checkOutcomeMatches = checkOutcome
           && String(checkOutcome.email || "").toLowerCase() === String(item.email || "").toLowerCase();
         const accountSignals = accountStatusSignals(item, checkOutcomeMatches ? checkOutcome : null);
         const plusMail = plusMailByEmail.get(String(item.email || "").toLowerCase());
-        const mailPromoted = Boolean(plusMail
-          && (accountSignals.account_type === "plus" || accountSignals.detection_status !== "confirmed"));
+        const mailPromoted = shouldPromotePlusMail(plusMail, item, accountSignals);
+        const preserveNonPlanStatus = ACCOUNT_UNAVAILABLE_CODES.has(normalizeCheckCode(accountSignals.status_code))
+          || CREDENTIAL_EXPIRED_CODES.has(normalizeCheckCode(accountSignals.status_code))
+          || CREDENTIAL_REVOKED_CODES.has(normalizeCheckCode(accountSignals.status_code));
         const effectiveSignals = mailPromoted ? {
           ...accountSignals,
           account_type: "plus",
-          account_type_raw: accountSignals.account_type === "plus"
-            ? accountSignals.account_type_raw : "chatgptplusplan",
+          account_type_raw: "chatgptplusplan",
           account_type_known: true,
-          account_type_source: accountSignals.account_type === "plus"
-            ? accountSignals.account_type_source : "mail_confirmation",
+          account_type_source: "mail_confirmation",
           subscription_status: "active",
           detection_status: "confirmed",
-          status_code: "subscription_active",
-          status_reason: "检测到 ChatGPT Plus 开通确认邮件",
-          status_retryable: false,
-          status_evidence_path: "mail_messages.subject+body",
+          status_code: preserveNonPlanStatus ? accountSignals.status_code : "subscription_active",
+          status_reason: preserveNonPlanStatus
+            ? accountSignals.status_reason : "检测到与当前 workspace 匹配的 ChatGPT Plus 开通确认邮件",
+          status_retryable: preserveNonPlanStatus ? accountSignals.status_retryable : false,
+          status_evidence_path: "mail_messages.account_manage_link+subject+body",
           status_checked_at: plusMail.received_at,
           status_confirmed_at: plusMail.received_at,
           status_source: "mail/plus-confirmation",
@@ -2503,6 +2592,10 @@ export class RegistrationService {
           ? checkOutcome.reason : "";
         const metadataMatches = metadata
           && String(metadata.email || "").toLowerCase() === String(item.email || "").toLowerCase();
+        const checkoutMatches = checkoutCheck
+          && String(checkoutCheck.email || "").toLowerCase() === String(item.email || "").toLowerCase();
+        const trialMatches = trialCheck
+          && String(trialCheck.email || "").toLowerCase() === String(item.email || "").toLowerCase();
         const nfapiMatches = nfapiLink
           && String(nfapiLink.email || "").toLowerCase() === String(item.email || "").toLowerCase();
         const storedGroupName = metadataMatches ? String(metadata.group_name || "") : "";
@@ -2519,6 +2612,7 @@ export class RegistrationService {
           mail_plus_confirmed: Boolean(plusMail),
           mail_plus_confirmed_at: plusMail?.received_at || "",
           mail_plus_subject: plusMail?.subject || "",
+          mail_plus_account_id: plusMail?.account_id || "",
           status_check_state: checkState,
           status_check_error: checkError,
           status_check_attempted_at: checkOutcomeMatches ? checkOutcome.attempted_at : "",
@@ -2534,6 +2628,16 @@ export class RegistrationService {
           custom_group_name: customGroupName,
           default_group_name: defaultGroupName,
           group_source: customGroupName ? "custom" : "plan",
+          checkout_status: checkoutMatches ? String(checkoutCheck.status || "unchecked") : "unchecked",
+          checkout_type: checkoutMatches ? String(checkoutCheck.checkout_type || "") : "",
+          checkout_error: checkoutMatches ? String(checkoutCheck.error || "") : "",
+          checkout_checked_at: checkoutMatches ? String(checkoutCheck.checked_at || "") : "",
+          trial_status: trialMatches ? String(trialCheck.status || "unchecked") : "unchecked",
+          trial_eligible: trialMatches && trialCheck.eligible !== null
+            ? Boolean(trialCheck.eligible) : null,
+          trial_evidence: trialMatches ? String(trialCheck.evidence || "") : "",
+          trial_error: trialMatches ? String(trialCheck.error || "") : "",
+          trial_checked_at: trialMatches ? String(trialCheck.checked_at || "") : "",
           nfapi: nfapiMatches ? {
             linked: nfapiLink.status === "imported",
             base_url: nfapiLink.nfapi_base_url,
@@ -2633,6 +2737,14 @@ export class RegistrationService {
           UPDATE registered_account_status_checks SET external_account_id = ?, updated_at = ?
           WHERE external_account_id = ? AND email = ? COLLATE NOCASE
         `);
+        const migrateCheckout = this.db.prepare(`
+          UPDATE registered_account_checkout_checks SET external_account_id = ?, updated_at = ?
+          WHERE external_account_id = ? AND email = ? COLLATE NOCASE
+        `);
+        const migrateTrial = this.db.prepare(`
+          UPDATE registered_account_trial_checks SET external_account_id = ?, updated_at = ?
+          WHERE external_account_id = ? AND email = ? COLLATE NOCASE
+        `);
         const migrateNfapi = this.db.prepare(`
           UPDATE registered_account_nfapi_links SET external_account_id = ?, updated_at = ?
           WHERE external_account_id = ? AND email = ? COLLATE NOCASE
@@ -2649,6 +2761,8 @@ export class RegistrationService {
           if (previousId) {
             migrateMetadata.run(String(item.id), updatedAt, previousId, item.email);
             migrateStatus.run(String(item.id), updatedAt, previousId, item.email);
+            migrateCheckout.run(String(item.id), updatedAt, previousId, item.email);
+            migrateTrial.run(String(item.id), updatedAt, previousId, item.email);
             migrateNfapi.run(String(item.id), updatedAt, previousId, item.email);
             migratePasswordTasks.run(item.id, updatedAt, Number(previousId));
           }
@@ -2751,6 +2865,9 @@ export class RegistrationService {
       const account = accountById.get(Number(outcome.id)) || {};
       const credentialTerminal = CREDENTIAL_EXPIRED_CODES.has(outcome.code)
         || CREDENTIAL_REVOKED_CODES.has(outcome.code);
+      const mailPlanOverride = account.mail_plus_confirmed === true
+        && account.account_type === "plus"
+        && outcome.account_type !== "plus";
       const merged = {
         ...outcome,
         account_status: outcome.account_status !== "unknown" || credentialTerminal
@@ -2766,6 +2883,19 @@ export class RegistrationService {
         availability: String(account.availability || "unchecked"),
         available: typeof account.available === "boolean" ? account.available : null,
       };
+      if (mailPlanOverride) {
+        merged.subscription_status = "active";
+        merged.account_type = "plus";
+        merged.account_type_raw = String(account.account_type_raw || "chatgptplusplan");
+        merged.type_observed = true;
+        merged.detection_status = "confirmed";
+        merged.code = String(account.status_code || "subscription_active");
+        merged.reason = String(account.status_reason || "检测到与当前 workspace 匹配的 ChatGPT Plus 开通确认邮件");
+        merged.retryable = Boolean(account.status_retryable);
+        merged.source = "mail/plus-confirmation";
+        merged.evidence_path = "mail_messages.account_manage_link+subject+body";
+        merged.checked_at = String(account.mail_plus_confirmed_at || outcome.checked_at);
+      }
       merged.type = merged.account_type;
       merged.type_raw = merged.account_type_raw;
       merged.status = merged.account_status;
@@ -2941,6 +3071,399 @@ export class RegistrationService {
       ids,
       group_name: groupName,
       items: accounts.map((account) => ({ ...account, group_name: groupName })),
+    };
+  }
+
+  persistRegisteredAccountCheckoutCheck({ id, email, checkoutType = "", status, error = "", checkedAt }) {
+    const accountId = String(id || "");
+    const normalizedEmail = safeRemoteText(email, 320).toLowerCase();
+    const normalizedType = new Set(["cs_live", "oaics"]).has(checkoutType) ? checkoutType : "";
+    const normalizedStatus = status === "completed" && normalizedType ? "completed" : "failed";
+    const now = nowIso();
+    this.db.prepare(`
+      INSERT INTO registered_account_checkout_checks
+        (external_account_id, email, checkout_type, status, error, checked_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(external_account_id) DO UPDATE SET
+        email = excluded.email,
+        checkout_type = excluded.checkout_type,
+        status = excluded.status,
+        error = excluded.error,
+        checked_at = excluded.checked_at,
+        updated_at = excluded.updated_at
+    `).run(
+      accountId,
+      normalizedEmail,
+      normalizedType,
+      normalizedStatus,
+      normalizedStatus === "failed" ? checkoutCheckError(error) : "",
+      checkedAt || now,
+      now,
+      now,
+    );
+    return {
+      id: Number(accountId),
+      checkout_status: normalizedStatus,
+      checkout_type: normalizedType,
+      checkout_error: normalizedStatus === "failed" ? checkoutCheckError(error) : "",
+      checkout_checked_at: checkedAt || now,
+    };
+  }
+
+  async resolveGermanCheckoutProxy() {
+    if (typeof this.checkoutProxyResolver === "function") {
+      const resolved = String(await this.checkoutProxyResolver() || "").trim();
+      if (!resolved) throw Object.assign(new Error("未配置 DE Checkout 代理"), { status: 409 });
+      return resolved;
+    }
+    if (this.checkoutProxyCache.proxy && this.checkoutProxyCache.expiresAt > Date.now()) {
+      return this.checkoutProxyCache.proxy;
+    }
+    if (typeof this.client.inspectProxy !== "function") {
+      throw Object.assign(new Error("DE Checkout 代理检测服务不可用"), { status: 503 });
+    }
+    const proxies = this.getProxyPool();
+    if (!proxies.length) {
+      throw Object.assign(new Error("代理池为空，请先添加 DE 代理"), { status: 409 });
+    }
+    const usedSessions = new Set();
+    for (const source of proxies) {
+      const proxy = materializeProxySession(source, usedSessions);
+      try {
+        const inspection = await this.client.inspectProxy({ url: proxy, samples: 1, delay_ms: 0 });
+        const sample = Array.isArray(inspection?.samples) ? inspection.samples[0] : null;
+        if (String(sample?.country_code || "").toUpperCase() !== "DE") continue;
+        this.checkoutProxyCache = { proxy, expiresAt: Date.now() + 5 * 60 * 1000 };
+        return proxy;
+      } catch {
+        // Continue until a saved proxy is positively identified as a DE exit.
+      }
+    }
+    throw Object.assign(new Error("代理池中没有检测到 DE 出口，请先添加德国代理"), { status: 409 });
+  }
+
+  checkRegisteredAccountCheckout(account, proxy) {
+    const accountId = Number(account.id);
+    const existing = this.accountCheckoutChecks.get(accountId);
+    if (existing) return existing;
+    const promise = this.runRegisteredAccountCheckoutCheck(account, proxy)
+      .then((checkoutType) => this.persistRegisteredAccountCheckoutCheck({
+        id: accountId,
+        email: account.email,
+        checkoutType,
+        status: "completed",
+        checkedAt: nowIso(),
+      }))
+      .catch((error) => {
+        if (Number(error?.status) === 429) {
+          if (error?.code === "checkout_creation_rate_limited") {
+            this.accountCheckoutCooldowns.set(accountId, Date.now() + CHECKOUT_ACCOUNT_COOLDOWN_MS);
+          }
+          throw error;
+        }
+        if (Number(error?.status) === 504) {
+          throw Object.assign(error, { status: 408 });
+        }
+        return this.persistRegisteredAccountCheckoutCheck({
+          id: accountId,
+          email: account.email,
+          status: "failed",
+          error,
+          checkedAt: nowIso(),
+        });
+      })
+      .finally(() => this.accountCheckoutChecks.delete(accountId));
+    this.accountCheckoutChecks.set(accountId, promise);
+    return promise;
+  }
+
+  async runRegisteredAccountCheckoutCheck(account, proxy) {
+    const remote = await this.client.getAccount(account.id);
+    if (!remote
+      || String(remote.platform || "chatgpt").toLowerCase() !== "chatgpt"
+      || String(remote.email || "").toLowerCase() !== String(account.email || "").toLowerCase()) {
+      throw Object.assign(new Error("注册账号与远端账号不匹配"), { status: 409 });
+    }
+    const existingCheckoutType = checkoutTypeFromAccount(remote);
+    if (existingCheckoutType) {
+      this.accountCheckoutCooldowns.delete(Number(account.id));
+      return existingCheckoutType;
+    }
+    const cooldownUntil = Number(this.accountCheckoutCooldowns.get(Number(account.id)) || 0);
+    if (cooldownUntil > Date.now()) {
+      throw Object.assign(new Error("Checkout 创建限流冷却中，请稍后重试"), {
+        status: 429,
+        code: "checkout_creation_rate_limited",
+        retryAt: new Date(cooldownUntil).toISOString(),
+      });
+    }
+    this.accountCheckoutCooldowns.delete(Number(account.id));
+    const accessToken = accessTokenFromAccount(remote);
+    if (!accessToken) throw Object.assign(new Error("这个账号尚未获取到 AT"), { status: 409 });
+    return this.checkoutProbe({ accessToken, proxy });
+  }
+
+  async checkRegisteredAccountCheckouts(input = {}) {
+    const ids = normalizeAccountCheckIds(input, 100);
+    const before = await this.listRegisteredAccounts({ refreshUnchecked: false });
+    const accountById = new Map(before.items.map((item) => [Number(item.id), item]));
+    if (ids.some((id) => !accountById.has(id))) {
+      throw Object.assign(new Error("选择中包含不属于本注册页面的账号"), { status: 409 });
+    }
+
+    const proxy = await this.resolveGermanCheckoutProxy();
+    const selected = ids.map((id) => accountById.get(id));
+    const items = new Array(selected.length);
+    let cursor = 1;
+    let globalRateLimited = false;
+    const checkOne = async (index) => {
+      try {
+        items[index] = await this.checkRegisteredAccountCheckout(selected[index], proxy);
+      } catch (error) {
+        if (Number(error?.status) !== 429) throw error;
+        if (error?.code !== "checkout_creation_rate_limited") globalRateLimited = true;
+        items[index] = {
+          id: Number(selected[index].id),
+          checkout_status: "rate_limited",
+          checkout_type: "",
+          checkout_error: "Checkout 检测触发 HTTP 429 限流，请稍后重试",
+          checkout_checked_at: "",
+          checkout_retry_at: error?.retryAt || new Date(Date.now() + CHECKOUT_ACCOUNT_COOLDOWN_MS).toISOString(),
+        };
+      }
+    };
+
+    // A single preflight prevents a rate-limited exit from failing an entire selected page.
+    await checkOne(0);
+    if (!globalRateLimited && selected.length > 1) {
+      const workers = Array.from(
+        { length: Math.min(CHECKOUT_CHECK_CONCURRENCY, selected.length - 1) },
+        async () => {
+          while (!globalRateLimited && cursor < selected.length) {
+            const index = cursor;
+            cursor += 1;
+            await checkOne(index);
+          }
+        },
+      );
+      await Promise.all(workers);
+    }
+    for (let index = 0; index < items.length; index += 1) {
+      if (items[index]) continue;
+      items[index] = {
+        id: Number(selected[index].id),
+        checkout_status: "skipped",
+        checkout_type: "",
+        checkout_error: "本批次触发限流，未继续检测",
+        checkout_checked_at: "",
+      };
+    }
+    const types = items.reduce((summary, item) => {
+      if (item.checkout_type) summary[item.checkout_type] = (summary[item.checkout_type] || 0) + 1;
+      return summary;
+    }, {});
+    return {
+      requested: ids.length,
+      checked: items.filter((item) => item.checkout_status === "completed").length,
+      failed: items.filter((item) => item.checkout_status === "failed").length,
+      rate_limited: items.filter((item) => item.checkout_status === "rate_limited").length,
+      skipped: items.filter((item) => item.checkout_status === "skipped").length,
+      types,
+      items,
+      accounts: await this.listRegisteredAccounts({ refreshUnchecked: false }),
+    };
+  }
+
+  persistRegisteredAccountTrialCheck({ id, email, eligible = null, evidence = "", status, error = "", checkedAt }) {
+    const accountId = String(id || "");
+    const normalizedEmail = safeRemoteText(email, 320).toLowerCase();
+    const normalizedEligible = typeof eligible === "boolean" ? eligible : null;
+    const normalizedStatus = status === "eligible" && normalizedEligible === true
+      ? "eligible"
+      : status === "ineligible" && normalizedEligible === false
+        ? "ineligible"
+        : "failed";
+    const normalizedEvidence = normalizedStatus === "failed" ? "" : safeRemoteText(evidence, 120);
+    const normalizedError = normalizedStatus === "failed" ? trialCheckError(error) : "";
+    const now = nowIso();
+    const effectiveCheckedAt = checkedAt || now;
+    this.db.prepare(`
+      INSERT INTO registered_account_trial_checks
+        (external_account_id, email, status, eligible, evidence, error, checked_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(external_account_id) DO UPDATE SET
+        email = excluded.email,
+        status = excluded.status,
+        eligible = excluded.eligible,
+        evidence = excluded.evidence,
+        error = excluded.error,
+        checked_at = excluded.checked_at,
+        updated_at = excluded.updated_at
+    `).run(
+      accountId,
+      normalizedEmail,
+      normalizedStatus,
+      normalizedEligible === null ? null : Number(normalizedEligible),
+      normalizedEvidence,
+      normalizedError,
+      effectiveCheckedAt,
+      now,
+      now,
+    );
+    return {
+      id: Number(accountId),
+      trial_status: normalizedStatus,
+      trial_eligible: normalizedEligible,
+      trial_evidence: normalizedEvidence,
+      trial_error: normalizedError,
+      trial_checked_at: effectiveCheckedAt,
+    };
+  }
+
+  async resolveJapaneseTrialProxy() {
+    if (typeof this.trialProxyResolver === "function") {
+      const resolved = String(await this.trialProxyResolver() || "").trim();
+      if (!resolved) throw Object.assign(new Error("未配置 JP 资格检测代理"), { status: 409 });
+      return resolved;
+    }
+    if (this.trialProxyCache.proxy && this.trialProxyCache.expiresAt > Date.now()) {
+      return this.trialProxyCache.proxy;
+    }
+    if (typeof this.client.inspectProxy !== "function") {
+      throw Object.assign(new Error("JP 资格检测代理服务不可用"), { status: 503 });
+    }
+    const proxies = this.getProxyPool();
+    if (!proxies.length) {
+      throw Object.assign(new Error("代理池为空，请先添加日本代理"), { status: 409 });
+    }
+    const usedSessions = new Set();
+    for (const source of proxies) {
+      const proxy = materializeProxySession(source, usedSessions);
+      try {
+        const inspection = await this.client.inspectProxy({ url: proxy, samples: 1, delay_ms: 0 });
+        const sample = Array.isArray(inspection?.samples) ? inspection.samples[0] : null;
+        if (String(sample?.country_code || "").toUpperCase() !== "JP") continue;
+        this.trialProxyCache = { proxy, expiresAt: Date.now() + 5 * 60 * 1000 };
+        return proxy;
+      } catch {
+        // Continue until a saved proxy is positively identified as a JP exit.
+      }
+    }
+    throw Object.assign(new Error("代理池中没有检测到 JP 出口，请先添加日本代理"), { status: 409 });
+  }
+
+  checkRegisteredAccountTrial(account, proxy) {
+    const accountId = Number(account.id);
+    const existing = this.accountTrialChecks.get(accountId);
+    if (existing) return existing;
+    const promise = this.runRegisteredAccountTrialCheck(account, proxy)
+      .then((result) => this.persistRegisteredAccountTrialCheck({
+        id: accountId,
+        email: account.email,
+        eligible: result.eligible,
+        evidence: result.evidence,
+        status: result.eligible ? "eligible" : "ineligible",
+        checkedAt: nowIso(),
+      }))
+      .catch((error) => {
+        if (Number(error?.status) === 429) throw error;
+        return this.persistRegisteredAccountTrialCheck({
+          id: accountId,
+          email: account.email,
+          status: "failed",
+          error,
+          checkedAt: nowIso(),
+        });
+      })
+      .finally(() => this.accountTrialChecks.delete(accountId));
+    this.accountTrialChecks.set(accountId, promise);
+    return promise;
+  }
+
+  async runRegisteredAccountTrialCheck(account, proxy) {
+    const remote = await this.client.getAccount(account.id);
+    if (!remote
+      || String(remote.platform || "chatgpt").toLowerCase() !== "chatgpt"
+      || String(remote.email || "").toLowerCase() !== String(account.email || "").toLowerCase()) {
+      throw Object.assign(new Error("注册账号与远端账号不匹配"), { status: 409 });
+    }
+    const accessToken = accessTokenFromAccount(remote);
+    if (!accessToken) throw Object.assign(new Error("这个账号尚未获取到 AT"), { status: 409 });
+    const result = await this.trialProbe({ accessToken, proxy });
+    if (!result || typeof result !== "object" || typeof result.eligible !== "boolean") {
+      throw Object.assign(new Error("日本免费试用资格探针返回了无效结果"), { status: 502 });
+    }
+    return {
+      eligible: result.eligible,
+      evidence: safeRemoteText(result.evidence, 120),
+    };
+  }
+
+  async checkRegisteredAccountTrials(input = {}) {
+    const ids = normalizeAccountCheckIds(input, 100);
+    const before = await this.listRegisteredAccounts({ refreshUnchecked: false });
+    const accountById = new Map(before.items.map((item) => [Number(item.id), item]));
+    if (ids.some((id) => !accountById.has(id))) {
+      throw Object.assign(new Error("选择中包含不属于本注册页面的账号"), { status: 409 });
+    }
+
+    const proxy = await this.resolveJapaneseTrialProxy();
+    const selected = ids.map((id) => accountById.get(id));
+    const items = new Array(selected.length);
+    let cursor = 1;
+    let rateLimited = false;
+    const checkOne = async (index) => {
+      try {
+        items[index] = await this.checkRegisteredAccountTrial(selected[index], proxy);
+      } catch (error) {
+        if (Number(error?.status) !== 429) throw error;
+        rateLimited = true;
+        items[index] = {
+          id: Number(selected[index].id),
+          trial_status: "rate_limited",
+          trial_eligible: null,
+          trial_evidence: "",
+          trial_error: "日本免费试用资格检测触发 HTTP 429 限流，请稍后重试",
+          trial_checked_at: "",
+        };
+      }
+    };
+
+    await checkOne(0);
+    if (!rateLimited && selected.length > 1) {
+      const workers = Array.from(
+        { length: Math.min(TRIAL_CHECK_CONCURRENCY, selected.length - 1) },
+        async () => {
+          while (!rateLimited && cursor < selected.length) {
+            const index = cursor;
+            cursor += 1;
+            await checkOne(index);
+          }
+        },
+      );
+      await Promise.all(workers);
+    }
+    for (let index = 0; index < items.length; index += 1) {
+      if (items[index]) continue;
+      items[index] = {
+        id: Number(selected[index].id),
+        trial_status: "skipped",
+        trial_eligible: null,
+        trial_evidence: "",
+        trial_error: "本批次触发限流，未继续检测",
+        trial_checked_at: "",
+      };
+    }
+    return {
+      requested: ids.length,
+      checked: items.filter((item) => new Set(["eligible", "ineligible"]).has(item.trial_status)).length,
+      eligible: items.filter((item) => item.trial_status === "eligible").length,
+      ineligible: items.filter((item) => item.trial_status === "ineligible").length,
+      failed: items.filter((item) => item.trial_status === "failed").length,
+      rate_limited: items.filter((item) => item.trial_status === "rate_limited").length,
+      skipped: items.filter((item) => item.trial_status === "skipped").length,
+      items,
+      accounts: await this.listRegisteredAccounts({ refreshUnchecked: false }),
     };
   }
 
@@ -3210,6 +3733,8 @@ export class RegistrationService {
       const placeholders = deletedIds.map(() => "?").join(",");
       this.db.transaction(() => {
         this.db.prepare(`DELETE FROM registered_account_metadata WHERE external_account_id IN (${placeholders})`).run(...deletedIds);
+        this.db.prepare(`DELETE FROM registered_account_checkout_checks WHERE external_account_id IN (${placeholders})`).run(...deletedIds);
+        this.db.prepare(`DELETE FROM registered_account_trial_checks WHERE external_account_id IN (${placeholders})`).run(...deletedIds);
         this.db.prepare(`DELETE FROM registered_account_nfapi_links WHERE external_account_id IN (${placeholders})`).run(...deletedIds);
       })();
     }

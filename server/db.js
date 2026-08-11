@@ -298,6 +298,35 @@ const schema = `
   CREATE INDEX IF NOT EXISTS idx_registered_account_status_checks_email
     ON registered_account_status_checks(email COLLATE NOCASE, updated_at DESC);
 
+  CREATE TABLE IF NOT EXISTS registered_account_checkout_checks (
+    external_account_id TEXT PRIMARY KEY,
+    email TEXT NOT NULL COLLATE NOCASE,
+    checkout_type TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'unchecked',
+    error TEXT NOT NULL DEFAULT '',
+    checked_at TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_registered_account_checkout_checks_email
+    ON registered_account_checkout_checks(email COLLATE NOCASE, updated_at DESC);
+
+  CREATE TABLE IF NOT EXISTS registered_account_trial_checks (
+    external_account_id TEXT PRIMARY KEY,
+    email TEXT NOT NULL COLLATE NOCASE,
+    status TEXT NOT NULL DEFAULT 'unchecked',
+    eligible INTEGER,
+    evidence TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    checked_at TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_registered_account_trial_checks_email
+    ON registered_account_trial_checks(email COLLATE NOCASE, updated_at DESC);
+
   CREATE TABLE IF NOT EXISTS registered_account_nfapi_links (
     external_account_id TEXT NOT NULL,
     email TEXT NOT NULL COLLATE NOCASE,

@@ -652,7 +652,7 @@ test("manual refresh checks the saved dynamic proxy before a new session and pai
   assert.doesNotMatch(JSON.stringify(result), /pool-user|pool-secret|private-upgraded-token/);
 });
 
-test("manual refresh scans the linked mailbox before resolving inconclusive Plus status", async (t) => {
+test("manual refresh lets recent identity-matched Plus mail correct a confirmed Free result", async (t) => {
   const db = testDatabase(t);
   const email = "mail-confirmed-plus@example.com";
   const now = nowIso();
@@ -678,9 +678,9 @@ test("manual refresh scans the linked mailbox before resolving inconclusive Plus
       subscription_status, account_type, account_type_raw, code, reason, retryable,
       source, checked_at, attempted_at, created_at, updated_at
     ) VALUES (
-      '551', ?, 'inconclusive', 'active', 'valid', 'free', 'free', 'free',
-      'access_token_refresh_required', '等待实时套餐接口确认', 1,
-      'backend-api/accounts/check', ?, ?, ?, ?
+      '551', ?, 'confirmed', 'active', 'valid', 'free', 'free', 'free',
+      'ok', '状态检测成功', 0,
+      'backend-api/accounts/check+subscriptions', ?, ?, ?, ?
     )
   `).run(email, now, now, now, now);
 
@@ -699,9 +699,9 @@ test("manual refresh scans the linked mailbox before resolving inconclusive Plus
             senderAddress: "noreply@openai.com",
             recipient: email,
             recipients: [email],
-            subject: "ChatGPT - Your new plan",
-            preview: "You've successfully subscribed to ChatGPT Plus.",
-            body: "You've successfully subscribed to ChatGPT Plus.",
+            subject: "ChatGPT - 새로 이용하시는 플랜",
+            preview: "Manage: https://chatgpt.com/account/manage?account_id=workspace-551 ChatGPT Plus를 구독했습니다.",
+            body: "ChatGPT Plus Subscription. https://chatgpt.com/account/manage?account_id=workspace-551",
             receivedAt: now,
           }],
           items: [],
@@ -714,6 +714,7 @@ test("manual refresh scans the linked mailbox before resolving inconclusive Plus
           id: 551,
           platform: "chatgpt",
           email,
+          user_id: "workspace-551",
           lifecycle_status: "registered",
           validity_status: "valid",
           display_status: "registered",
@@ -734,13 +735,17 @@ test("manual refresh scans the linked mailbox before resolving inconclusive Plus
           ok: true,
           valid: true,
           account_type: "free",
-          type_observed: false,
-          plan_detection_result: "inconclusive",
-          detection_result: "inconclusive",
-          status_code: "access_token_refresh_required",
-          status_reason: "等待实时套餐接口确认",
-          status_retryable: true,
-          status_source: "backend-api/accounts/check",
+          account_type_raw: "free",
+          account_type_source: "backend-api/accounts/check+subscriptions",
+          type_observed: true,
+          plan_detection_result: "confirmed",
+          plan_authority: "authoritative",
+          account_type_confidence: "high",
+          detection_result: "confirmed",
+          status_code: "ok",
+          status_reason: "状态检测成功",
+          status_retryable: false,
+          status_source: "backend-api/accounts/check+subscriptions",
         }] };
       },
     },
@@ -754,7 +759,67 @@ test("manual refresh scans the linked mailbox before resolving inconclusive Plus
   assert.deepEqual(result.types, { plus: 1 });
   assert.equal(result.accounts.items[0].account_type, "plus");
   assert.equal(result.accounts.items[0].mail_plus_confirmed, true);
+  assert.equal(result.accounts.items[0].mail_plus_account_id, "workspace-551");
+  assert.equal(result.items[0].source, "mail/plus-confirmation");
   assert.doesNotMatch(JSON.stringify(result), /private-mail-confirmed-token/);
+});
+
+test("confirmed Free is not overridden by Plus mail for another workspace", async (t) => {
+  const db = testDatabase(t);
+  const email = "mail-workspace-check@example.com";
+  const now = nowIso();
+  addCompletedRegistration(db, 552, email);
+  const source = db.prepare(`
+    INSERT INTO source_accounts
+      (provider, email, status, profile_key, created_at, updated_at)
+    VALUES ('inbox_link', ?, 'connected', 'mail-workspace-check-source', ?, ?)
+  `).run(email, now, now);
+  db.prepare(`
+    INSERT INTO mail_messages (
+      account_id, fingerprint, recipient_address, subject, preview, body,
+      received_at, created_at, updated_at
+    ) VALUES (?, 'mail-workspace-check-message', ?, 'ChatGPT - Your new plan', ?, ?, ?, ?, ?)
+  `).run(
+    Number(source.lastInsertRowid),
+    email,
+    "You've successfully subscribed to ChatGPT Plus. https://chatgpt.com/account/manage?account_id=workspace-other",
+    "ChatGPT Plus Subscription",
+    now,
+    now,
+    now,
+  );
+  const account = {
+    id: 552,
+    platform: "chatgpt",
+    email,
+    user_id: "workspace-552",
+    lifecycle_status: "registered",
+    validity_status: "valid",
+    display_status: "registered",
+    plan_state: "free",
+    plan_name: "free",
+    overview: {
+      valid: true,
+      account_type: "free",
+      account_type_raw: "free",
+      checked_at: now,
+      check_source: "backend-api/accounts/check+subscriptions",
+      password_status: "not_configured",
+    },
+    credentials: [{ key: "access_token", value: "private-workspace-check-token" }],
+  };
+  const service = new RegistrationService({
+    db,
+    graph: {},
+    client: { async listAccounts() { return { items: [account] }; } },
+  });
+
+  const result = await service.listRegisteredAccounts({ refreshUnchecked: false });
+
+  assert.equal(result.items[0].mail_plus_confirmed, true);
+  assert.equal(result.items[0].mail_plus_account_id, "workspace-other");
+  assert.equal(result.items[0].account_type, "free");
+  assert.equal(result.items[0].account_type_source, "account_type");
 });
 
 test("manual refresh retries a static proxy inconclusive result directly", async (t) => {

@@ -1,8 +1,9 @@
 export class RegistrationClient {
-  constructor({ baseUrl, token, fetchFn = globalThis.fetch } = {}) {
+  constructor({ baseUrl, token, fetchFn = globalThis.fetch, accountTimeoutMs = 15_000 } = {}) {
     this.baseUrl = String(baseUrl || "").replace(/\/$/, "");
     this.token = String(token || "");
     this.fetchFn = fetchFn;
+    this.accountTimeoutMs = Math.max(1, Math.min(120_000, Number(accountTimeoutMs) || 15_000));
   }
 
   get configured() {
@@ -180,7 +181,9 @@ export class RegistrationClient {
   }
 
   getAccount(accountId) {
-    return this.request(`/api/accounts/${encodeURIComponent(accountId)}`);
+    return this.request(`/api/accounts/${encodeURIComponent(accountId)}`, {
+      timeoutMs: this.accountTimeoutMs,
+    });
   }
 
   createAccount(payload) {

@@ -351,15 +351,17 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .registration-bulk-group-option b { font-size: 10px; }
 .registration-bulk-group-option small { margin-top: 3px; color: var(--text-soft); font-size: 8px; line-height: 1.45; }
 .registration-account-table-wrap { scrollbar-gutter: stable; }
-.registration-accounts-table { min-width: 1065px; table-layout: fixed; }
+.registration-accounts-table { min-width: 1255px; table-layout: fixed; }
 .registration-accounts-table th:nth-child(1) { width: 42px; }
-.registration-accounts-table th:nth-child(2) { width: 230px; }
-.registration-accounts-table th:nth-child(3) { width: 170px; }
+.registration-accounts-table th:nth-child(2) { width: 220px; }
+.registration-accounts-table th:nth-child(3) { width: 160px; }
 .registration-accounts-table th:nth-child(4) { width: 155px; }
 .registration-accounts-table th:nth-child(5) { width: 180px; }
-.registration-accounts-table th:nth-child(6) { width: 110px; }
-.registration-accounts-table th:nth-child(7) { width: 78px; }
-.registration-accounts-table th:nth-child(8) { width: 100px; }
+.registration-accounts-table th:nth-child(6) { width: 92px; }
+.registration-accounts-table th:nth-child(7) { width: 95px; }
+.registration-accounts-table th:nth-child(8) { width: 110px; }
+.registration-accounts-table th:nth-child(9) { width: 78px; }
+.registration-accounts-table th:nth-child(10) { width: 100px; }
 .registration-accounts-table td { height: 76px; padding: 8px 10px; white-space: normal; vertical-align: middle; }
 .registration-accounts-table td:last-child { padding-left: 6px; padding-right: 6px; }
 .registration-actions-column { text-align: center !important; }
@@ -416,6 +418,16 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .registration-nfapi-status code { color: var(--text-faint); font-size: 8px; }
 .registration-nfapi-status small { max-width: 145px; overflow: hidden; color: var(--amber); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
 .registration-nfapi-status small.error { color: var(--coral); }
+.registration-checkout-status { display: grid; justify-items: start; gap: 3px; min-width: 0; }
+.registration-checkout-status small { max-width: 84px; overflow: hidden; color: var(--coral); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.registration-checkout-status.compact { display: flex; align-items: center; margin-top: 3px; }
+.registration-checkout-status.compact .status-badge { min-height: 20px; padding: 0 6px; font-size: 8px; }
+.status-checkout-cs { color: var(--green-dark); background: var(--green-soft); }
+.status-checkout-oaics { color: var(--purple); background: color-mix(in srgb, var(--purple) 10%, var(--surface)); }
+.registration-trial-status { display: grid; justify-items: start; gap: 3px; min-width: 0; }
+.registration-trial-status small { max-width: 88px; overflow: hidden; color: var(--coral); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.registration-trial-status.compact { display: flex; align-items: center; margin-top: 3px; }
+.registration-trial-status.compact .status-badge { min-height: 20px; padding: 0 6px; font-size: 8px; }
 .fingerprint-code { display: block; color: var(--purple); font-size: 9px; }
 .registration-row-command { display: grid; place-items: center; width: 30px; height: 30px; border: 0; border-radius: 6px; background: transparent; color: var(--text-soft); }
 .registration-row-command:hover { background: var(--surface-3); color: var(--text); }
@@ -440,7 +452,7 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .registration-account-exit > span { display: grid; min-width: 0; }
 .registration-account-exit small { color: var(--text-faint); font-size: 7px; }
 .registration-account-exit b { margin-top: 2px; overflow: hidden; font: 8px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
-.registration-mobile-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
+.registration-mobile-facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; }
 .registration-mobile-list { display: none; }
 .registration-proxy-layout { display: grid; grid-template-columns: minmax(420px, 1fr) minmax(320px, 0.75fr); gap: 15px; align-items: start; }
 .registration-proxy-side { display: grid; gap: 15px; }

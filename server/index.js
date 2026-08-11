@@ -378,6 +378,10 @@ export function createApp(options = {}) {
     mailboxBaseUrl: process.env.REGISTRATION_MAILBOX_URL,
     browserUrl: process.env.REGISTRATION_BROWSER_URL,
     inboxLinkMailboxes,
+    checkoutProbe: options.checkoutProbe,
+    checkoutProxyResolver: options.checkoutProxyResolver,
+    trialProbe: options.trialProbe,
+    trialProxyResolver: options.trialProxyResolver,
   });
   const nfapi = options.nfapi || new NfapiService({
     db,
@@ -696,6 +700,12 @@ export function createApp(options = {}) {
         skipNfapiSync: input.skip_nfapi_sync === true,
       }));
     } catch (error) { next(error); }
+  });
+  app.post("/api/registration/accounts/check-checkout", async (req, res, next) => {
+    try { res.json(await registration.checkRegisteredAccountCheckouts(req.body || {})); } catch (error) { next(error); }
+  });
+  app.post("/api/registration/accounts/check-jp-trial", async (req, res, next) => {
+    try { res.json(await registration.checkRegisteredAccountTrials(req.body || {})); } catch (error) { next(error); }
   });
   app.patch("/api/registration/accounts/bulk-group", async (req, res, next) => {
     try { res.json(await registration.updateRegisteredAccountGroups(req.body || {})); } catch (error) { next(error); }

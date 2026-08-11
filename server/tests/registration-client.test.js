@@ -264,3 +264,21 @@ test("registration client patches account credentials server-side", async () => 
   });
   assert.deepEqual(result, { id: 134, email: "plus@example.com" });
 });
+
+test("registration client bounds a stalled account read", async () => {
+  const client = new RegistrationClient({
+    baseUrl: "https://registration.test",
+    token: "secret-token",
+    accountTimeoutMs: 5,
+    fetchFn: async (_url, options) => new Promise((_resolve, reject) => {
+      options.signal.addEventListener("abort", () => {
+        reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+      }, { once: true });
+    }),
+  });
+
+  await assert.rejects(
+    () => client.getAccount(134),
+    (error) => error.status === 504 && /请求超时/.test(error.message),
+  );
+});

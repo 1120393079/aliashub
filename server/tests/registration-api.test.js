@@ -19,6 +19,8 @@ class FakeRegistrationClient {
     this.proxyInspectionError = null;
     this.proxyInspectionHandler = null;
     this.createError = null;
+    this.accountActions = [];
+    this.actionTasks = new Map();
   }
 
   async health() { return { ok: true, configured: true }; }
@@ -139,6 +141,38 @@ class FakeRegistrationClient {
     this.deletedAccounts.add(Number(accountId));
     return { ok: true };
   }
+
+  async createAccountAction(accountId, actionId, params) {
+    const id = Number(accountId);
+    const taskId = `checkout-${id}-${this.accountActions.length + 1}`;
+    const checkoutType = id % 2 === 0 ? "cs_live" : "oaics";
+    this.accountActions.push({ accountId: id, actionId, params });
+    this.actionTasks.set(taskId, {
+      task_id: taskId,
+      type: "platform_action",
+      platform: "chatgpt",
+      status: "succeeded",
+      result: {
+        data: {
+          checkout_url: `https://chatgpt.com/checkout/openai_llc/${checkoutType}_private_${id}`,
+        },
+      },
+    });
+    return {
+      task_id: taskId,
+      type: "platform_action",
+      platform: "chatgpt",
+      status: "pending",
+    };
+  }
+
+  async getActionTask(taskId) {
+    return this.actionTasks.get(taskId);
+  }
+
+  async cancelActionTask(taskId) {
+    return { ...this.actionTasks.get(taskId), status: "cancel_requested" };
+  }
 }
 
 test("registration job migration preserves legacy occupied alias history", () => {
@@ -223,7 +257,31 @@ test("registration integration generates isolated addresses and exposes mailbox 
       return scanResult;
     },
   };
-  const runtime = createApp({ db, graph, registrationClient: client, publicBaseUrl: "https://alias.test/alias-hub" });
+  const checkoutProbeCalls = [];
+  const checkoutProxy = "http://de-user:de-password@de-proxy.example:8080";
+  const trialProbeCalls = [];
+  const trialProxy = "http://jp-user:jp-password@jp-proxy.example:8080";
+  const runtime = createApp({
+    db,
+    graph,
+    registrationClient: client,
+    publicBaseUrl: "https://alias.test/alias-hub",
+    checkoutProxyResolver: async () => checkoutProxy,
+    checkoutProbe: async ({ accessToken, proxy }) => {
+      checkoutProbeCalls.push({ accessToken, proxy });
+      const accountNumber = Number(String(accessToken).match(/(\d+)$/)?.[1]);
+      return accountNumber % 2 === 1 ? "cs_live" : "oaics";
+    },
+    trialProxyResolver: async () => trialProxy,
+    trialProbe: async ({ accessToken, proxy }) => {
+      trialProbeCalls.push({ accessToken, proxy });
+      const accountNumber = Number(String(accessToken).match(/(\d+)$/)?.[1]);
+      return {
+        eligible: accountNumber % 2 === 1,
+        evidence: "eligible_promo_campaigns.plus",
+      };
+    },
+  });
   let configuredPasswordEmail = "";
   let legacyPasswordEmail = "";
   let proxyFailureLogs = [];
@@ -1052,6 +1110,365 @@ test("registration integration generates isolated addresses and exposes mailbox 
         assert.deepEqual(calls, [ids]);
       } finally {
         delete client.refreshAccountPlans;
+      }
+    });
+
+    await t.test("detects and persists cs_live versus oaics without exposing checkout ids", async () => {
+      const before = await jsonRequest(runtime.app, "/api/registration/accounts");
+      const ids = before.body.items.slice(0, 2).map((item) => Number(item.id));
+      const previousProbeCalls = checkoutProbeCalls.length;
+      const response = await jsonRequest(runtime.app, "/api/registration/accounts/check-checkout", {
+        method: "POST",
+        body: JSON.stringify({ ids: [ids[0], String(ids[1]), ids[0]] }),
+      });
+
+      assert.equal(response.response.status, 200);
+      assert.equal(response.body.requested, 2);
+      assert.equal(response.body.checked, 2);
+      assert.equal(response.body.failed, 0);
+      assert.equal(response.body.types.cs_live, 1);
+      assert.equal(response.body.types.oaics, 1);
+      assert.deepEqual(checkoutProbeCalls.slice(previousProbeCalls), [
+        { accessToken: "session-access-token-1", proxy: checkoutProxy },
+        { accessToken: "session-access-token-2", proxy: checkoutProxy },
+      ]);
+      assert.doesNotMatch(JSON.stringify(response.body), /session-access-token|de-password|de-proxy\.example/i);
+      const stored = db.prepare(`
+        SELECT external_account_id, checkout_type, status, error
+        FROM registered_account_checkout_checks
+        WHERE external_account_id IN (?, ?)
+        ORDER BY external_account_id
+      `).all(...ids.map(String));
+      assert.equal(stored.length, 2);
+      assert.ok(stored.every((item) => item.status === "completed" && item.error === ""));
+      for (const item of response.body.accounts.items.filter((account) => ids.includes(Number(account.id)))) {
+        assert.equal(item.checkout_status, "completed");
+        assert.equal(item.checkout_type, Number(item.id) === ids[0] ? "cs_live" : "oaics");
+        assert.ok(Date.parse(item.checkout_checked_at));
+      }
+
+      const unrelated = await jsonRequest(runtime.app, "/api/registration/accounts/check-checkout", {
+        method: "POST",
+        body: JSON.stringify({ ids: [999] }),
+      });
+      assert.equal(unrelated.response.status, 409);
+    });
+
+    await t.test("reuses an existing cashier URL without creating another checkout", async () => {
+      const before = await jsonRequest(runtime.app, "/api/registration/accounts");
+      const target = before.body.items[0];
+      const previousGetAccount = client.getAccount.bind(client);
+      const previousProbeCalls = checkoutProbeCalls.length;
+      db.prepare("DELETE FROM registered_account_checkout_checks WHERE external_account_id = ?").run(String(target.id));
+      client.getAccount = async (accountId) => {
+        const account = await previousGetAccount(accountId);
+        return Number(accountId) === Number(target.id)
+          ? { ...account, cashier_url: "https://chatgpt.com/checkout/openai_llc/oaics_cached-value" }
+          : account;
+      };
+      try {
+        const response = await jsonRequest(runtime.app, "/api/registration/accounts/check-checkout", {
+          method: "POST",
+          body: JSON.stringify({ ids: [target.id] }),
+        });
+        assert.equal(response.response.status, 200);
+        assert.equal(response.body.checked, 1);
+        assert.equal(response.body.types.oaics, 1);
+        assert.equal(checkoutProbeCalls.length, previousProbeCalls);
+      } finally {
+        client.getAccount = previousGetAccount;
+      }
+    });
+
+    await t.test("refuses checkout detection before writing results when the proxy pool has no DE exit", async () => {
+      const before = await jsonRequest(runtime.app, "/api/registration/accounts");
+      const targetId = Number(before.body.items[0].id);
+      const previousResolver = runtime.registration.checkoutProxyResolver;
+      const previousProxyPool = getSetting(db, "registration_proxy_pool", "[]");
+      const previousInspectionHandler = client.proxyInspectionHandler;
+      const previousProbeCalls = checkoutProbeCalls.length;
+      db.prepare("DELETE FROM registered_account_checkout_checks WHERE external_account_id = ?").run(String(targetId));
+      try {
+        runtime.registration.checkoutProxyResolver = null;
+        runtime.registration.checkoutProxyCache = { proxy: "", expiresAt: 0 };
+        setSetting(db, "registration_proxy_pool", JSON.stringify(["http://jp-proxy.example:8080"]));
+        client.proxyInspectionHandler = () => ({
+          samples: [{ ip: "203.0.113.10", country_code: "JP" }],
+        });
+
+        const response = await jsonRequest(runtime.app, "/api/registration/accounts/check-checkout", {
+          method: "POST",
+          body: JSON.stringify({ ids: [targetId] }),
+        });
+
+        assert.equal(response.response.status, 409);
+        assert.match(response.body.error, /没有检测到 DE 出口/);
+        assert.equal(checkoutProbeCalls.length, previousProbeCalls);
+        assert.equal(db.prepare(`
+          SELECT COUNT(*) AS count FROM registered_account_checkout_checks
+          WHERE external_account_id = ?
+        `).get(String(targetId)).count, 0);
+      } finally {
+        runtime.registration.checkoutProxyResolver = previousResolver;
+        runtime.registration.checkoutProxyCache = { proxy: "", expiresAt: 0 };
+        client.proxyInspectionHandler = previousInspectionHandler;
+        setSetting(db, "registration_proxy_pool", previousProxyPool);
+      }
+    });
+
+    await t.test("continues checkout detection after an account-scoped creation rate limit", async () => {
+      const before = await jsonRequest(runtime.app, "/api/registration/accounts");
+      const ids = before.body.items.slice(0, 2).map((item) => Number(item.id));
+      const previousProbe = runtime.registration.checkoutProbe;
+      const calls = [];
+      runtime.registration.accountCheckoutCooldowns.clear();
+      db.prepare(`
+        DELETE FROM registered_account_checkout_checks
+        WHERE external_account_id IN (?, ?)
+      `).run(...ids.map(String));
+      try {
+        runtime.registration.checkoutProbe = async ({ accessToken }) => {
+          calls.push(accessToken);
+          if (accessToken.endsWith("-1")) {
+            throw Object.assign(new Error("Checkout 创建失败 HTTP 429"), {
+              status: 429,
+              code: "checkout_creation_rate_limited",
+            });
+          }
+          return "oaics";
+        };
+        const response = await jsonRequest(runtime.app, "/api/registration/accounts/check-checkout", {
+          method: "POST",
+          body: JSON.stringify({ ids }),
+        });
+
+        assert.equal(response.response.status, 200);
+        assert.equal(response.body.checked, 1);
+        assert.equal(response.body.rate_limited, 1);
+        assert.equal(response.body.skipped, 0);
+        assert.equal(response.body.types.oaics, 1);
+        assert.equal(calls.length, 2);
+        assert.equal(db.prepare(`
+          SELECT COUNT(*) AS count FROM registered_account_checkout_checks
+          WHERE external_account_id IN (?, ?)
+        `).get(...ids.map(String)).count, 1);
+
+        const retry = await jsonRequest(runtime.app, "/api/registration/accounts/check-checkout", {
+          method: "POST",
+          body: JSON.stringify({ ids: [ids[0]] }),
+        });
+        assert.equal(retry.response.status, 200);
+        assert.equal(retry.body.rate_limited, 1);
+        assert.equal(calls.length, 2);
+        assert.ok(Date.parse(retry.body.items[0].checkout_retry_at));
+      } finally {
+        runtime.registration.checkoutProbe = previousProbe;
+        runtime.registration.accountCheckoutCooldowns.clear();
+      }
+    });
+
+    await t.test("stops a checkout batch after a rate-limited preflight without persisting transient failures", async () => {
+      const before = await jsonRequest(runtime.app, "/api/registration/accounts");
+      const ids = before.body.items.slice(0, 2).map((item) => Number(item.id));
+      const previousProbe = runtime.registration.checkoutProbe;
+      let rateLimitedCalls = 0;
+      db.prepare(`
+        DELETE FROM registered_account_checkout_checks
+        WHERE external_account_id IN (?, ?)
+      `).run(...ids.map(String));
+      try {
+        runtime.registration.checkoutProbe = async () => {
+          rateLimitedCalls += 1;
+          throw Object.assign(new Error("Checkout 创建失败 HTTP 429"), { status: 429 });
+        };
+        const response = await jsonRequest(runtime.app, "/api/registration/accounts/check-checkout", {
+          method: "POST",
+          body: JSON.stringify({ ids }),
+        });
+
+        assert.equal(response.response.status, 200);
+        assert.equal(response.body.requested, 2);
+        assert.equal(response.body.checked, 0);
+        assert.equal(response.body.failed, 0);
+        assert.equal(response.body.rate_limited, 1);
+        assert.equal(response.body.skipped, 1);
+        assert.equal(rateLimitedCalls, 1);
+        assert.equal(db.prepare(`
+          SELECT COUNT(*) AS count FROM registered_account_checkout_checks
+          WHERE external_account_id IN (?, ?)
+        `).get(...ids.map(String)).count, 0);
+
+      } finally {
+        runtime.registration.checkoutProbe = previousProbe;
+      }
+    });
+
+    await t.test("ends a checkout batch when an account read times out without persisting a failure", async () => {
+      const before = await jsonRequest(runtime.app, "/api/registration/accounts");
+      const target = before.body.items[0];
+      const previousGetAccount = client.getAccount;
+      db.prepare("DELETE FROM registered_account_checkout_checks WHERE external_account_id = ?").run(String(target.id));
+      client.getAccount = async () => {
+        throw Object.assign(new Error("注册服务请求超时"), { status: 504 });
+      };
+      try {
+        const response = await jsonRequest(runtime.app, "/api/registration/accounts/check-checkout", {
+          method: "POST",
+          body: JSON.stringify({ ids: [target.id] }),
+        });
+        assert.equal(response.response.status, 408);
+        assert.match(response.body.error, /请求超时/);
+        assert.equal(db.prepare(`
+          SELECT COUNT(*) AS count FROM registered_account_checkout_checks
+          WHERE external_account_id = ?
+        `).get(String(target.id)).count, 0);
+      } finally {
+        client.getAccount = previousGetAccount;
+      }
+    });
+
+    await t.test("detects and persists JP Plus one-month trial eligibility without exposing credentials", async () => {
+      const before = await jsonRequest(runtime.app, "/api/registration/accounts");
+      const ids = before.body.items.slice(0, 2).map((item) => Number(item.id));
+      const previousProbeCalls = trialProbeCalls.length;
+      const response = await jsonRequest(runtime.app, "/api/registration/accounts/check-jp-trial", {
+        method: "POST",
+        body: JSON.stringify({ ids: [ids[0], String(ids[1]), ids[0]] }),
+      });
+
+      assert.equal(response.response.status, 200);
+      assert.equal(response.body.requested, 2);
+      assert.equal(response.body.checked, 2);
+      assert.equal(response.body.eligible, 1);
+      assert.equal(response.body.ineligible, 1);
+      assert.equal(response.body.failed, 0);
+      assert.deepEqual(trialProbeCalls.slice(previousProbeCalls), [
+        { accessToken: "session-access-token-1", proxy: trialProxy },
+        { accessToken: "session-access-token-2", proxy: trialProxy },
+      ]);
+      assert.doesNotMatch(JSON.stringify(response.body), /session-access-token|jp-password|jp-proxy\.example/i);
+      const stored = db.prepare(`
+        SELECT external_account_id, status, eligible, evidence, error
+        FROM registered_account_trial_checks
+        WHERE external_account_id IN (?, ?)
+        ORDER BY external_account_id
+      `).all(...ids.map(String));
+      assert.equal(stored.length, 2);
+      assert.deepEqual(stored.map((item) => item.status), ["eligible", "ineligible"]);
+      assert.deepEqual(stored.map((item) => item.eligible), [1, 0]);
+      assert.ok(stored.every((item) => item.evidence === "eligible_promo_campaigns.plus" && item.error === ""));
+      for (const item of response.body.accounts.items.filter((account) => ids.includes(Number(account.id)))) {
+        assert.equal(item.trial_status, Number(item.id) === ids[0] ? "eligible" : "ineligible");
+        assert.equal(item.trial_eligible, Number(item.id) === ids[0]);
+        assert.ok(Date.parse(item.trial_checked_at));
+      }
+
+      const unrelated = await jsonRequest(runtime.app, "/api/registration/accounts/check-jp-trial", {
+        method: "POST",
+        body: JSON.stringify({ ids: [999] }),
+      });
+      assert.equal(unrelated.response.status, 409);
+    });
+
+    await t.test("refuses JP trial detection before writing results when the proxy pool has no JP exit", async () => {
+      const before = await jsonRequest(runtime.app, "/api/registration/accounts");
+      const targetId = Number(before.body.items[0].id);
+      const previousResolver = runtime.registration.trialProxyResolver;
+      const previousProxyPool = getSetting(db, "registration_proxy_pool", "[]");
+      const previousInspectionHandler = client.proxyInspectionHandler;
+      const previousProbeCalls = trialProbeCalls.length;
+      db.prepare("DELETE FROM registered_account_trial_checks WHERE external_account_id = ?").run(String(targetId));
+      try {
+        runtime.registration.trialProxyResolver = null;
+        runtime.registration.trialProxyCache = { proxy: "", expiresAt: 0 };
+        setSetting(db, "registration_proxy_pool", JSON.stringify(["http://de-proxy.example:8080"]));
+        client.proxyInspectionHandler = () => ({
+          samples: [{ ip: "203.0.113.20", country_code: "DE" }],
+        });
+
+        const response = await jsonRequest(runtime.app, "/api/registration/accounts/check-jp-trial", {
+          method: "POST",
+          body: JSON.stringify({ ids: [targetId] }),
+        });
+
+        assert.equal(response.response.status, 409);
+        assert.match(response.body.error, /没有检测到 JP 出口/);
+        assert.equal(trialProbeCalls.length, previousProbeCalls);
+        assert.equal(db.prepare(`
+          SELECT COUNT(*) AS count FROM registered_account_trial_checks
+          WHERE external_account_id = ?
+        `).get(String(targetId)).count, 0);
+      } finally {
+        runtime.registration.trialProxyResolver = previousResolver;
+        runtime.registration.trialProxyCache = { proxy: "", expiresAt: 0 };
+        client.proxyInspectionHandler = previousInspectionHandler;
+        setSetting(db, "registration_proxy_pool", previousProxyPool);
+      }
+    });
+
+    await t.test("stops a JP trial batch after a rate-limited preflight without persisting transient failures", async () => {
+      const before = await jsonRequest(runtime.app, "/api/registration/accounts");
+      const ids = before.body.items.slice(0, 2).map((item) => Number(item.id));
+      const previousProbe = runtime.registration.trialProbe;
+      let rateLimitedCalls = 0;
+      db.prepare(`
+        DELETE FROM registered_account_trial_checks
+        WHERE external_account_id IN (?, ?)
+      `).run(...ids.map(String));
+      try {
+        runtime.registration.trialProbe = async () => {
+          rateLimitedCalls += 1;
+          throw Object.assign(new Error("账号资格检测失败 HTTP 429"), { status: 429 });
+        };
+        const response = await jsonRequest(runtime.app, "/api/registration/accounts/check-jp-trial", {
+          method: "POST",
+          body: JSON.stringify({ ids }),
+        });
+
+        assert.equal(response.response.status, 200);
+        assert.equal(response.body.requested, 2);
+        assert.equal(response.body.checked, 0);
+        assert.equal(response.body.failed, 0);
+        assert.equal(response.body.rate_limited, 1);
+        assert.equal(response.body.skipped, 1);
+        assert.equal(rateLimitedCalls, 1);
+        assert.equal(db.prepare(`
+          SELECT COUNT(*) AS count FROM registered_account_trial_checks
+          WHERE external_account_id IN (?, ?)
+        `).get(...ids.map(String)).count, 0);
+      } finally {
+        runtime.registration.trialProbe = previousProbe;
+      }
+    });
+
+    await t.test("deduplicates concurrent JP trial checks for the same account", async () => {
+      const before = await jsonRequest(runtime.app, "/api/registration/accounts");
+      const targetId = Number(before.body.items[0].id);
+      const previousProbe = runtime.registration.trialProbe;
+      let probeCalls = 0;
+      let releaseProbe;
+      let markStarted;
+      const gate = new Promise((resolve) => { releaseProbe = resolve; });
+      const started = new Promise((resolve) => { markStarted = resolve; });
+      try {
+        runtime.registration.trialProbe = async () => {
+          probeCalls += 1;
+          markStarted();
+          await gate;
+          return { eligible: true, evidence: "eligible_promo_campaigns.plus" };
+        };
+        const first = runtime.registration.checkRegisteredAccountTrials({ ids: [targetId] });
+        await started;
+        const second = runtime.registration.checkRegisteredAccountTrials({ ids: [targetId] });
+        await new Promise((resolve) => setImmediate(resolve));
+        releaseProbe();
+        const [firstResult, secondResult] = await Promise.all([first, second]);
+        assert.equal(probeCalls, 1);
+        assert.equal(firstResult.items[0].trial_status, "eligible");
+        assert.equal(secondResult.items[0].trial_status, "eligible");
+      } finally {
+        releaseProbe?.();
+        runtime.registration.trialProbe = previousProbe;
       }
     });
 
