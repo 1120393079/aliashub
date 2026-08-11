@@ -28,7 +28,9 @@
     "setup:local": "bash scripts/setup-local.sh --native",
     "setup:full": "bash scripts/setup-local.sh --full",
     "start": "node server/index.js",
-    "test": "ADMIN_PASSWORD='' node --test server/tests/*.test.js"
+    "test": "npm run test:node",
+    "test:node": "ADMIN_PASSWORD='' node --test server/tests/*.test.js",
+    "test:pickup": "cd mail-pickup && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v"
   },
   "engines": {
     "node": ">=18"

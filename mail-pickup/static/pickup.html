@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex,nofollow,noarchive" />
+    <title>邮箱取件 - Cloudflare</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body class="pickup-body">
+    <main class="pickup-shell">
+      <header class="pickup-header panel">
+        <div>
+          <p class="eyebrow">MAIL PICKUP</p>
+          <h1>邮箱取件</h1>
+          <strong id="pickup-email">正在验证取件链接...</strong>
+        </div>
+        <div class="header-actions">
+          <button id="copy-email" class="button secondary" type="button" disabled>复制邮箱</button>
+          <button id="refresh-mail" class="button primary" type="button">刷新邮件</button>
+        </div>
+      </header>
+
+      <section class="pickup-workspace panel">
+        <aside id="pickup-list" class="pickup-list empty">正在获取邮件...</aside>
+        <article id="pickup-detail" class="pickup-detail empty">
+          <div>
+            <strong>选择一封邮件</strong>
+            <span>这里只显示发送到当前独立邮箱的邮件。</span>
+          </div>
+        </article>
+      </section>
+
+      <footer class="pickup-footer">
+        <span>页面每 10 秒自动刷新</span>
+        <span id="pickup-expiry"></span>
+      </footer>
+    </main>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/static/pickup.js"></script>
+  </body>
+</html>

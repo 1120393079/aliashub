@@ -31,6 +31,9 @@ the installation that you control.
   independent worker lanes so one queue does not block the other.
 - Group accounts automatically by detected plan or override groups manually in
   the account workspace, including bulk group edits and email search.
+- Classify existing or newly created Checkout sessions as `cs_live` or `oaics`
+  through a verified German exit, with cached-link reuse and account cooldowns;
+  detect the Japanese Plus one-month trial offer through a verified Japan exit.
 - Restore accounts removed from the worker's local account pool from JSON, CSV,
   JSONL, TXT, or email-only input while reconnecting their retained AliasHub
   registration and mailbox resources.
@@ -40,13 +43,18 @@ the installation that you control.
   OpenAI OAuth or a locally generated Ed25519 Agent Identity. Agent Identity
   imports validate the target account, use idempotent replay, recover ambiguous
   responses, and reject stale OAuth residue before activating the account.
+- Run the bundled Mail Pickup storefront, publish source aliases or completed
+  accounts, issue per-mailbox pickup links, expose the compatible latest-message
+  API, and synchronize storefront inventory and sold status.
 
 ## What is included
 
 This repository is the complete source distribution. It contains the AliasHub
 web application and API, SQLite migrations, tests, Docker deployment files, the
 Outlook browser connector, and the registration worker with its browser/noVNC
-runtime under [`registration-worker/`](registration-worker/).
+runtime under [`registration-worker/`](registration-worker/). It also includes
+the complete Mail Pickup service, buyer/admin pages, tests, and storefront
+automation under [`mail-pickup/`](mail-pickup/).
 
 “Complete” refers to the supported AliasHub core and full deployment paths.
 The worker retains some upstream legacy or experimental routes whose separately
@@ -58,15 +66,13 @@ The deployment remains modular:
 
 - **Core mode** runs AliasHub only. Mailbox OAuth, message scanning, aliases,
   address generation, verification codes, and the browser connector all work.
-- **Full mode** also runs the bundled registration worker and headed browser.
-  It enables automatic account registration without requiring a separately
-  installed worker.
+- **Full mode** also runs the bundled registration worker, headed browser, and
+  Mail Pickup service. It enables automatic account registration, account and
+  source-address publishing, buyer pickup links, and storefront synchronization
+  without separately installing those services.
 
 SUB2 is not a bundled service and is never required. Each deployment may connect
 its own SUB2-compatible service URL and Admin API Key, or leave both empty.
-Publishing selected accounts to an external pickup storefront is intentionally
-not included. This does not remove the independent mailbox inbox-link binding,
-message retrieval, OTP, or registration-source workflow.
 
 ## Quick start
 
@@ -89,7 +95,8 @@ docker compose -f compose.yaml -f compose.full.yaml ps
 Open `http://127.0.0.1:4180`. The setup script prints the generated administrator
 password once and stores all deployment secrets in the local `.env` file. Full
 mode also binds the worker UI to `127.0.0.1:8000` and noVNC to
-`127.0.0.1:6080`; neither is exposed on a public interface by default.
+`127.0.0.1:6080`, and Mail Pickup to `127.0.0.1:4190`; none is exposed on a
+public interface by default.
 
 For native Node.js setup and remote-server deployment, see
 [LOCAL-DEPLOY.md](LOCAL-DEPLOY.md).
@@ -120,6 +127,7 @@ Run the verification suite before submitting a change:
 
 ```bash
 npm test
+npm run test:pickup
 npm run build
 ./scripts/check-public-release.sh
 ```
@@ -198,13 +206,33 @@ and the account response must expose credential-status flags for final
 verification. Implementations without that contract should keep Agent Identity
 import disabled and use the OAuth flow instead.
 
+## Mail Pickup
+
+The bundled [`mail-pickup/`](mail-pickup/) service stores its own inventory and
+messages in `data/mail-pickup/`. AliasHub's Sales page can publish eligible
+source aliases, while the registered-account page can publish selected accounts
+without sending Access Tokens. Mail Pickup supports HMAC pickup links, a buyer
+mailbox, Basic-authenticated administration, the compatible `query.php` API,
+Cloudflare-style inbound delivery, and optional storefront automation.
+
+Full Compose mode connects both services automatically. Configure
+`PICKUP_PUBLIC_BASE_URL` and `PICKUP_EMAIL_DOMAIN` for your deployment. The setup
+script generates `PICKUP_INBOUND_TOKEN` and `PICKUP_TOKEN_SECRET`; it defaults
+the Pickup administrator credentials to the AliasHub administrator credentials.
+Storefront product IDs, image URLs, proxies, merchant sessions, and browser
+profiles remain deployment-local and are never part of the source repository.
+
+Native deployment and endpoint details are documented in
+[`mail-pickup/README.md`](mail-pickup/README.md).
+
 ## Data and secrets
 
 Runtime state belongs in `.env` and `data/`; both are excluded from Git. Full
-mode stores the worker database in `data/registration-worker/`. Back up `.env`
-and the complete `data/` directory together. Losing `DATA_ENCRYPTION_KEY` makes
-encrypted OAuth tokens, iCloud App-specific passwords, inbox-link keys, and
-stored service credentials unreadable.
+mode stores the worker database in `data/registration-worker/` and Pickup state
+in `data/mail-pickup/`. Back up `.env` and the complete `data/` directory
+together. Losing `DATA_ENCRYPTION_KEY` or `PICKUP_TOKEN_SECRET` makes encrypted
+OAuth tokens, iCloud App-specific passwords, inbox-link keys, stored service
+credentials, or Pickup tokens unreadable.
 
 Never commit:
 
@@ -224,6 +252,6 @@ See [docs/RELEASING.md](docs/RELEASING.md) before making the repository public.
 
 ## License
 
-AliasHub and the bundled registration worker are distributed under the
+AliasHub, the bundled registration worker, and Mail Pickup are distributed under the
 GNU Affero General Public License v3.0 only (`AGPL-3.0-only`). See
 [`LICENSE`](LICENSE) and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

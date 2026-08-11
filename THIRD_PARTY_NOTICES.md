@@ -28,6 +28,14 @@ under the MIT No Attribution License (MIT-0) to parse bounded RFC 822 message
 content. Their source and license information are available from the linked
 projects and installed package metadata.
 
+## Mail Pickup dependencies
+
+The bundled `mail-pickup/` service uses
+[cryptography](https://cryptography.io/) under the Apache License 2.0 or BSD
+License and [Playwright for Python](https://playwright.dev/python/) under the
+Apache License 2.0. Browser binaries installed for storefront automation retain
+their respective upstream licenses and notices.
+
 ## AliasHub license
 
 AliasHub's original project code and this combined source distribution are

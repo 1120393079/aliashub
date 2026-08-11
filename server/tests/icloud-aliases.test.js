@@ -78,12 +78,12 @@ test("iCloud aliases, Hide My Email, and custom-domain addresses import, receive
   assert.equal(relay.strategy, "icloud_hide_my_email");
 
   const customDomains = await request(runtime.app, `/api/accounts/${account.id}/icloud-aliases/import`, {
-    aliases: ["Apple@Ningdabbs.cn"],
+    aliases: ["Apple@custom.example"],
     type: "custom_domain",
   });
   assert.equal(customDomains.response.status, 200);
   assert.equal(customDomains.body.account.icloud_custom_domain_emails, 1);
-  const customDomain = customDomains.body.items.find((item) => item.address === "apple@ningdabbs.cn");
+  const customDomain = customDomains.body.items.find((item) => item.address === "apple@custom.example");
   assert.equal(customDomain.strategy, "icloud_custom_domain");
 
   const wrongCustomType = await request(runtime.app, `/api/accounts/${account.id}/icloud-aliases/import`, {

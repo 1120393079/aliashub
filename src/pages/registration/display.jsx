@@ -163,7 +163,7 @@ export function JobCommands({ job, onLogs, onPause, onResume, onCancel, onReleas
   return <div className="row-actions"><button className="registration-row-command" title="查看日志" onClick={() => onLogs(job)}><ScrollText size={15} /></button>{pausable && <button className="registration-row-command warning" disabled={busy} title="暂停后续注册" onClick={() => onPause(job)}><Pause size={15} /></button>}{resumable && <button className="registration-row-command" disabled={busy} title="继续注册" onClick={() => onResume(job)}><Play size={15} /></button>}{cancellable && <button className="registration-row-command danger" disabled={busy} title="取消剩余注册" onClick={() => onCancel(job.id)}><Ban size={15} /></button>}{releasable && <button className="registration-row-command warning" disabled={busy} title="强制释放任务" onClick={() => onRelease(job)}><CircleStop size={15} /></button>}{deletableStatuses.has(job.status) && <button className="registration-row-command danger" title="删除注册记录" onClick={() => onDelete(job)}><Trash2 size={15} /></button>}</div>;
 }
 
-export function AccountCommands({ item, checking, busy = false, onRefresh, onPassword, onNfapi, onEdit, onCopy, onDelete }) {
+export function AccountCommands({ item, checking, busy = false, onRefresh, onPassword, onNfapi, onMailbox, onEdit, onCopy, onDelete }) {
   const passwordTitle = item.password_available
     ? "密码已配置"
     : item.password_setup_reason || "使用原邮箱设置密码";
@@ -171,25 +171,38 @@ export function AccountCommands({ item, checking, busy = false, onRefresh, onPas
     <button className="registration-row-command" disabled={busy || checking} aria-label="检测状态和套餐" title="检测状态和套餐" onClick={() => onRefresh([item.id])}><RefreshCw size={15} /></button>
     <button className="registration-row-command" disabled={busy || item.password_available || !item.password_setup_available} aria-label={passwordTitle} title={passwordTitle} onClick={() => onPassword(item)}><ShieldCheck size={15} /></button>
     <button className="registration-row-command" disabled={busy} aria-label="添加或更新 NFapi" title="添加或更新 NFapi" onClick={() => onNfapi([item.id])}><Database size={15} /></button>
+    <button className="registration-row-command" disabled={busy} aria-label="查看邮箱" title="查看邮箱" onClick={() => onMailbox(item)}><Mail size={15} /></button>
     <button className="registration-row-command" disabled={busy} aria-label="编辑名称和分组" title="编辑名称和分组" onClick={() => onEdit(item)}><Pencil size={15} /></button>
     <button className="registration-row-command" aria-label={item.password_available ? "复制账号和密码" : "复制邮箱"} title={item.password_available ? "复制账号和密码" : "复制邮箱"} onClick={() => onCopy(item)}><ClipboardCopy size={15} /></button>
     <button className="registration-row-command danger" disabled={busy} aria-label="删除本地账号" title="删除本地账号" onClick={() => onDelete(item)}><Trash2 size={15} /></button>
   </div>;
 }
 
-export function OAuthMailboxPanel({ email, data, loading, error, updatedAt, onRefresh, onClose, onCopyCode }) {
+export function OAuthMailboxPanel({
+  email,
+  data,
+  loading,
+  error,
+  updatedAt,
+  onRefresh,
+  onClose,
+  onCopyCode,
+  title = "验证码邮箱",
+  emptyTitle = "等待验证码邮件",
+  emptyDescription = "打开 OAuth 登录后，新邮件会自动出现在这里。",
+}) {
   const emails = data?.emails || [];
   const initialError = Boolean(error && !data);
   const footerState = initialError
     ? "读取失败"
     : updatedAt ? `更新于 ${relativeTime(updatedAt)}` : loading ? "正在连接邮箱" : "尚未更新";
   return (
-    <aside className="nfapi-oauth-mailbox" aria-label={`${email || "当前账号"}的验证码邮箱`} aria-busy={loading}>
+    <aside className="nfapi-oauth-mailbox" aria-label={`${email || "当前账号"}的${title}`} aria-busy={loading}>
       <header>
-        <div className="nfapi-mailbox-title"><Mail size={17} /><span><b>验证码邮箱</b><small title={email}>{email}</small></span></div>
+        <div className="nfapi-mailbox-title"><Mail size={17} /><span><b>{title}</b><small title={email}>{email}</small></span></div>
         <div className="nfapi-mailbox-actions">
           <IconButton className={loading ? "spin-icon" : ""} icon={loading ? LoaderCircle : RefreshCw} label="刷新当前邮箱" size={30} disabled={loading} onClick={onRefresh} />
-          <IconButton icon={EyeOff} label="隐藏验证码邮箱" size={30} onClick={onClose} />
+          <IconButton icon={EyeOff} label={`隐藏${title}`} size={30} onClick={onClose} />
         </div>
       </header>
       <div className="nfapi-mailbox-content" aria-live="polite">
@@ -202,7 +215,7 @@ export function OAuthMailboxPanel({ email, data, loading, error, updatedAt, onRe
             <strong>{item.subject || "（无主题）"}</strong>
             <p>{item.body_preview || item.preview || item.text || "没有邮件预览"}</p>
           </article>
-          ))}</div> : <div className="nfapi-mailbox-empty"><Mail size={22} /><b>等待验证码邮件</b><span>打开 OAuth 登录后，新邮件会自动出现在这里。</span></div>}
+          ))}</div> : <div className="nfapi-mailbox-empty"><Mail size={22} /><b>{emptyTitle}</b><span>{emptyDescription}</span></div>}
         </>}
       </div>
       <footer><span>{footerState}</span><small>{error ? "每 4 秒自动重试" : "每 4 秒自动刷新"}</small></footer>

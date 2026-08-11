@@ -2,6 +2,31 @@
 
 All notable changes to AliasHub are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Added complete Checkout `cs_live`/`oaics` classification, cached Checkout URL
+  reuse, account-level rate-limit cooldowns, and Japanese Plus trial detection.
+- Added the Sales inventory page, registered-account Pickup publishing/status,
+  and direct registered-account mailbox viewing.
+- Added the complete standalone Mail Pickup service, buyer and administrator
+  pages, compatible mailbox query API, inbound delivery, storefront automation,
+  tests, Docker image, and Full Compose integration.
+
+### Changed
+
+- Replaced deployment-specific Pickup domains, product IDs, image URLs, and
+  account examples with environment-driven or documentation-only defaults.
+- Full mode now starts AliasHub, the registration worker, and Mail Pickup while
+  preserving all runtime state under ignored `.env` and `data/` paths.
+
+### Security
+
+- Pickup publication never sends Access Tokens; source-address publication
+  clears credentials, and repository checks exclude databases, credentials,
+  browser profiles, private domains, and production configuration.
+
 ## [1.2.0] - 2026-08-04
 
 ### Added

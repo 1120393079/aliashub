@@ -33,7 +33,7 @@ const ICLOUD_IMPORT_TYPES = {
     title: "导入 iCloud 自定义域名邮箱",
     description: "手工导入已在 iCloud+ 自定义电子邮件域中创建并启用的邮箱地址",
     fieldLabel: "iCloud 自定义域名邮箱（每行一个）",
-    placeholder: "例如 apple@ningdabbs.cn\nname@naturalflower.cn",
+    placeholder: "例如 apple@example.com\nname@custom.example",
     officialUrl: "https://www.icloud.com/icloudplus/",
     openLabel: "打开 iCloud+ 自定义域名",
     popupName: "aliashub-icloud-custom-domain",

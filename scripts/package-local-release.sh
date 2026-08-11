@@ -21,9 +21,10 @@ mkdir -p \
   "$PACKAGE_DIR/release" \
   "$PACKAGE_DIR/data/attachments" \
   "$PACKAGE_DIR/data/registration-worker" \
+  "$PACKAGE_DIR/data/mail-pickup" \
   "$RELEASE_DIR"
 
-for directory in server src public extension; do
+for directory in server src public extension mail-pickup; do
   cp -a "$directory" "$PACKAGE_DIR/$directory"
 done
 
@@ -117,10 +118,12 @@ fi
 find "$PACKAGE_DIR" -type d -exec chmod 755 {} +
 find "$PACKAGE_DIR" -type f -exec chmod 644 {} +
 chmod 755 "$PACKAGE_DIR/scripts/"*.sh
+chmod 755 "$PACKAGE_DIR/mail-pickup/ldxp-verification-browser.sh"
 chmod 700 \
   "$PACKAGE_DIR/data" \
   "$PACKAGE_DIR/data/attachments" \
-  "$PACKAGE_DIR/data/registration-worker"
+  "$PACKAGE_DIR/data/registration-worker" \
+  "$PACKAGE_DIR/data/mail-pickup"
 
 rm -f "$ARCHIVE_PATH" "$ARCHIVE_PATH.sha256"
 (

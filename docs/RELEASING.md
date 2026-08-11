@@ -14,6 +14,10 @@ The bundled `registration-worker/` is a modified derivative of
 not remove upstream attribution. Review dependency licenses whenever bundled
 dependencies or generated binaries change.
 
+The bundled `mail-pickup/` source and its dependency declarations must remain
+in the release. Do not include its database, merchant session, proxy settings,
+browser profile, inbound token, HMAC secret, or administrator credentials.
+
 ## 2. Remove deployment state
 
 Confirm that the repository contains no:
@@ -48,6 +52,7 @@ Git LFS objects, releases, and CI artifacts before changing visibility.
 ```bash
 npm ci
 npm test
+npm run test:pickup
 npm run build
 REQUIRE_LICENSE=1 CHECK_GIT_HISTORY=1 ./scripts/check-public-release.sh
 ```
@@ -75,14 +80,14 @@ database:
 
 - core Docker Compose on loopback;
 - full Docker Compose with the bundled registration worker and noVNC ports still
-  bound to loopback;
+  bound to loopback, plus Mail Pickup bound to loopback on port `4190`;
 - the documented remote HTTPS reverse-proxy setup.
 
 Verify mailbox OAuth, inbox scanning, address generation, connector pairing,
-backup/restore, and upgrades. Test registration with newly issued non-production
-fixtures. Confirm core mode remains fully usable without the worker and that
-SUB2 remains disabled until each deployer supplies its own service URL and Admin
-API Key.
+backup/restore, Pickup publication/query flows, and upgrades. Test registration
+with newly issued non-production fixtures. Confirm core mode remains fully
+usable without the worker or Pickup service and that SUB2 remains disabled until
+each deployer supplies its own service URL and Admin API Key.
 
 ## 6. Tag and publish
 

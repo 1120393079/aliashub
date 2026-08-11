@@ -5,8 +5,14 @@ services:
       REGISTRATION_SERVICE_TOKEN: "${REGISTRATION_SERVICE_TOKEN:?run ./scripts/setup-local.sh --full first}"
       REGISTRATION_MAILBOX_URL: http://aliashub:4180
       REGISTRATION_BROWSER_URL: "${REGISTRATION_BROWSER_URL:-http://127.0.0.1:${REGISTRATION_BROWSER_PORT:-6080}/vnc.html?autoconnect=true&resize=scale&path=websockify}"
+      PICKUP_SERVICE_URL: http://mail-pickup:4190
+      PICKUP_PUBLIC_URL: "${PICKUP_PUBLIC_BASE_URL:-http://127.0.0.1:4190}"
+      PICKUP_ADMIN_USERNAME: "${PICKUP_ADMIN_USERNAME:-admin}"
+      PICKUP_ADMIN_PASSWORD: "${PICKUP_ADMIN_PASSWORD:?run ./scripts/setup-local.sh --full first}"
     depends_on:
       registration-worker:
+        condition: service_healthy
+      mail-pickup:
         condition: service_healthy
 
   registration-worker:
@@ -34,3 +40,35 @@ services:
       timeout: 5s
       start_period: 60s
       retries: 10
+
+  mail-pickup:
+    build:
+      context: ./mail-pickup
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    shm_size: "1gb"
+    environment:
+      PICKUP_HOST: 0.0.0.0
+      PICKUP_PORT: 4190
+      PICKUP_DATABASE_PATH: /app/data/mail-pickup.db
+      PICKUP_EMAIL_DOMAIN: "${PICKUP_EMAIL_DOMAIN:-example.com}"
+      PICKUP_PUBLIC_BASE_URL: "${PICKUP_PUBLIC_BASE_URL:-http://127.0.0.1:4190}"
+      PICKUP_INBOUND_TOKEN: "${PICKUP_INBOUND_TOKEN:?run ./scripts/setup-local.sh --full first}"
+      PICKUP_TOKEN_SECRET: "${PICKUP_TOKEN_SECRET:?run ./scripts/setup-local.sh --full first}"
+      PICKUP_ADMIN_USERNAME: "${PICKUP_ADMIN_USERNAME:-admin}"
+      PICKUP_ADMIN_PASSWORD: "${PICKUP_ADMIN_PASSWORD:?run ./scripts/setup-local.sh --full first}"
+      PICKUP_ALIAS_HUB_DATABASE_PATH: /alias-data/outlook-alias-hub.db
+      PICKUP_ALIAS_HUB_URL: http://aliashub:4180
+      PICKUP_ALIAS_HUB_SCAN_SECONDS: "${PICKUP_ALIAS_HUB_SCAN_SECONDS:-15}"
+      PICKUP_RETENTION_DAYS: "${PICKUP_RETENTION_DAYS:-30}"
+      PICKUP_MAX_MESSAGES: "${PICKUP_MAX_MESSAGES:-200}"
+      PICKUP_LDXP_GOODS_ID: "${PICKUP_LDXP_GOODS_ID:-0}"
+      PICKUP_LDXP_IMAGE_URL: "${PICKUP_LDXP_IMAGE_URL:-}"
+      LDXP_PROXY_POOL: "${LDXP_PROXY_POOL:-}"
+      LDXP_CDP_URL: "${LDXP_CDP_URL:-}"
+      LDXP_PLAYWRIGHT_HEADLESS: "${LDXP_PLAYWRIGHT_HEADLESS:-1}"
+    ports:
+      - "127.0.0.1:${PICKUP_PORT:-4190}:4190"
+    volumes:
+      - ./data/mail-pickup:/app/data
+      - ./data:/alias-data:ro

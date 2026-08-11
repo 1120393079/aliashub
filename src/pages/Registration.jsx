@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, Cable, Check, CircleStop, ClipboardCopy, Copy, CreditCard, Database, Download, ExternalLink, EyeOff, Fingerprint, Gift, Globe2, KeyRound, Link2, ListChecks, LoaderCircle, Mail, Monitor, Network, Pause, Pencil, Play, RefreshCw, Save, ScrollText, Search, Server, ShieldCheck, SlidersHorizontal, Trash2, Upload, UserPlus } from "lucide-react";
+import { AlertTriangle, Cable, Check, CircleStop, ClipboardCopy, Copy, CreditCard, Database, Download, ExternalLink, EyeOff, Fingerprint, Gift, Globe2, KeyRound, Link2, ListChecks, LoaderCircle, Mail, Monitor, Network, Pause, Pencil, Play, RefreshCw, Save, ScrollText, Search, Server, ShieldCheck, SlidersHorizontal, Store, Trash2, Upload, UserPlus } from "lucide-react";
 import { api } from "../api.js";
 import { planAgentIdentityBulk, runAgentIdentityBulk } from "../agent-identity-bulk.js";
 import { Button, ConfirmDialog, EmptyState, FormField, IconButton, LoadingBlock, Modal, Pagination, Segmented, StatusBadge, useToast } from "../components.jsx";
@@ -35,6 +35,7 @@ import {
   normalizeProxySample,
   proxySelectLabel,
 } from "./registration/proxy-model.js";
+import { indexPickupStatuses, pickupAccountState } from "./registration/pickup-model.js";
 import {
   buildRefreshTokenExportEntry,
   buildSub2ExportEntry,
@@ -65,6 +66,16 @@ function downloadTextFile(filename, content, type) {
   link.click();
   link.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+}
+
+function PickupStatusCell({ inventory, email, compact = false }) {
+  const state = pickupAccountState(inventory, email);
+  const listedAt = state.item?.created_at;
+  return <div className={"registration-pickup-status" + (compact ? " compact" : "")} title={listedAt ? "上架时间：" + formatDate(listedAt) : state.label}>
+    <StatusBadge status={state.badge}>{state.label}</StatusBadge>
+    {state.item?.pickup_url && <a href={state.item.pickup_url} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()}><ExternalLink size={11} />取件</a>}
+    {!compact && listedAt && <small>{formatDate(listedAt)}</small>}
+  </div>;
 }
 
 function CheckoutStatusCell({ item, compact = false }) {
@@ -126,6 +137,8 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
   const [copyingSelectedTokens, setCopyingSelectedTokens] = useState(false);
   const [exportingSub2, setExportingSub2] = useState(false);
   const [exportingRefreshTokens, setExportingRefreshTokens] = useState(false);
+  const [publishingPickup, setPublishingPickup] = useState(false);
+  const [pickupInventory, setPickupInventory] = useState({ loaded: false, byEmail: {}, error: "" });
   const [checkingAccountSignals, setCheckingAccountSignals] = useState(false);
   const [checkingCheckouts, setCheckingCheckouts] = useState(false);
   const [checkingTrials, setCheckingTrials] = useState(false);
@@ -167,12 +180,19 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
   const [nfapiMailboxLoading, setNfapiMailboxLoading] = useState(false);
   const [nfapiMailboxError, setNfapiMailboxError] = useState("");
   const [nfapiMailboxUpdatedAt, setNfapiMailboxUpdatedAt] = useState("");
+  const [accountMailboxTarget, setAccountMailboxTarget] = useState(null);
+  const [accountMailboxData, setAccountMailboxData] = useState(null);
+  const [accountMailboxLoading, setAccountMailboxLoading] = useState(false);
+  const [accountMailboxError, setAccountMailboxError] = useState("");
+  const [accountMailboxUpdatedAt, setAccountMailboxUpdatedAt] = useState("");
   const registrationOptionsRequest = useRef(0);
   const registrationJobsRequest = useRef(0);
   const registrationAccountsRequest = useRef(0);
   const nfapiOptionsRequest = useRef(0);
   const nfapiMailboxRequest = useRef(0);
   const nfapiMailboxBusy = useRef(false);
+  const accountMailboxRequest = useRef(0);
+  const accountMailboxBusy = useRef(false);
   const [passwordSetupTarget, setPasswordSetupTarget] = useState(null);
   const [passwordSetupValue, setPasswordSetupValue] = useState("");
   const [passwordSetupTask, setPasswordSetupTask] = useState(null);
@@ -257,10 +277,29 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
     }
   }, []);
 
+  const loadPickupStatuses = useCallback(async () => {
+    try {
+      const result = await api("/api/pickup/statuses");
+      setPickupInventory({
+        loaded: true,
+        byEmail: indexPickupStatuses(result.items),
+        error: "",
+      });
+      return result;
+    } catch (error) {
+      setPickupInventory((current) => ({
+        ...current,
+        loaded: true,
+        error: error.message || "取件站状态加载失败",
+      }));
+      return null;
+    }
+  }, []);
+
   const refreshRegistrationData = useCallback(async () => {
     await Promise.all([loadJobs(), loadQueueControl()]);
-    await Promise.all([loadOptions(), loadAccounts()]);
-  }, [loadJobs, loadQueueControl, loadOptions, loadAccounts]);
+    await Promise.all([loadOptions(), loadAccounts(), loadPickupStatuses()]);
+  }, [loadJobs, loadQueueControl, loadOptions, loadAccounts, loadPickupStatuses]);
 
   useEffect(() => () => {
     registrationOptionsRequest.current += 1;
@@ -288,6 +327,26 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
     }
   }, [nfapiMailboxAccountId]);
 
+  const loadAccountMailbox = useCallback(async ({ background = false } = {}) => {
+    if (!accountMailboxTarget?.id || accountMailboxBusy.current) return;
+    const requestId = ++accountMailboxRequest.current;
+    accountMailboxBusy.current = requestId;
+    setAccountMailboxLoading(true);
+    if (!background) setAccountMailboxError("");
+    try {
+      const result = await api(`/api/registration/accounts/${accountMailboxTarget.id}/emails?top=20`);
+      if (requestId !== accountMailboxRequest.current) return;
+      setAccountMailboxData(result);
+      setAccountMailboxError("");
+      setAccountMailboxUpdatedAt(new Date().toISOString());
+    } catch (error) {
+      if (requestId === accountMailboxRequest.current) setAccountMailboxError(error.message || "邮箱刷新失败");
+    } finally {
+      if (accountMailboxBusy.current === requestId) accountMailboxBusy.current = false;
+      if (requestId === accountMailboxRequest.current) setAccountMailboxLoading(false);
+    }
+  }, [accountMailboxTarget]);
+
   useEffect(() => {
     refreshRegistrationData().catch((error) => toast(error.message, "error"));
   }, [refreshRegistrationData, refreshKey, toast]);
@@ -303,6 +362,18 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
       setNfapiMailboxLoading(false);
     };
   }, [nfapiOAuthSession?.oauth_session_id, nfapiMailboxOpen, loadNfapiMailbox]);
+
+  useEffect(() => {
+    if (!accountMailboxTarget?.id) return undefined;
+    loadAccountMailbox();
+    const timer = window.setInterval(() => loadAccountMailbox({ background: true }), 4_000);
+    return () => {
+      window.clearInterval(timer);
+      accountMailboxRequest.current += 1;
+      accountMailboxBusy.current = false;
+      setAccountMailboxLoading(false);
+    };
+  }, [accountMailboxTarget?.id, loadAccountMailbox]);
 
   useEffect(() => {
     if (!nfapiOAuthSession?.oauth_session_id) return undefined;
@@ -1471,6 +1542,24 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
     }
   };
 
+  const publishSelectedToPickup = async () => {
+    if (!selectedAccountIds.length) return;
+    setPublishingPickup(true);
+    try {
+      const result = await api("/api/pickup/import-accounts", {
+        method: "POST",
+        body: { ids: selectedAccountIds },
+      });
+      if (result.delivery_text) await copyText(result.delivery_text);
+      await loadPickupStatuses();
+      toast(`已上架 ${result.imported} 个账号，邮箱和取件链接已复制`);
+    } catch (error) {
+      toast(error.message || "上架取件站失败", "error");
+    } finally {
+      setPublishingPickup(false);
+    }
+  };
+
   const copyRegisteredAccount = async (item) => {
     if (!item?.email) {
       toast("账号目标已不存在，请刷新后重试", "error");
@@ -1482,6 +1571,26 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
     } catch (error) {
       toast(error.message || "账号复制失败", "error");
     }
+  };
+
+  const openAccountMailbox = (item) => {
+    accountMailboxRequest.current += 1;
+    accountMailboxBusy.current = false;
+    setAccountMailboxTarget(item);
+    setAccountMailboxData(null);
+    setAccountMailboxLoading(false);
+    setAccountMailboxError("");
+    setAccountMailboxUpdatedAt("");
+  };
+
+  const closeAccountMailbox = () => {
+    accountMailboxRequest.current += 1;
+    accountMailboxBusy.current = false;
+    setAccountMailboxTarget(null);
+    setAccountMailboxData(null);
+    setAccountMailboxLoading(false);
+    setAccountMailboxError("");
+    setAccountMailboxUpdatedAt("");
   };
 
   const copyNfapiVerificationCode = async (code) => {
@@ -1636,9 +1745,10 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
       </>}
 
       {view === "accounts" && <section className="table-panel registration-account-panel">
-        <header className="panel-header"><div><h2>已注册账号</h2><p>账号、凭据、状态与 NFapi 集中管理</p></div><div className="registration-account-bulk-actions"><Button size="sm" icon={Upload} disabled={importingNfapi || importingLocalAccounts} onClick={() => setLocalImportOpen(true)}>导入本地账号</Button><Button size="sm" icon={RefreshCw} disabled={!accounts.items.length || importingNfapi || importingLocalAccounts} title="重新加载账号列表，不触发状态检测" onClick={loadAccounts}>刷新列表</Button></div></header>
+        <header className="panel-header"><div><h2>已注册账号</h2><p>账号、凭据、状态与 NFapi 集中管理</p></div><div className="registration-account-bulk-actions"><Button size="sm" icon={Upload} disabled={importingNfapi || importingLocalAccounts} onClick={() => setLocalImportOpen(true)}>导入本地账号</Button><Button size="sm" icon={RefreshCw} disabled={!accounts.items.length || importingNfapi || importingLocalAccounts} title="重新加载账号列表和取件站状态，不触发账号状态检测" onClick={() => Promise.all([loadAccounts(), loadPickupStatuses()])}>刷新列表</Button></div></header>
         {accounts.items.length ? <>
           {accountsError && <div className="inline-alert error"><AlertTriangle size={15} /><span>{accountsError}；当前保留上一次成功加载的账号列表。</span></div>}
+          {pickupInventory.error && <div className="inline-alert warning"><AlertTriangle size={15} /><span>{pickupInventory.error}；取件站状态暂时显示为未知。</span></div>}
           <div className="registration-account-toolbar">
             <div className="registration-account-filters">
               <label className="registration-select-page"><input type="checkbox" checked={allAccountsSelected} disabled={!accountIds.length || importingNfapi} onChange={toggleAllAccounts} /><span>全选本页</span></label>
@@ -1655,6 +1765,7 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
               <Button size="sm" icon={CreditCard} loading={checkingCheckouts} disabled={!pagedAccountItems.length || importingNfapi || checkingAccountSignals || checkingTrials} title={selectedAccountIds.length ? "用 DE/EUR custom checkout 检测所选账号返回 cs_live 还是 oaics" : "用 DE/EUR custom checkout 检测本页账号返回 cs_live 还是 oaics"} onClick={checkAccountCheckouts}>{selectedAccountIds.length ? "检测 Checkout" : "检测本页 Checkout"}</Button>
               <Button size="sm" icon={Gift} loading={checkingTrials} disabled={!pagedAccountItems.length || importingNfapi || checkingAccountSignals || checkingCheckouts} title={selectedAccountIds.length ? "通过日本代理检测所选账号是否有 Plus 一个月免费试用资格" : "通过日本代理检测本页账号是否有 Plus 一个月免费试用资格"} onClick={checkAccountTrials}>{selectedAccountIds.length ? "检测日本试用" : "检测本页试用"}</Button>
               <Button size="sm" icon={Pencil} disabled={!selectedAccountIds.length || importingNfapi} title="统一修改所选账号的分组" onClick={openBulkGroupEditor}>编辑分组</Button>
+              <Button size="sm" variant="primary" icon={Store} loading={publishingPickup} disabled={!selectedAccountIds.length || importingNfapi} title="只把所选账号的邮箱和取件链接上架到买家取件站" onClick={publishSelectedToPickup}>上架取件站</Button>
               <Button size="sm" icon={SlidersHorizontal} disabled={!selectedAccountIds.length || importingNfapi} title="为所选账号统一配置并批量导入 NFapi" onClick={() => openNfapiImporter(selectedAccountIds)}>批量导入</Button>
               <Button size="sm" icon={KeyRound} loading={copyingSelectedTokens} disabled={!selectedAccountIds.length || importingNfapi} onClick={copySelectedAccessTokens}>复制 AT</Button>
               <Button size="sm" icon={Download} loading={exportingSub2} disabled={!selectedAccountIds.length || importingNfapi} title="导出为 Sub2API Codex Session JSON" onClick={exportSelectedSub2}>导出 Sub2</Button>
@@ -1664,7 +1775,7 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
             </div>
           </div>
           {visibleAccountItems.length ? <>
-            <div className="data-table-wrap registration-account-table-wrap"><table className="data-table registration-accounts-table"><thead><tr><th className="select-column"><input type="checkbox" aria-label="选择本页全部注册账号" checked={allAccountsSelected} disabled={!accountIds.length || importingNfapi} onChange={toggleAllAccounts} /></th><th>账号</th><th>凭据</th><th>身份 / 出口</th><th>状态 / 类型</th><th>Checkout</th><th>日本试用</th><th>NFapi</th><th>创建时间</th><th className="registration-actions-column" aria-label="操作" /></tr></thead><tbody>{pagedAccountItems.map((item) => {
+            <div className="data-table-wrap registration-account-table-wrap"><table className="data-table registration-accounts-table"><thead><tr><th className="select-column"><input type="checkbox" aria-label="选择本页全部注册账号" checked={allAccountsSelected} disabled={!accountIds.length || importingNfapi} onChange={toggleAllAccounts} /></th><th>账号</th><th>凭据</th><th>身份 / 出口</th><th>状态 / 类型</th><th>Checkout</th><th>日本试用</th><th>NFapi</th><th>取件站</th><th>创建时间</th><th className="registration-actions-column" aria-label="操作" /></tr></thead><tbody>{pagedAccountItems.map((item) => {
               const checked = selectedAccountIds.includes(item.id);
               const nfapiState = nfapiAccountState(item);
               return <tr className={checked ? "selected-row" : ""} key={item.id}>
@@ -1676,14 +1787,15 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
                 <td><CheckoutStatusCell item={item} /></td>
                 <td><TrialStatusCell item={item} /></td>
                 <td><div className="registration-nfapi-status" title={nfapiState.error || nfapiState.accountId || nfapiState.label}><StatusBadge status={nfapiState.badge}>{nfapiState.label}</StatusBadge>{nfapiState.shortLived && <small>短期凭据</small>}{nfapiState.accountId && <code>#{nfapiState.accountId}</code>}{nfapiState.error && <small className="error">{nfapiState.error}</small>}</div></td>
+                <td><PickupStatusCell inventory={pickupInventory} email={item.email} /></td>
                 <td><span className="muted-cell">{formatDate(item.created_at)}</span></td>
-                <td><AccountCommands item={item} checking={checkingAccountSignals} busy={importingNfapi} onRefresh={refreshAccountSignals} onPassword={openPasswordSetup} onNfapi={openNfapiImporter} onEdit={openAccountEditor} onCopy={copyRegisteredAccount} onDelete={(target) => setDeleteTarget({ kind: "account", ids: [target.id], item: target })} /></td>
+                <td><AccountCommands item={item} checking={checkingAccountSignals} busy={importingNfapi} onRefresh={refreshAccountSignals} onPassword={openPasswordSetup} onNfapi={openNfapiImporter} onMailbox={openAccountMailbox} onEdit={openAccountEditor} onCopy={copyRegisteredAccount} onDelete={(target) => setDeleteTarget({ kind: "account", ids: [target.id], item: target })} /></td>
               </tr>;
             })}</tbody></table></div>
             <div className="registration-mobile-list">{pagedAccountItems.map((item) => {
               const checked = selectedAccountIds.includes(item.id);
               const nfapiState = nfapiAccountState(item);
-              return <article className={checked ? "selected" : ""} key={item.id}><header><input type="checkbox" aria-label={`选择 ${item.email}`} checked={checked} disabled={importingNfapi} onChange={() => toggleAccount(item.id)} /><AccountSignalCell item={item} compact disabled={refreshingAccessTokenId !== null || importingNfapi} refreshingAccessToken={String(refreshingAccessTokenId) === String(item.id)} onRefreshAccessToken={refreshAccessToken} /><time>{formatDate(item.created_at)}</time></header><AccountNameGroup item={item} mobile /><button onClick={() => copyText(item.email).then(() => toast("邮箱已复制"))}>{item.email}<Copy size={14} /></button><div className="registration-mobile-credentials"><PasswordCell value={item.password} status={item.password_status} error={item.password_error} available={item.password_available} onCopy={() => copyText(item.password).then(() => toast("密码已复制"))} /><AccessTokenCell available={item.access_token_available} loading={copyingTokenId === item.id} onCopy={() => copyAccessToken(item)} /></div><div className="registration-mobile-facts"><div className="registration-account-exit"><Globe2 size={14} /><span><small>出口 IP</small><b>{item.exit_ip || "未记录"}</b></span></div><div className="registration-account-exit"><CreditCard size={14} /><span><small>Checkout</small><CheckoutStatusCell item={item} compact /></span></div><div className="registration-account-exit"><Gift size={14} /><span><small>日本试用</small><TrialStatusCell item={item} compact /></span></div><div className="registration-account-exit"><Database size={14} /><span><small>NFapi</small><b>{nfapiState.label}{nfapiState.shortLived ? " · 短期凭据" : ""}</b></span></div></div>{nfapiState.error && <div className="inline-alert error"><AlertTriangle size={14} /><span>{nfapiState.error}</span></div>}<footer><span>{item.display_name || "未记录"}</span><AccountCommands item={item} checking={checkingAccountSignals} busy={importingNfapi} onRefresh={refreshAccountSignals} onPassword={openPasswordSetup} onNfapi={openNfapiImporter} onEdit={openAccountEditor} onCopy={copyRegisteredAccount} onDelete={(target) => setDeleteTarget({ kind: "account", ids: [target.id], item: target })} /></footer></article>;
+              return <article className={checked ? "selected" : ""} key={item.id}><header><input type="checkbox" aria-label={`选择 ${item.email}`} checked={checked} disabled={importingNfapi} onChange={() => toggleAccount(item.id)} /><AccountSignalCell item={item} compact disabled={refreshingAccessTokenId !== null || importingNfapi} refreshingAccessToken={String(refreshingAccessTokenId) === String(item.id)} onRefreshAccessToken={refreshAccessToken} /><time>{formatDate(item.created_at)}</time></header><AccountNameGroup item={item} mobile /><button onClick={() => copyText(item.email).then(() => toast("邮箱已复制"))}>{item.email}<Copy size={14} /></button><div className="registration-mobile-credentials"><PasswordCell value={item.password} status={item.password_status} error={item.password_error} available={item.password_available} onCopy={() => copyText(item.password).then(() => toast("密码已复制"))} /><AccessTokenCell available={item.access_token_available} loading={copyingTokenId === item.id} onCopy={() => copyAccessToken(item)} /></div><div className="registration-mobile-facts"><div className="registration-account-exit"><Globe2 size={14} /><span><small>出口 IP</small><b>{item.exit_ip || "未记录"}</b></span></div><div className="registration-account-exit"><CreditCard size={14} /><span><small>Checkout</small><CheckoutStatusCell item={item} compact /></span></div><div className="registration-account-exit"><Gift size={14} /><span><small>日本试用</small><TrialStatusCell item={item} compact /></span></div><div className="registration-account-exit"><Database size={14} /><span><small>NFapi</small><b>{nfapiState.label}{nfapiState.shortLived ? " · 短期凭据" : ""}</b></span></div><div className="registration-account-exit registration-mobile-pickup"><Store size={14} /><span><small>取件站</small><PickupStatusCell inventory={pickupInventory} email={item.email} compact /></span></div></div>{nfapiState.error && <div className="inline-alert error"><AlertTriangle size={14} /><span>{nfapiState.error}</span></div>}<footer><span>{item.display_name || "未记录"}</span><AccountCommands item={item} checking={checkingAccountSignals} busy={importingNfapi} onRefresh={refreshAccountSignals} onPassword={openPasswordSetup} onNfapi={openNfapiImporter} onMailbox={openAccountMailbox} onEdit={openAccountEditor} onCopy={copyRegisteredAccount} onDelete={(target) => setDeleteTarget({ kind: "account", ids: [target.id], item: target })} /></footer></article>;
             })}</div>
           </> : <EmptyState icon={KeyRound} title={accountSearch.trim() ? "没有匹配的账号" : "这个分组还没有账号"} description={accountSearch.trim() ? `没有找到邮箱包含“${accountSearch.trim()}”的账号` : undefined} action={accountSearch.trim() ? <Button onClick={() => changeAccountSearch("")}>清除查询</Button> : <Button onClick={() => changeAccountGroupFilter("all")}>查看全部账号</Button>} />}
           <div className="table-footer registration-account-footer">
@@ -1696,6 +1808,22 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
           </div>
         </> : <EmptyState icon={KeyRound} title={accountsError ? "注册账号暂时无法加载" : "还没有注册成功的账号"} description={accountsError || undefined} action={accountsError ? <Button icon={RefreshCw} onClick={loadAccounts}>重新加载</Button> : undefined} />}
       </section>}
+
+      <Modal open={Boolean(accountMailboxTarget)} onClose={closeAccountMailbox} title="账号邮箱" description={accountMailboxTarget?.email} size="md">
+        {accountMailboxTarget && <OAuthMailboxPanel
+          title="收件箱"
+          email={accountMailboxData?.email || accountMailboxTarget.email}
+          data={accountMailboxData}
+          loading={accountMailboxLoading}
+          error={accountMailboxError}
+          updatedAt={accountMailboxUpdatedAt}
+          onRefresh={() => loadAccountMailbox()}
+          onClose={closeAccountMailbox}
+          onCopyCode={copyNfapiVerificationCode}
+          emptyTitle="暂无邮件"
+          emptyDescription="这个账号邮箱还没有已同步的邮件。"
+        />}
+      </Modal>
 
       {view === "proxies" && <section className="registration-proxy-layout">
         <article className="settings-section"><header><span><Network size={19} /></span><div><h2>IP 代理池</h2><p>每行一个代理，注册任务按顺序轮换使用</p></div></header><div className="settings-form"><FormField label="代理地址" hint="支持 URL、host:port:user:password 和无认证 socks5；动态类型由服务端实际识别"><textarea className="proxy-pool-editor" aria-invalid={Boolean(proxyDraft.errors.length)} value={proxyText} onChange={(event) => { setProxyText(event.target.value); setProxySaveFeedback(null); }} placeholder={"http://user:password@host:port\nhost:port:user:password\nsocks5://host:port"} /></FormField>

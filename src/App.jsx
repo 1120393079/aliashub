@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Bell, BookOpen, Bot, ChevronDown, Inbox, KeyRound, Layers, LayoutDashboard, Link2, LogOut, Mail, Menu, Moon, Plus, Settings, Sun, WandSparkles, X } from "lucide-react";
+import { Bell, BookOpen, Bot, ChevronDown, Inbox, KeyRound, Layers, LayoutDashboard, Link2, LogOut, Mail, Menu, Moon, Plus, Settings, Store, Sun, WandSparkles, X } from "lucide-react";
 import { api } from "./api.js";
 import { Button, IconButton, LoadingBlock, MicrosoftMark, ProviderMark, useToast } from "./components.jsx";
 import OverviewPage from "./pages/Overview.jsx";
@@ -11,6 +11,7 @@ import InboxLinkRegistrationPage from "./pages/InboxLinkRegistration.jsx";
 import InboxPage from "./pages/Inbox.jsx";
 import CodesPage from "./pages/Codes.jsx";
 import AddressesPage from "./pages/Addresses.jsx";
+import SalesPage from "./pages/Sales.jsx";
 import SettingsPage from "./pages/Settings.jsx";
 
 const pages = {
@@ -21,13 +22,14 @@ const pages = {
   codes: { label: "验证码中心", subtitle: "集中查看所有源头号的验证码", icon: KeyRound },
   addresses: { label: "地址仓库", subtitle: "全部基础地址和分裂地址", icon: BookOpen },
   "inbox-link": { label: "链接取件", subtitle: "使用邮箱取件链接批量注册", icon: Link2 },
+  sales: { label: "邮箱售卖", subtitle: "源头邮箱导入库存与取件站上货", icon: Store },
   "microsoft-registration": { label: "微软邮箱注册", subtitle: "Go 注册机回传与账号归档", icon: MicrosoftMark },
   registration: { label: "ChatGPT注册", subtitle: "自动注册与账号集中管理", icon: Bot, featured: true },
   settings: { label: "系统设置", subtitle: "服务与数据配置", icon: Settings },
 };
 
 const mobilePageKeys = ["overview", "sources", "inbox", "addresses", "registration"];
-const emailWorkspacePageKeys = ["sources", "factory", "inbox", "codes", "addresses", "inbox-link", "microsoft-registration"];
+const emailWorkspacePageKeys = ["sources", "factory", "inbox", "codes", "addresses", "inbox-link", "sales", "microsoft-registration"];
 
 function LoginPage({ onAuthenticated }) {
   const [form, setForm] = useState({ username: "admin", password: "" });
@@ -117,6 +119,7 @@ export default function App() {
     if (page === "inbox") return <InboxPage {...props} initialAccountId={routeState.accountId} />;
     if (page === "codes") return <CodesPage {...props} initialAccountId={routeState.accountId} />;
     if (page === "addresses") return <AddressesPage {...props} initialAccountId={routeState.accountId} />;
+    if (page === "sales") return <SalesPage {...props} />;
     if (page === "settings") return <SettingsPage {...props} />;
     return <OverviewPage {...props} overview={overview} onAddAccount={() => { navigate("sources"); setAddAccountOpen(true); }} />;
   }, [page, refreshKey, routeState, overview, addAccountOpen]); // eslint-disable-line react-hooks/exhaustive-deps

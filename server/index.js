@@ -17,6 +17,7 @@ import { NfapiService, PUBLIC_AGENT_IDENTITY_ERROR_CODES } from "./nfapi-service
 import { NfapiCredentialStore, NfapiCredentialSync } from "./nfapi-credential-sync.js";
 import { MicrosoftRegistrationRunnerService } from "./microsoft-registration-runner-service.js";
 import { MicrosoftRegistrationService } from "./microsoft-registration-service.js";
+import { PickupService } from "./pickup-service.js";
 import { RegistrationClient } from "./registration-client.js";
 import { RegistrationService } from "./registration-service.js";
 
@@ -383,6 +384,15 @@ export function createApp(options = {}) {
     trialProbe: options.trialProbe,
     trialProxyResolver: options.trialProxyResolver,
   });
+  const pickup = options.pickup || new PickupService({
+    db,
+    registration,
+    baseUrl: options.pickupBaseUrl || process.env.PICKUP_SERVICE_URL,
+    publicUrl: options.pickupPublicUrl || process.env.PICKUP_PUBLIC_URL,
+    username: options.pickupUsername || process.env.PICKUP_ADMIN_USERNAME || process.env.ADMIN_USERNAME,
+    password: options.pickupPassword || process.env.PICKUP_ADMIN_PASSWORD || process.env.ADMIN_PASSWORD,
+    fetchFn: options.pickupFetchFn || options.fetchFn,
+  });
   const nfapi = options.nfapi || new NfapiService({
     db,
     registrationClient,
@@ -641,6 +651,25 @@ export function createApp(options = {}) {
       const result = await deleteInboxLinkMailboxes({ ids: [req.params.id] });
       res.json({ ...result.items[0], gpt_deleted: result.gpt_deleted, gpt_failed: result.gpt_failed });
     } catch (error) { next(error); }
+  });
+  app.get("/api/pickup/config", (_req, res) => {
+    res.json(pickup.configuration());
+  });
+  app.get("/api/pickup/statuses", async (_req, res, next) => {
+    try { res.json(await pickup.listStatuses()); }
+    catch (error) { next(error); }
+  });
+  app.get("/api/pickup/source-addresses", (_req, res, next) => {
+    try { res.json(pickup.listSourceAddresses()); }
+    catch (error) { next(error); }
+  });
+  app.post("/api/pickup/import-addresses", async (req, res, next) => {
+    try { res.json(await pickup.importSourceAddresses(req.body || {})); }
+    catch (error) { next(error); }
+  });
+  app.post("/api/pickup/import-accounts", async (req, res, next) => {
+    try { res.json(await pickup.importRegisteredAccounts(req.body || {})); }
+    catch (error) { next(error); }
   });
   app.put("/api/registration/proxies", (req, res, next) => {
     try { res.json(registration.saveProxyPool(req.body?.proxies)); } catch (error) { next(error); }
@@ -1516,7 +1545,7 @@ export function createApp(options = {}) {
     if (PUBLIC_AGENT_IDENTITY_ERROR_CODES.has(error?.code)) body.code = error.code;
     res.status(status).json(body);
   });
-  return { app, db, graph, gmail, icloud, inbox, inboxLinkMailboxes, extension, jobs, registration, nfapi, nfapiCredentialSync, microsoftRegistration, microsoftRegistrationRunner };
+  return { app, db, graph, gmail, icloud, inbox, inboxLinkMailboxes, extension, jobs, registration, pickup, nfapi, nfapiCredentialSync, microsoftRegistration, microsoftRegistrationRunner };
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

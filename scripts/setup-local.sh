@@ -19,8 +19,8 @@ random_hex() {
 
 cd "$ROOT_DIR"
 umask 077
-mkdir -p data/attachments data/registration-worker
-chmod 700 data data/attachments data/registration-worker
+mkdir -p data/attachments data/registration-worker data/mail-pickup
+chmod 700 data data/attachments data/registration-worker data/mail-pickup
 
 ensure_generated_secret() {
   local key=$1
@@ -87,6 +87,16 @@ if [[ ! -f .env ]]; then
     printf 'REGISTRATION_WORKER_PORT=%s\n' "${REGISTRATION_WORKER_PORT:-8000}"
     printf 'REGISTRATION_BROWSER_PORT=%s\n' "${REGISTRATION_BROWSER_PORT:-6080}"
     printf 'REGISTRATION_VNC_PASSWORD=%s\n' "$REGISTRATION_VNC_VALUE"
+    printf 'PICKUP_SERVICE_URL=%s\n' "${PICKUP_SERVICE_URL:-}"
+    printf 'PICKUP_PUBLIC_BASE_URL=%s\n' "${PICKUP_PUBLIC_BASE_URL:-http://127.0.0.1:4190}"
+    printf 'PICKUP_PORT=%s\n' "${PICKUP_PORT:-4190}"
+    printf 'PICKUP_EMAIL_DOMAIN=%s\n' "${PICKUP_EMAIL_DOMAIN:-example.com}"
+    printf 'PICKUP_INBOUND_TOKEN=%s\n' "${PICKUP_INBOUND_TOKEN:-$(random_hex 32)}"
+    printf 'PICKUP_TOKEN_SECRET=%s\n' "${PICKUP_TOKEN_SECRET:-$(random_hex 32)}"
+    printf 'PICKUP_ADMIN_USERNAME=%s\n' "${PICKUP_ADMIN_USERNAME:-$ADMIN_USER}"
+    printf 'PICKUP_ADMIN_PASSWORD=%s\n' "${PICKUP_ADMIN_PASSWORD:-$ADMIN_PASS}"
+    printf 'PICKUP_LDXP_GOODS_ID=%s\n' "${PICKUP_LDXP_GOODS_ID:-0}"
+    printf 'PICKUP_LDXP_IMAGE_URL=%s\n' "${PICKUP_LDXP_IMAGE_URL:-}"
     printf 'SUB2_BASE_URL=%s\n' "${SUB2_BASE_URL:-}"
     printf 'SUB2_ADMIN_API_KEY=%s\n' "${SUB2_ADMIN_API_KEY:-}"
     printf 'NFAPI_CREDENTIAL_DB_HOST=%s\n' "${NFAPI_CREDENTIAL_DB_HOST:-}"
@@ -105,8 +115,17 @@ fi
 if [[ "$MODE" == "--full" ]]; then
   ensure_generated_secret REGISTRATION_SERVICE_TOKEN 32
   ensure_generated_secret REGISTRATION_VNC_PASSWORD 12
+  ensure_generated_secret PICKUP_INBOUND_TOKEN 32
+  ensure_generated_secret PICKUP_TOKEN_SECRET 32
   ensure_env_default REGISTRATION_WORKER_PORT 8000
   ensure_env_default REGISTRATION_BROWSER_PORT 6080
+  ensure_env_default PICKUP_PORT 4190
+  ensure_env_default PICKUP_PUBLIC_BASE_URL http://127.0.0.1:4190
+  ensure_env_default PICKUP_EMAIL_DOMAIN example.com
+  ensure_env_default PICKUP_ADMIN_USERNAME "$(sed -n 's/^ADMIN_USERNAME=//p' .env | head -n 1)"
+  ensure_env_default PICKUP_ADMIN_PASSWORD "$(sed -n 's/^ADMIN_PASSWORD=//p' .env | head -n 1)"
+  ensure_env_default PICKUP_LDXP_GOODS_ID 0
+  ensure_env_default PICKUP_LDXP_IMAGE_URL ""
 fi
 chmod 600 .env
 
@@ -138,8 +157,10 @@ if [[ "$MODE" == "--native" ]]; then
 elif [[ "$MODE" == "--full" ]]; then
   WORKER_PORT=$(sed -n 's/^REGISTRATION_WORKER_PORT=//p' .env | head -n 1)
   BROWSER_PORT=$(sed -n 's/^REGISTRATION_BROWSER_PORT=//p' .env | head -n 1)
+  PICKUP_PORT_VALUE=$(sed -n 's/^PICKUP_PORT=//p' .env | head -n 1)
   printf 'Registration worker UI: http://127.0.0.1:%s\n' "${WORKER_PORT:-8000}"
   printf 'Registration browser: http://127.0.0.1:%s/vnc.html\n' "${BROWSER_PORT:-6080}"
+  printf 'Mail Pickup: http://127.0.0.1:%s\n' "${PICKUP_PORT_VALUE:-4190}"
   printf 'The worker and noVNC passwords are stored in .env.\n'
   printf 'Start with: docker compose -f compose.yaml -f compose.full.yaml up -d --build\n'
 else

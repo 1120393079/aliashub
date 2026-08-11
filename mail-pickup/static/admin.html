@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex,nofollow,noarchive" />
+    <title>邮箱取件管理</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body class="admin-body">
+    <main class="admin-shell">
+      <header class="admin-header">
+        <div>
+          <p class="eyebrow">MAIL PICKUP</p>
+          <h1>取件邮箱管理</h1>
+          <p>成品号由邮箱别名中枢一键导入，这里只管理取件与销售状态。</p>
+        </div>
+        <button id="refresh-admin" class="button secondary" type="button">刷新数据</button>
+      </header>
+
+      <section class="stats-grid" aria-label="邮箱统计">
+        <article><span>全部邮箱</span><strong id="stat-total">0</strong></article>
+        <article><span>待销售</span><strong id="stat-ready">0</strong></article>
+        <article><span>已售出</span><strong id="stat-sold">0</strong></article>
+        <article><span>已停用</span><strong id="stat-disabled">0</strong></article>
+      </section>
+
+      <section class="panel link-import-panel" aria-labelledby="link-import-heading">
+        <header class="link-import-header">
+          <div>
+            <p class="eyebrow">PICKUP LINK</p>
+            <h2 id="link-import-heading">批量生成取件链接</h2>
+            <p>只需填写邮箱即可签发链接；已有记录会返回原链接，不会重置 token。</p>
+          </div>
+          <span id="link-import-count" class="link-import-count">0 个邮箱</span>
+        </header>
+        <form id="link-import-form" class="link-import-form">
+          <div class="link-import-grid">
+            <label class="field">
+              <span>导入邮箱</span>
+              <textarea
+                id="link-import-input"
+                rows="8"
+                spellcheck="false"
+                autocomplete="off"
+                placeholder="name@example.com&#10;user@example.com----可选账号密码"
+              ></textarea>
+              <small>支持“邮箱”或“邮箱----账号密码”。任意外部邮箱都能生成独立链接。</small>
+            </label>
+            <label class="field">
+              <span>生成结果</span>
+              <textarea
+                id="link-import-output"
+                rows="8"
+                readonly
+                spellcheck="false"
+                placeholder="生成后显示：邮箱----取件链接"
+              ></textarea>
+              <small id="link-import-status">未配置收件凭据的外部邮箱会生成空取件箱；密码仅用于账号卡密交付。</small>
+            </label>
+          </div>
+          <footer class="link-import-actions">
+            <button id="link-import-clear" class="button secondary" type="button">清空</button>
+            <button id="link-import-copy" class="button secondary" type="button" disabled>复制结果</button>
+            <button id="link-import-submit" class="button primary" type="submit">生成取件链接</button>
+          </footer>
+        </form>
+      </section>
+
+      <section class="panel ldxp-compact" aria-labelledby="ldxp-heading">
+        <div>
+          <h2 id="ldxp-heading">联动小铺</h2>
+          <p id="ldxp-connection-detail">自动匹配店铺商品，上货后自动同步售出状态。</p>
+        </div>
+        <form id="ldxp-form" class="ldxp-connect-form">
+          <input
+            id="ldxp-username"
+            autocomplete="username"
+            autocapitalize="off"
+            spellcheck="false"
+            placeholder="联动小铺账号"
+            aria-label="联动小铺账号"
+          />
+          <input
+            id="ldxp-password"
+            type="password"
+            autocomplete="current-password"
+            placeholder="联动小铺密码"
+            aria-label="联动小铺密码"
+          />
+          <button id="ldxp-save" class="button secondary" type="submit">连接店铺</button>
+        </form>
+        <div id="ldxp-catalog" class="ldxp-catalog" hidden>
+          <select id="ldxp-goods" aria-label="选择联动小铺商品">
+            <option value="">正在读取店铺商品...</option>
+          </select>
+          <button id="ldxp-refresh-goods" class="mini-button" type="button">刷新商品</button>
+        </div>
+        <div id="ldxp-connection" class="sync-state is-idle" role="status" aria-live="polite">
+          <span class="sync-state-dot" aria-hidden="true"></span>
+          <strong id="ldxp-connection-title">正在读取状态</strong>
+        </div>
+        <a id="ldxp-verify" class="text-button" href="#" target="_blank" rel="noopener">人工验证</a>
+        <button id="ldxp-reconnect" class="text-button" type="button" hidden>重新连接</button>
+        <p id="ldxp-action-note" class="ldxp-action-note" aria-live="polite"></p>
+      </section>
+
+      <section class="panel mailbox-panel">
+        <div class="mailbox-toolbar">
+          <div class="toolbar-search">
+            <input id="search-mailboxes" type="search" placeholder="搜索邮箱、标签或备注" />
+            <select id="filter-status">
+              <option value="">全部状态</option>
+              <option value="ready">待销售</option>
+              <option value="sold">已售出</option>
+              <option value="disabled">已停用</option>
+            </select>
+          </div>
+          <div class="toolbar-actions">
+            <button id="copy-cards-selected" class="button secondary" type="button">复制所选卡密</button>
+            <button id="copy-api-selected" class="button secondary" type="button">复制所选取件API</button>
+            <button id="edit-status-selected" class="button secondary" type="button">批量改状态</button>
+            <button id="upload-selected" class="button primary" type="button">上货到所选商品</button>
+            <button id="archive-sold" class="button danger" type="button">本地删除已售</button>
+          </div>
+        </div>
+
+        <div class="mailbox-table-wrap">
+          <table class="mailbox-table">
+            <thead>
+              <tr>
+                <th><input id="select-all" type="checkbox" aria-label="全选" /></th>
+                <th>邮箱</th>
+                <th>收件源</th>
+                <th>状态</th>
+                <th>邮件</th>
+                <th>创建时间</th>
+                <th>售出信息</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="mailbox-rows">
+              <tr><td colspan="8" class="table-empty">正在加载...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <dialog id="edit-dialog" class="edit-dialog">
+      <form id="edit-form" method="dialog">
+        <header>
+          <div>
+            <p class="eyebrow">MAILBOX</p>
+            <h2 id="edit-email">编辑邮箱</h2>
+          </div>
+          <button id="close-dialog" class="icon-button" type="button" aria-label="关闭">&times;</button>
+        </header>
+        <label class="field"><span>账号密码</span><input id="edit-password" autocomplete="off" /></label>
+        <label class="field"><span>标签</span><input id="edit-label" maxlength="200" /></label>
+        <label class="field"><span>备注/附加交付内容</span><textarea id="edit-extra" rows="3"></textarea></label>
+        <label class="field">
+          <span>状态</span>
+          <select id="edit-status">
+            <option value="ready">待销售</option>
+            <option value="sold">已售出</option>
+            <option value="disabled">已停用</option>
+          </select>
+        </label>
+        <footer>
+          <div class="dialog-danger-actions">
+            <button id="delete-mailbox" class="button danger" type="button">删除邮箱</button>
+            <button id="rotate-token" class="button danger" type="button">重置链接</button>
+          </div>
+          <button class="button primary" type="submit">保存</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog id="bulk-status-dialog" class="edit-dialog">
+      <form id="bulk-status-form" method="dialog">
+        <header>
+          <div>
+            <p class="eyebrow">BATCH STATUS</p>
+            <h2 id="bulk-status-title">批量编辑状态</h2>
+          </div>
+          <button id="close-bulk-status" class="icon-button" type="button" aria-label="关闭">&times;</button>
+        </header>
+        <label class="field">
+          <span>状态</span>
+          <select id="bulk-status">
+            <option value="ready">待销售</option>
+            <option value="sold">已售出</option>
+            <option value="disabled">已停用</option>
+          </select>
+        </label>
+        <footer>
+          <button id="cancel-bulk-status" class="button secondary" type="button">取消</button>
+          <button id="save-bulk-status" class="button primary" type="submit">保存</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/static/admin.js"></script>
+  </body>
+</html>
