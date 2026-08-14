@@ -1,11 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
+import { timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import "dotenv/config";
 import express from "express";
 import { deleteSplitAddresses, generateSplits, importIcloudAliases, JobRunner, parseJson, publicAccount, syncOfficialAddresses } from "./account-service.js";
 import { createAuth } from "./auth.js";
-import { isIcloudImportedStrategy, microsoftDomains, normalizeMicrosoftEmail } from "./address-generator.js";
+import { isIcloudImportedStrategy, microsoftDomains, normalizeIcloudAliasEmail, normalizeMicrosoftEmail } from "./address-generator.js";
 import { audit, createDatabase, createSourceAccount, getSettings, nowIso, setSetting } from "./db.js";
 import { ExtensionService } from "./extension-service.js";
 import { registerEzCaptchaAdapter } from "./ez-captcha-adapter.js";
@@ -70,11 +71,12 @@ function requireMicrosoftAccount(account) {
   return account;
 }
 
-function addressQuery(db, { accountId, kind, q, page = 1, limit = 50 } = {}) {
+function addressQuery(db, { accountId, kind, strategy, q, page = 1, limit = 50 } = {}) {
   const conditions = ["source_accounts.provider <> 'inbox_link'"];
   const params = [];
   if (accountId) { conditions.push("addresses.account_id = ?"); params.push(Number(accountId)); }
   if (kind && kind !== "all") { conditions.push("addresses.kind = ?"); params.push(kind); }
+  if (strategy) { conditions.push("addresses.strategy = ?"); params.push(String(strategy)); }
   if (q) {
     conditions.push("(addresses.address LIKE ? OR addresses.label LIKE ? OR addresses.purpose LIKE ? OR source_accounts.email LIKE ?)");
     const term = `%${q}%`;
@@ -113,8 +115,14 @@ function addressQuery(db, { accountId, kind, q, page = 1, limit = 50 } = {}) {
 
 function publicMessage(row, { includeBody = false } = {}) {
   if (!row) return null;
+  const storedContentType = String(row.body_content_type || "text").toLowerCase();
+  const bodyContentType = storedContentType === "html"
+    || /^\s*(?:<!doctype\s+html\b|<html\b|<head\b|<body\b)/i.test(String(row.body || ""))
+    ? "html"
+    : "text";
   const item = {
     ...row,
+    body_content_type: bodyContentType,
     to_recipients: parseJson(row.to_recipients, []),
     cc_recipients: parseJson(row.cc_recipients, []),
     is_read: Boolean(row.is_read),
@@ -379,10 +387,13 @@ export function createApp(options = {}) {
     mailboxBaseUrl: process.env.REGISTRATION_MAILBOX_URL,
     browserUrl: process.env.REGISTRATION_BROWSER_URL,
     inboxLinkMailboxes,
+    pickup: options.pickup || null,
     checkoutProbe: options.checkoutProbe,
     checkoutProxyResolver: options.checkoutProxyResolver,
     trialProbe: options.trialProbe,
     trialProxyResolver: options.trialProxyResolver,
+    momoProbe: options.momoProbe,
+    momoProxyResolver: options.momoProxyResolver,
   });
   const pickup = options.pickup || new PickupService({
     db,
@@ -393,6 +404,7 @@ export function createApp(options = {}) {
     password: options.pickupPassword || process.env.PICKUP_ADMIN_PASSWORD || process.env.ADMIN_PASSWORD,
     fetchFn: options.pickupFetchFn || options.fetchFn,
   });
+  registration.pickup = pickup;
   const nfapi = options.nfapi || new NfapiService({
     db,
     registrationClient,
@@ -407,15 +419,8 @@ export function createApp(options = {}) {
   });
   let nfapiCredentialSync = Object.hasOwn(options, "nfapiCredentialSync")
     ? options.nfapiCredentialSync : null;
-  const nfapiCredentialStoreConfigured = Boolean(options.nfapiCredentialStore)
-    || [
-      process.env.NFAPI_CREDENTIAL_DB_HOST,
-      process.env.NFAPI_CREDENTIAL_DB_NAME,
-      process.env.NFAPI_CREDENTIAL_DB_USER,
-    ].every((value) => String(value || "").trim());
   if (!Object.hasOwn(options, "nfapiCredentialSync")
     && !options.registrationClient
-    && nfapiCredentialStoreConfigured
     && typeof nfapi.client === "function") {
     const store = options.nfapiCredentialStore || new NfapiCredentialStore();
     nfapiCredentialSync = new NfapiCredentialSync({
@@ -454,6 +459,9 @@ export function createApp(options = {}) {
     secure: publicBaseUrl.startsWith("https://"),
   });
   const app = express();
+  const icloudPrivacyInternalKey = String(
+    options.icloudPrivacyInternalKey || process.env.ICLOUD_PRIVACY_INTERNAL_KEY || "",
+  ).trim();
 
   db.prepare("UPDATE automation_jobs SET status = 'queued', message = '服务重启后恢复任务', updated_at = ? WHERE status = 'running' AND type = 'inbox_scan'").run(nowIso());
   db.prepare(`
@@ -480,6 +488,73 @@ export function createApp(options = {}) {
   app.get("/api/auth/check", auth.check);
   app.post("/api/auth/login", auth.login);
   app.post("/api/auth/logout", auth.logout);
+
+  const requireIcloudPrivacyInternalKey = (req, res, next) => {
+    const supplied = String(req.get("X-Alias-Hub-Internal-Key") || "");
+    const expected = icloudPrivacyInternalKey;
+    const suppliedBuffer = Buffer.from(supplied);
+    const expectedBuffer = Buffer.from(expected);
+    const valid = suppliedBuffer.length === expectedBuffer.length
+      && expectedBuffer.length > 0
+      && timingSafeEqual(suppliedBuffer, expectedBuffer);
+    if (!valid) return res.status(401).json({ error: "内部接口认证失败" });
+    return next();
+  };
+  app.use("/api/internal/icloud-privacy", requireIcloudPrivacyInternalKey);
+  app.post("/api/internal/icloud-privacy/import", (req, res, next) => {
+    try {
+      const sourceAccountId = Number(req.body?.source_account_id);
+      if (!Number.isSafeInteger(sourceAccountId) || sourceAccountId <= 0) {
+        throw Object.assign(new Error("源头邮箱 ID 无效"), { status: 400 });
+      }
+      const account = db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(sourceAccountId);
+      if (!account) throw Object.assign(new Error("源头邮箱不存在"), { status: 404 });
+      const sourceAppleId = normalizeIcloudAliasEmail(req.body?.source_apple_id);
+      if (sourceAppleId && sourceAppleId !== String(account.email || "").toLowerCase()) {
+        throw Object.assign(new Error("Apple ID 与所选源头邮箱不一致"), { status: 409 });
+      }
+      const emails = Array.isArray(req.body?.emails) ? req.body.emails : [];
+      importIcloudAliases(db, account, emails, {
+        type: "hide_my_email",
+        replace: false,
+        purpose: "Apple 新接口创建",
+        remoteConfirmed: true,
+      });
+      const normalized = [...new Set(emails.map(normalizeIcloudAliasEmail).filter(Boolean))];
+      const items = normalized.length ? db.prepare(`
+        SELECT * FROM addresses
+        WHERE account_id = ? AND strategy = 'icloud_hide_my_email'
+          AND address IN (${normalized.map(() => "?").join(",")})
+        ORDER BY created_at DESC
+      `).all(sourceAccountId, ...normalized) : [];
+      res.json({ imported: items.length, items });
+    } catch (error) { next(error); }
+  });
+  app.delete("/api/internal/icloud-privacy/address", async (req, res, next) => {
+    try {
+      const sourceAccountId = Number(req.body?.source_account_id);
+      const email = normalizeIcloudAliasEmail(req.body?.email);
+      if (!Number.isSafeInteger(sourceAccountId) || sourceAccountId <= 0 || !email) {
+        throw Object.assign(new Error("源头邮箱 ID 或隐藏邮箱无效"), { status: 400 });
+      }
+      const item = db.prepare(`
+        SELECT * FROM addresses
+        WHERE account_id = ? AND address = ? COLLATE NOCASE
+          AND kind = 'official' AND strategy = 'icloud_hide_my_email'
+      `).get(sourceAccountId, email);
+      if (!item) return res.json({ deleted: 0 });
+      if (pickup.registrationProtectionEnabled()) {
+        const inventory = await pickup.listStatuses();
+        const listed = (inventory.items || []).find((entry) => String(entry.email || "").toLowerCase() === email);
+        if (listed && ["ready", "sold"].includes(listed.status)) {
+          throw Object.assign(new Error("这个隐藏邮箱已进入售卖库存，请先从取件站下架"), { status: 409 });
+        }
+      }
+      db.prepare("DELETE FROM addresses WHERE id = ?").run(item.id);
+      audit(db, sourceAccountId, "alias", "删除隐藏邮箱创建记录", email, { apple_remote_deleted: false });
+      return res.json({ deleted: 1 });
+    } catch (error) { return next(error); }
+  });
 
   registerEzCaptchaAdapter({
     app,
@@ -681,7 +756,10 @@ export function createApp(options = {}) {
     try { res.status(202).json({ items: await registration.createJobs(req.body || {}) }); } catch (error) { next(error); }
   });
   app.get("/api/registration/jobs", async (req, res, next) => {
-    try { res.json({ items: await registration.listJobs(req.query) }); } catch (error) { next(error); }
+    try {
+      const items = await registration.listJobs(req.query);
+      res.json({ items, counts: registration.jobCounts() });
+    } catch (error) { next(error); }
   });
   app.get("/api/registration/queue/control", async (_req, res, next) => {
     try { res.json(await registration.registrationQueueControl()); } catch (error) { next(error); }
@@ -717,7 +795,7 @@ export function createApp(options = {}) {
     try { res.json({ items: await registration.taskEvents(req.params.id) }); } catch (error) { next(error); }
   });
   app.get("/api/registration/accounts", async (_req, res, next) => {
-    try { res.json(await registration.listRegisteredAccounts()); } catch (error) { next(error); }
+    try { res.json(await registration.listRegisteredAccounts({ refreshUnchecked: false })); } catch (error) { next(error); }
   });
   app.post("/api/registration/accounts/import-local", async (req, res, next) => {
     try { res.status(201).json(await registration.importLocalAccounts(req.body || {})); } catch (error) { next(error); }
@@ -735,6 +813,9 @@ export function createApp(options = {}) {
   });
   app.post("/api/registration/accounts/check-jp-trial", async (req, res, next) => {
     try { res.json(await registration.checkRegisteredAccountTrials(req.body || {})); } catch (error) { next(error); }
+  });
+  app.post("/api/registration/accounts/check-momo", async (req, res, next) => {
+    try { res.json(await registration.checkRegisteredAccountMomoEligibility(req.body || {})); } catch (error) { next(error); }
   });
   app.patch("/api/registration/accounts/bulk-group", async (req, res, next) => {
     try { res.json(await registration.updateRegisteredAccountGroups(req.body || {})); } catch (error) { next(error); }
@@ -1106,6 +1187,7 @@ export function createApp(options = {}) {
     res.json(addressQuery(db, {
       accountId: req.query.accountId,
       kind: req.query.kind,
+      strategy: req.query.strategy,
       q: req.query.q,
       page: positive(req.query.page, 1, 10_000),
       limit: positive(req.query.limit, 50, 200),
@@ -1137,7 +1219,7 @@ export function createApp(options = {}) {
     } catch (error) { next(error); }
   });
 
-  app.delete("/api/addresses/:id", (req, res, next) => {
+  app.delete("/api/addresses/:id", async (req, res, next) => {
     try {
       const item = db.prepare(`
         SELECT addresses.*, source_accounts.provider AS source_provider
@@ -1150,6 +1232,13 @@ export function createApp(options = {}) {
         && isIcloudImportedStrategy(item.strategy);
       if (item.kind !== "split" && !importedIcloudAddress) {
         throw Object.assign(new Error("源头号和官方别名需要在对应邮箱官网删除"), { status: 409 });
+      }
+      if (importedIcloudAddress && pickup.registrationProtectionEnabled()) {
+        const inventory = await pickup.listStatuses();
+        const listed = (inventory.items || []).find((entry) => String(entry.email || "").toLowerCase() === String(item.address || "").toLowerCase());
+        if (listed && ["ready", "sold"].includes(listed.status)) {
+          throw Object.assign(new Error("这个邮箱已进入售卖库存，请先从取件站下架"), { status: 409 });
+        }
       }
       db.prepare("DELETE FROM addresses WHERE id = ?").run(item.id);
       audit(

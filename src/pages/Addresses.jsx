@@ -24,10 +24,10 @@ function EditAddressModal({ item, onClose, onSaved }) {
   return <Modal open={Boolean(item)} onClose={onClose} title="编辑地址" description={item?.address} footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" loading={saving} onClick={save}>保存</Button></>}><div className="form-stack"><FormField label="标签"><input value={form.label} onChange={(event) => setForm({ ...form, label: event.target.value })} /></FormField><FormField label="用途"><input value={form.purpose} onChange={(event) => setForm({ ...form, purpose: event.target.value })} /></FormField><FormField label="状态"><select value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value })}><option value="active">使用中</option><option value="disabled">已停用</option></select></FormField></div></Modal>;
 }
 
-export default function AddressesPage({ refreshKey, onDataChange, onNavigate, initialAccountId }) {
+export default function AddressesPage({ refreshKey, onDataChange, onNavigate, initialAccountId, initialKind, initialStrategy }) {
   const [accounts, setAccounts] = useState([]);
   const [accountId, setAccountId] = useState(initialAccountId ? String(initialAccountId) : "all");
-  const [kind, setKind] = useState("all");
+  const [kind, setKind] = useState(initialStrategy === "icloud_hide_my_email" ? "hidden" : initialKind || "all");
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [data, setData] = useState(null);
@@ -38,11 +38,17 @@ export default function AddressesPage({ refreshKey, onDataChange, onNavigate, in
   const toast = useToast();
   const load = async () => {
     try {
-      const [accountData, addressData] = await Promise.all([api("/api/accounts"), api(`/api/addresses${queryString({ accountId, kind, q: search, page, limit: 50 })}`)]);
+      const apiKind = kind === "hidden" ? "official" : kind;
+      const strategy = kind === "hidden" ? "icloud_hide_my_email" : "";
+      const [accountData, addressData] = await Promise.all([api("/api/accounts"), api(`/api/addresses${queryString({ accountId, kind: apiKind, strategy, q: search, page, limit: 50 })}`)]);
       setAccounts(accountData.items); setData(addressData);
     } catch (error) { toast(error.message, "error"); }
   };
   useEffect(() => { if (initialAccountId) setAccountId(String(initialAccountId)); }, [initialAccountId]);
+  useEffect(() => {
+    if (initialStrategy === "icloud_hide_my_email") setKind("hidden");
+    else if (initialKind) setKind(initialKind);
+  }, [initialKind, initialStrategy]);
   useEffect(() => { const timer = window.setTimeout(load, 120); return () => window.clearTimeout(timer); }, [accountId, kind, search, page, refreshKey]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => setPage(1), [accountId, kind, search]);
   useEffect(() => setSelected([]), [accountId, kind, search, page]);
@@ -70,7 +76,7 @@ export default function AddressesPage({ refreshKey, onDataChange, onNavigate, in
     const count = Number(value);
     return value === true || String(value).toLowerCase() === "true" || (Number.isFinite(count) && count > 0);
   };
-  const kindItems = [{ value: "all", label: "全部" }, { value: "primary", label: "源头号" }, ...(supportsAddressAliases ? [{ value: "official", label: selectedAccount?.provider === "icloud" ? "iCloud 地址" : "官方别名" }] : []), { value: "split", label: "分裂地址" }];
+  const kindItems = [{ value: "all", label: "全部" }, { value: "primary", label: "源头号" }, ...(supportsAddressAliases ? [{ value: "official", label: selectedAccount?.provider === "icloud" ? "iCloud 地址" : "官方别名" }] : []), ...(selectedAccount?.provider === "icloud" ? [{ value: "hidden", label: "隐藏邮箱" }] : []), { value: "split", label: "分裂地址" }];
   useEffect(() => { if (!supportsAddressAliases && kind === "official") setKind("all"); }, [supportsAddressAliases, kind]);
   const copy = async (address) => { await copyText(address); toast("地址已复制"); };
   const remove = async (item) => {
@@ -103,7 +109,7 @@ export default function AddressesPage({ refreshKey, onDataChange, onNavigate, in
       setSelected([]); setDeleteMode(null); await load(); onDataChange();
     } catch (error) { toast(error.message, "error"); } finally { setDeleting(false); }
   };
-  const exportHref = appUrl(`/api/export/addresses.csv${queryString({ accountId, kind })}`);
+  const exportHref = appUrl(`/api/export/addresses.csv${queryString({ accountId, kind: kind === "hidden" ? "official" : kind, strategy: kind === "hidden" ? "icloud_hide_my_email" : "" })}`);
 
   return (
     <div className="page-stack addresses-page">

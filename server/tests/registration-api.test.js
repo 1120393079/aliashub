@@ -261,6 +261,8 @@ test("registration integration generates isolated addresses and exposes mailbox 
   const checkoutProxy = "http://de-user:de-password@de-proxy.example:8080";
   const trialProbeCalls = [];
   const trialProxy = "http://jp-user:jp-password@jp-proxy.example:8080";
+  const momoProbeCalls = [];
+  const momoProxy = "http://vn-user:vn-password@vn-proxy.example:8080";
   const runtime = createApp({
     db,
     graph,
@@ -276,9 +278,25 @@ test("registration integration generates isolated addresses and exposes mailbox 
     trialProbe: async ({ accessToken, proxy }) => {
       trialProbeCalls.push({ accessToken, proxy });
       const accountNumber = Number(String(accessToken).match(/(\d+)$/)?.[1]);
+      const eligible = accountNumber % 2 === 1;
       return {
-        eligible: accountNumber % 2 === 1,
-        evidence: "eligible_promo_campaigns.plus",
+        eligible,
+        amountDue: eligible ? 0 : 1_500,
+        currency: "JPY",
+        evidence: "checkout.jp.plus.final_amount_due.v1",
+      };
+    },
+    momoProxyResolver: async () => momoProxy,
+    momoProbe: async ({ accessToken, proxy }) => {
+      momoProbeCalls.push({ accessToken, proxy });
+      const accountNumber = Number(String(accessToken).match(/(\d+)$/)?.[1]);
+      const eligible = accountNumber % 2 === 1;
+      return {
+        eligible,
+        methods: eligible ? ["card", "momo"] : ["card", "paypal"],
+        evidence: eligible
+          ? "stripe.free_trial.tax_refreshed_methods.v2"
+          : "openai.free_trial.checkout_methods.v2",
       };
     },
   });
@@ -677,6 +695,14 @@ test("registration integration generates isolated addresses and exposes mailbox 
       assert.doesNotMatch(JSON.stringify(response.body), /kookeey-user|base-secret|50663419/i);
       const stored = db.prepare("SELECT message FROM registration_jobs WHERE id = ?").get(response.body.items[0].id);
       assert.deepEqual(stored, { message: "注册任务提交失败" });
+      const failedEvents = await jsonRequest(runtime.app, `/api/registration/jobs/${response.body.items[0].id}/events`);
+      assert.equal(failedEvents.response.status, 200);
+      assert.equal(failedEvents.body.items.length, 1);
+      assert.match(failedEvents.body.items[0].message, /注册失败：注册任务提交失败/);
+      assert.equal(failedEvents.body.items[0].detail.email, response.body.items[0].email);
+      const listed = await jsonRequest(runtime.app, "/api/registration/jobs?limit=500");
+      assert.equal(listed.body.counts.failed >= 1, true);
+      assert.equal(listed.body.counts.total >= listed.body.items.length, true);
     });
 
     await t.test("redacts proxy credentials and sessions from synced jobs and remote events", async () => {
@@ -1356,7 +1382,7 @@ test("registration integration generates isolated addresses and exposes mailbox 
       assert.equal(stored.length, 2);
       assert.deepEqual(stored.map((item) => item.status), ["eligible", "ineligible"]);
       assert.deepEqual(stored.map((item) => item.eligible), [1, 0]);
-      assert.ok(stored.every((item) => item.evidence === "eligible_promo_campaigns.plus" && item.error === ""));
+      assert.ok(stored.every((item) => item.evidence === "checkout.jp.plus.final_amount_due.v1" && item.error === ""));
       for (const item of response.body.accounts.items.filter((account) => ids.includes(Number(account.id)))) {
         assert.equal(item.trial_status, Number(item.id) === ids[0] ? "eligible" : "ineligible");
         assert.equal(item.trial_eligible, Number(item.id) === ids[0]);
@@ -1455,7 +1481,12 @@ test("registration integration generates isolated addresses and exposes mailbox 
           probeCalls += 1;
           markStarted();
           await gate;
-          return { eligible: true, evidence: "eligible_promo_campaigns.plus" };
+          return {
+            eligible: true,
+            amountDue: 0,
+            currency: "JPY",
+            evidence: "checkout.jp.plus.final_amount_due.v1",
+          };
         };
         const first = runtime.registration.checkRegisteredAccountTrials({ ids: [targetId] });
         await started;
@@ -1469,6 +1500,127 @@ test("registration integration generates isolated addresses and exposes mailbox 
       } finally {
         releaseProbe?.();
         runtime.registration.trialProbe = previousProbe;
+      }
+    });
+
+    await t.test("detects and persists MoMo eligibility without exposing credentials", async () => {
+      const before = await jsonRequest(runtime.app, "/api/registration/accounts");
+      const ids = before.body.items.slice(0, 2).map((item) => Number(item.id));
+      const previousProbeCalls = momoProbeCalls.length;
+      const response = await jsonRequest(runtime.app, "/api/registration/accounts/check-momo", {
+        method: "POST",
+        body: JSON.stringify({ ids: [ids[0], String(ids[1]), ids[0]] }),
+      });
+
+      assert.equal(response.response.status, 200);
+      assert.equal(response.body.requested, 2);
+      assert.equal(response.body.checked, 2);
+      assert.equal(response.body.eligible, 1);
+      assert.equal(response.body.ineligible, 1);
+      assert.equal(response.body.failed, 0);
+      assert.deepEqual(momoProbeCalls.slice(previousProbeCalls), [
+        { accessToken: "session-access-token-1", proxy: momoProxy },
+        { accessToken: "session-access-token-2", proxy: momoProxy },
+      ]);
+      assert.doesNotMatch(JSON.stringify(response.body), /session-access-token|vn-password|vn-proxy\.example/i);
+      const stored = db.prepare(`
+        SELECT external_account_id, status, eligible, methods, evidence, error
+        FROM registered_account_momo_checks
+        WHERE external_account_id IN (?, ?)
+        ORDER BY external_account_id
+      `).all(...ids.map(String));
+      assert.equal(stored.length, 2);
+      assert.deepEqual(stored.map((item) => item.status), ["eligible", "ineligible"]);
+      assert.deepEqual(stored.map((item) => item.eligible), [1, 0]);
+      assert.deepEqual(JSON.parse(stored[0].methods), ["card", "momo"]);
+      assert.deepEqual(JSON.parse(stored[1].methods), ["card", "paypal"]);
+      assert.deepEqual(stored.map((item) => item.evidence), [
+        "stripe.free_trial.tax_refreshed_methods.v2",
+        "openai.free_trial.checkout_methods.v2",
+      ]);
+      assert.ok(stored.every((item) => item.error === ""));
+      for (const item of response.body.accounts.items.filter((account) => ids.includes(Number(account.id)))) {
+        assert.equal(item.momo_status, Number(item.id) === ids[0] ? "eligible" : "ineligible");
+        assert.equal(item.momo_eligible, Number(item.id) === ids[0]);
+        assert.ok(Array.isArray(item.momo_methods) && item.momo_methods.length > 0);
+        assert.ok(Date.parse(item.momo_checked_at));
+      }
+
+      const unrelated = await jsonRequest(runtime.app, "/api/registration/accounts/check-momo", {
+        method: "POST",
+        body: JSON.stringify({ ids: [999] }),
+      });
+      assert.equal(unrelated.response.status, 409);
+    });
+
+    await t.test("refuses MoMo detection before writing results when the proxy pool has no VN exit", async () => {
+      const before = await jsonRequest(runtime.app, "/api/registration/accounts");
+      const targetId = Number(before.body.items[0].id);
+      const previousResolver = runtime.registration.momoProxyResolver;
+      const previousProxyPool = getSetting(db, "registration_proxy_pool", "[]");
+      const previousInspectionHandler = client.proxyInspectionHandler;
+      const previousProbeCalls = momoProbeCalls.length;
+      db.prepare("DELETE FROM registered_account_momo_checks WHERE external_account_id = ?").run(String(targetId));
+      try {
+        runtime.registration.momoProxyResolver = null;
+        runtime.registration.momoProxyCache = { proxy: "", expiresAt: 0 };
+        setSetting(db, "registration_proxy_pool", JSON.stringify(["http://jp-proxy.example:8080"]));
+        client.proxyInspectionHandler = () => ({
+          samples: [{ ip: "203.0.113.30", country_code: "JP" }],
+        });
+
+        const response = await jsonRequest(runtime.app, "/api/registration/accounts/check-momo", {
+          method: "POST",
+          body: JSON.stringify({ ids: [targetId] }),
+        });
+
+        assert.equal(response.response.status, 409);
+        assert.match(response.body.error, /没有检测到 VN 出口/);
+        assert.equal(momoProbeCalls.length, previousProbeCalls);
+        assert.equal(db.prepare(`
+          SELECT COUNT(*) AS count FROM registered_account_momo_checks
+          WHERE external_account_id = ?
+        `).get(String(targetId)).count, 0);
+      } finally {
+        runtime.registration.momoProxyResolver = previousResolver;
+        runtime.registration.momoProxyCache = { proxy: "", expiresAt: 0 };
+        client.proxyInspectionHandler = previousInspectionHandler;
+        setSetting(db, "registration_proxy_pool", previousProxyPool);
+      }
+    });
+
+    await t.test("stops a MoMo batch after a rate-limited preflight without persisting a verdict", async () => {
+      const before = await jsonRequest(runtime.app, "/api/registration/accounts");
+      const ids = before.body.items.slice(0, 2).map((item) => Number(item.id));
+      const previousProbe = runtime.registration.momoProbe;
+      let rateLimitedCalls = 0;
+      db.prepare(`
+        DELETE FROM registered_account_momo_checks
+        WHERE external_account_id IN (?, ?)
+      `).run(...ids.map(String));
+      try {
+        runtime.registration.momoProbe = async () => {
+          rateLimitedCalls += 1;
+          throw Object.assign(new Error("MoMo Checkout 创建失败 HTTP 429"), { status: 429 });
+        };
+        const response = await jsonRequest(runtime.app, "/api/registration/accounts/check-momo", {
+          method: "POST",
+          body: JSON.stringify({ ids }),
+        });
+
+        assert.equal(response.response.status, 200);
+        assert.equal(response.body.requested, 2);
+        assert.equal(response.body.checked, 0);
+        assert.equal(response.body.failed, 0);
+        assert.equal(response.body.rate_limited, 1);
+        assert.equal(response.body.skipped, 1);
+        assert.equal(rateLimitedCalls, 1);
+        assert.equal(db.prepare(`
+          SELECT COUNT(*) AS count FROM registered_account_momo_checks
+          WHERE external_account_id IN (?, ?)
+        `).get(...ids.map(String)).count, 0);
+      } finally {
+        runtime.registration.momoProbe = previousProbe;
       }
     });
 
@@ -1997,7 +2149,8 @@ test("registration integration generates isolated addresses and exposes mailbox 
           recipients: [job.email],
           subject: "Your verification code",
           preview: "Use 654321 to continue",
-          body: "Your verification code is 654321",
+          body: "<html><body><strong>Your verification code is 654321</strong></body></html>",
+          bodyContentType: "html",
           verificationCode: "654321",
           receivedAt,
         }, {
@@ -2046,6 +2199,7 @@ test("registration integration generates isolated addresses and exposes mailbox 
       assert.equal(registeredMailbox.body.emails.length, 1);
       assert.equal(registeredMailbox.body.emails[0].verification_code, "654321");
       assert.equal(registeredMailbox.body.emails[0].body_preview, "Use 654321 to continue");
+      assert.equal(registeredMailbox.body.emails[0].body_content_type, "html");
       assert.equal(graph.scanCalls, 1);
 
       for (const top of ["0", "1.5", "51", "not-a-number"]) {
@@ -2144,6 +2298,7 @@ test("registration integration generates isolated addresses and exposes mailbox 
       assert.equal(removed.response.status, 200);
       assert.equal(removed.body.requested, 2);
       assert.equal(removed.body.deleted, 2);
+      assert.deepEqual(removed.body.deleted_ids, targets.map((item) => Number(item.id)));
       assert.deepEqual(removed.body.failed, []);
 
       const after = await jsonRequest(runtime.app, "/api/registration/accounts");

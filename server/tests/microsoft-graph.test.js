@@ -229,7 +229,7 @@ test("refreshes OAuth and extracts verification codes through Microsoft Graph", 
               id: "message-3",
               subject: "Weekly newsletter",
               bodyPreview: "No verification value here.",
-              body: { contentType: "text", content: "N".repeat(100_001) },
+              body: { contentType: "text", content: "N".repeat(1_000_001) },
               receivedDateTime: "2026-07-12T04:00:00.000Z",
               from: { emailAddress: { address: "news@example.net" } },
               toRecipients: [{ emailAddress: { address: "source@hotmail.com" } }],
@@ -251,7 +251,7 @@ test("refreshes OAuth and extracts verification codes through Microsoft Graph", 
     assert.equal(tokenBody.get("refresh_token"), "old-refresh-token");
     assert.match(tokenBody.get("scope"), /Mail\.Read/);
     assert.equal(messageRequest.options.headers.Authorization, "Bearer fresh-access-token");
-    assert.equal(messageRequest.options.headers.Prefer, 'outlook.body-content-type="text"');
+    assert.equal(messageRequest.options.headers.Prefer, 'outlook.body-content-type="html"');
     const query = new URL(messageRequest.target).searchParams;
     assert.equal(query.get("$top"), "75");
     assert.match(query.get("$select"), /bodyPreview/);
@@ -271,7 +271,7 @@ test("refreshes OAuth and extracts verification codes through Microsoft Graph", 
     assert.equal(result.messages[0].webLink, "https://outlook.live.com/mail/0/inbox/id/message-1");
     assert.deepEqual(result.messages[0].toRecipients, [{ name: "", address: "source+shop@hotmail.com" }]);
     assert.equal(result.messages[2].verificationCode, "");
-    assert.equal(result.messages[2].body.length, 100_000);
+    assert.equal(result.messages[2].body.length, 1_000_000);
     assert.equal(result.messages[2].bodyTruncated, true);
     assert.equal(result.items.length, 2);
     assert.deepEqual(result.items.map((item) => item.code), ["482913", "731055"]);

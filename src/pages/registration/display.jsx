@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { AlertTriangle, Ban, Check, CircleStop, ClipboardCopy, Copy, Database, Eye, EyeOff, KeyRound, LoaderCircle, Mail, Pause, Pencil, Play, RefreshCw, ScrollText, ShieldCheck, Trash2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { AlertTriangle, ArrowLeft, Ban, Check, ChevronRight, CircleStop, ClipboardCopy, Copy, Database, Eye, EyeOff, KeyRound, LoaderCircle, Mail, Pause, Pencil, Play, RefreshCw, ScrollText, ShieldCheck, Trash2 } from "lucide-react";
 import { Button, IconButton, LoadingBlock, StatusBadge } from "../../components.jsx";
 import { formatDate, relativeTime } from "../../utils.js";
 import {
@@ -160,7 +160,7 @@ export function JobCommands({ job, onLogs, onPause, onResume, onCancel, onReleas
   const resumable = job.status === "paused";
   const cancellable = pausable || resumable;
   const releasable = releasableStatuses.has(job.status);
-  return <div className="row-actions"><button className="registration-row-command" title="查看日志" onClick={() => onLogs(job)}><ScrollText size={15} /></button>{pausable && <button className="registration-row-command warning" disabled={busy} title="暂停后续注册" onClick={() => onPause(job)}><Pause size={15} /></button>}{resumable && <button className="registration-row-command" disabled={busy} title="继续注册" onClick={() => onResume(job)}><Play size={15} /></button>}{cancellable && <button className="registration-row-command danger" disabled={busy} title="取消剩余注册" onClick={() => onCancel(job.id)}><Ban size={15} /></button>}{releasable && <button className="registration-row-command warning" disabled={busy} title="强制释放任务" onClick={() => onRelease(job)}><CircleStop size={15} /></button>}{deletableStatuses.has(job.status) && <button className="registration-row-command danger" title="删除注册记录" onClick={() => onDelete(job)}><Trash2 size={15} /></button>}</div>;
+  return <div className="row-actions"><button className="registration-row-command registration-log-command" aria-label={`查看 ${job.email || "注册任务"} 的日志`} title="查看邮箱注册日志" onClick={() => onLogs(job)}><ScrollText size={15} /><span>日志</span></button>{pausable && <button className="registration-row-command warning" disabled={busy} title="暂停后续注册" onClick={() => onPause(job)}><Pause size={15} /></button>}{resumable && <button className="registration-row-command" disabled={busy} title="继续注册" onClick={() => onResume(job)}><Play size={15} /></button>}{cancellable && <button className="registration-row-command danger" disabled={busy} title="取消剩余注册" onClick={() => onCancel(job.id)}><Ban size={15} /></button>}{releasable && <button className="registration-row-command warning" disabled={busy} title="强制释放任务" onClick={() => onRelease(job)}><CircleStop size={15} /></button>}{deletableStatuses.has(job.status) && <button className="registration-row-command danger" title="删除注册记录" onClick={() => onDelete(job)}><Trash2 size={15} /></button>}</div>;
 }
 
 export function AccountCommands({ item, checking, busy = false, onRefresh, onPassword, onNfapi, onMailbox, onEdit, onCopy, onDelete }) {
@@ -178,6 +178,12 @@ export function AccountCommands({ item, checking, busy = false, onRefresh, onPas
   </div>;
 }
 
+function isHtmlEmail(item, body) {
+  const contentType = String(item?.body_content_type || item?.bodyContentType || item?.content_type || "").toLowerCase();
+  return contentType === "html"
+    || /^\s*(?:<!doctype\s+html\b|<html\b|<head\b|<body\b)/i.test(String(body || ""));
+}
+
 export function OAuthMailboxPanel({
   email,
   data,
@@ -192,10 +198,21 @@ export function OAuthMailboxPanel({
   emptyDescription = "打开 OAuth 登录后，新邮件会自动出现在这里。",
 }) {
   const emails = data?.emails || [];
+  const [selectedEmailKey, setSelectedEmailKey] = useState("");
+  const emailEntries = emails.map((item, index) => ({
+    item,
+    key: String(item.id || item.message_id || `${item.date || "email"}-${index}`),
+  }));
+  const selectedEmail = emailEntries.find((entry) => entry.key === selectedEmailKey)?.item || null;
+  const selectedEmailBody = selectedEmail?.body || selectedEmail?.text || selectedEmail?.body_preview || selectedEmail?.preview || "";
+  const selectedEmailIsHtml = Boolean(selectedEmailBody) && isHtmlEmail(selectedEmail, selectedEmailBody);
   const initialError = Boolean(error && !data);
   const footerState = initialError
     ? "读取失败"
     : updatedAt ? `更新于 ${relativeTime(updatedAt)}` : loading ? "正在连接邮箱" : "尚未更新";
+
+  useEffect(() => setSelectedEmailKey(""), [email]);
+
   return (
     <aside className="nfapi-oauth-mailbox" aria-label={`${email || "当前账号"}的${title}`} aria-busy={loading}>
       <header>
@@ -208,13 +225,26 @@ export function OAuthMailboxPanel({
       <div className="nfapi-mailbox-content" aria-live="polite">
         {!data && loading && !error ? <LoadingBlock rows={5} /> : initialError ? <div className="nfapi-mailbox-empty failed"><AlertTriangle size={22} /><b>邮箱读取失败</b><span>{error}</span><Button size="sm" icon={RefreshCw} loading={loading} onClick={onRefresh}>立即重试</Button></div> : <>
           {error && <div className="nfapi-mailbox-error"><AlertTriangle size={14} /><span>{error}</span></div>}
-          {emails.length ? <div className="nfapi-mail-list" role="list">{emails.map((item, index) => (
-          <article className="nfapi-mail-item" role="listitem" key={item.id || item.message_id || `${item.date}-${index}`}>
-            <header><b title={item.from || "OpenAI"}>{item.from || "OpenAI"}</b><time dateTime={item.date}>{relativeTime(item.date)}</time></header>
-            {item.verification_code && <button className="nfapi-mail-code" type="button" title="复制验证码" aria-label={`复制验证码 ${item.verification_code}`} onClick={() => onCopyCode(item.verification_code)}><span>{item.verification_code}</span><Copy size={14} /></button>}
-            <strong>{item.subject || "（无主题）"}</strong>
-            <p>{item.body_preview || item.preview || item.text || "没有邮件预览"}</p>
-          </article>
+          {selectedEmail ? <article className="nfapi-mail-detail" aria-label="邮件详情">
+            <header>
+              <IconButton icon={ArrowLeft} label="返回邮件列表" size={30} onClick={() => setSelectedEmailKey("")} />
+              <span><strong>{selectedEmail.subject || "（无主题）"}</strong><small title={selectedEmail.from || "OpenAI"}>{selectedEmail.from || "OpenAI"}</small></span>
+            </header>
+            <dl className="nfapi-mail-detail-meta">
+              <div><dt>发件人</dt><dd>{selectedEmail.from || "OpenAI"}</dd></div>
+              <div><dt>收件人</dt><dd>{email || "-"}</dd></div>
+              <div><dt>接收时间</dt><dd>{formatDate(selectedEmail.date)}</dd></div>
+            </dl>
+            {selectedEmail.verification_code && <button className="nfapi-mail-code nfapi-mail-detail-code" type="button" title="复制验证码" aria-label={`复制验证码 ${selectedEmail.verification_code}`} onClick={() => onCopyCode(selectedEmail.verification_code)}><span>{selectedEmail.verification_code}</span><Copy size={14} /></button>}
+            <div className={`nfapi-mail-detail-body ${selectedEmailIsHtml ? "nfapi-mail-detail-html" : ""}`}>{selectedEmailBody ? (selectedEmailIsHtml ? <iframe className="nfapi-mail-html-frame" title={`${selectedEmail.subject || "邮件"}正文`} sandbox="" referrerPolicy="no-referrer" srcDoc={selectedEmailBody} /> : <p>{selectedEmailBody}</p>) : <span>这封邮件没有正文内容。</span>}</div>
+          </article> : emails.length ? <div className="nfapi-mail-list" role="list">{emailEntries.map(({ item, key }) => (
+            <article className="nfapi-mail-item" role="listitem" key={key}>
+              <header><b title={item.from || "OpenAI"}>{item.from || "OpenAI"}</b><span><time dateTime={item.date}>{relativeTime(item.date)}</time><ChevronRight size={13} aria-hidden="true" /></span></header>
+              <button className="nfapi-mail-open" type="button" title="查看邮件详情" aria-label={`查看邮件详情：${item.subject || "无主题"}`} onClick={() => setSelectedEmailKey(key)} />
+              {item.verification_code && <button className="nfapi-mail-code" type="button" title="复制验证码" aria-label={`复制验证码 ${item.verification_code}`} onClick={() => onCopyCode(item.verification_code)}><span>{item.verification_code}</span><Copy size={14} /></button>}
+              <strong>{item.subject || "（无主题）"}</strong>
+              <p>{item.body_preview || item.preview || item.text || "没有邮件预览"}</p>
+            </article>
           ))}</div> : <div className="nfapi-mailbox-empty"><Mail size={22} /><b>{emptyTitle}</b><span>{emptyDescription}</span></div>}
         </>}
       </div>

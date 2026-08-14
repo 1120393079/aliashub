@@ -327,6 +327,22 @@ const schema = `
   CREATE INDEX IF NOT EXISTS idx_registered_account_trial_checks_email
     ON registered_account_trial_checks(email COLLATE NOCASE, updated_at DESC);
 
+  CREATE TABLE IF NOT EXISTS registered_account_momo_checks (
+    external_account_id TEXT PRIMARY KEY,
+    email TEXT NOT NULL COLLATE NOCASE,
+    status TEXT NOT NULL DEFAULT 'unchecked',
+    eligible INTEGER,
+    methods TEXT NOT NULL DEFAULT '[]',
+    evidence TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    checked_at TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_registered_account_momo_checks_email
+    ON registered_account_momo_checks(email COLLATE NOCASE, updated_at DESC);
+
   CREATE TABLE IF NOT EXISTS registered_account_nfapi_links (
     external_account_id TEXT NOT NULL,
     email TEXT NOT NULL COLLATE NOCASE,
@@ -771,7 +787,7 @@ export function createDatabase({ filename, seedDemo = false } = {}) {
     extension_api_key: "",
     registration_connector_key: "",
     registration_proxy_pool: "[]",
-    nfapi_base_url: "",
+    nfapi_base_url: "https://nfapi.naturalflower.cn",
     nfapi_admin_api_key_encrypted: "",
     nfapi_import_defaults: "{}",
     nfapi_last_connected_at: "",

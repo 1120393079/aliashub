@@ -45,18 +45,6 @@ function sourceInventoryDatabase() {
   return db;
 }
 
-test("pickup configuration stays disabled until a service URL is explicitly configured", () => {
-  const disabled = new PickupService({ registration: {}, password: "secret" });
-  const enabled = new PickupService({
-    registration: {},
-    baseUrl: "http://127.0.0.1:4190",
-    password: "secret",
-  });
-
-  assert.equal(disabled.configuration().enabled, false);
-  assert.equal(enabled.configuration().enabled, true);
-});
-
 test("pickup publishing sends an available password but never sends the access token", async () => {
   const requests = [];
   const registration = {

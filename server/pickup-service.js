@@ -112,9 +112,8 @@ export class PickupService {
   } = {}) {
     this.db = db;
     this.registration = registration;
-    this.serviceConfigured = Boolean(String(baseUrl || "").trim());
     this.baseUrl = normalizeBaseUrl(baseUrl);
-    this.publicUrl = String(publicUrl || baseUrl || "http://127.0.0.1:4190").trim().replace(/\/+$/, "");
+    this.publicUrl = String(publicUrl || "https://pickup.naturalflower.cn").trim().replace(/\/+$/, "");
     this.username = String(username || "admin");
     this.password = String(password || "");
     this.fetch = fetchFn;
@@ -122,10 +121,14 @@ export class PickupService {
 
   configuration() {
     return {
-      enabled: Boolean(this.serviceConfigured && this.password && this.registration && this.fetch),
+      enabled: Boolean(this.password && this.registration && this.fetch),
       public_url: this.publicUrl,
       admin_url: `${this.publicUrl}/admin`,
     };
+  }
+
+  registrationProtectionEnabled() {
+    return Boolean(this.password && this.fetch);
   }
 
   sourceAddresses() {
@@ -222,8 +225,8 @@ export class PickupService {
   }
 
   async request(path, options = {}) {
-    if (!this.serviceConfigured || !this.password) {
-      throw publicError("取件站服务地址或管理员密码未配置", 503, "PICKUP_NOT_CONFIGURED");
+    if (!this.password) {
+      throw publicError("取件站管理员密码未配置", 503, "PICKUP_NOT_CONFIGURED");
     }
     const response = await this.fetch(`${this.baseUrl}${path}`, {
       ...options,

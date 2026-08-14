@@ -11,7 +11,7 @@ const SCAN_OVERLAP_MS = 10 * 60_000;
 const INITIAL_SCAN_DAYS = 14;
 const MESSAGE_LIMIT = 75;
 const SOURCE_LIMIT = 1024 * 1024;
-const MAIL_BODY_LIMIT = 100_000;
+const MAIL_BODY_LIMIT = 1_000_000;
 
 function errorWithStatus(message, status, code) {
   return Object.assign(new Error(message), { status, code });
@@ -57,6 +57,10 @@ function htmlToText(value) {
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+function looksLikeHtml(value) {
+  return /^\s*(?:<!doctype\s+html\b|<html\b|<head\b|<body\b)/i.test(String(value || ""));
 }
 
 function mailboxList(value) {
@@ -286,12 +290,15 @@ export class ICloudImapClient {
     ])];
     const recipient = recipients[0] || account.email;
     const subject = String(parsed.subject || envelope.subject || "(无主题)").trim() || "(无主题)";
-    const rawBody = String(parsed.text || "").trim()
-      || htmlToText(parsed.html)
-      || parseSource.toString("utf8");
+    const parsedText = String(parsed.text || "").trim();
+    const parsedHtml = String(parsed.html || "").trim();
+    const htmlBody = parsedHtml || (looksLikeHtml(parsedText) ? parsedText : "");
+    const fallbackBody = parseSource.toString("utf8");
+    const rawBody = htmlBody || parsedText || fallbackBody;
+    const readableBody = htmlBody ? htmlToText(htmlBody) : (parsedText || fallbackBody);
     const body = rawBody.slice(0, MAIL_BODY_LIMIT);
-    const preview = body.replace(/\s+/g, " ").trim().slice(0, 500);
-    const code = codeFromText(`${subject}\n${preview}\n${body}`);
+    const preview = readableBody.replace(/\s+/g, " ").trim().slice(0, 500);
+    const code = codeFromText(`${subject}\n${preview}\n${readableBody}`);
     const graphMessageId = `icloud:${uidValidity}:${uid}`;
     const receivedAt = parsedDate(parsed.date, message.internalDate, envelope.date);
     const isRead = message.flags instanceof Set
@@ -311,7 +318,7 @@ export class ICloudImapClient {
         subject,
         preview,
         body,
-        bodyContentType: "text",
+        bodyContentType: htmlBody ? "html" : "text",
         bodyTruncated: sourceTruncated || rawBody.length > MAIL_BODY_LIMIT,
         verificationCode: code,
         webLink: "https://www.icloud.com/mail/",

@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { generateSplits, persistInboxScanResult } from "./account-service.js";
+import { generateSplits, parseJson, persistInboxScanResult } from "./account-service.js";
 import { isIcloudImportedStrategy } from "./address-generator.js";
 import {
   getSetting,
@@ -31,7 +31,8 @@ import {
 import { parseLocalAccountImport } from "./registration-import.js";
 import { serializeInboxLinkEntry } from "./inbox-link-pool.js";
 import { checkoutTypeFromAccount, probeCheckoutType } from "./checkout-type-probe.js";
-import { probeJpTrialEligibility } from "./jp-trial-eligibility-probe.js";
+import { JP_ZERO_TRIAL_EVIDENCE, probeJpTrialEligibility } from "./jp-trial-eligibility-probe.js";
+import { MOMO_CHECK_EVIDENCES, probeMomoEligibility } from "./momo-eligibility-probe.js";
 
 const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled", "interrupted"]);
 const ACTIVE_STATUSES = new Set(["pending", "claimed", "running", "paused", "cancel_requested"]);
@@ -41,6 +42,34 @@ const ACCOUNT_STATUS_REFRESH_BATCH_SIZE = 20;
 const CHECKOUT_CHECK_CONCURRENCY = 2;
 const CHECKOUT_ACCOUNT_COOLDOWN_MS = 30 * 60 * 1000;
 const TRIAL_CHECK_CONCURRENCY = 2;
+const MOMO_CHECK_CONCURRENCY = 2;
+const PICKUP_REGISTRATION_BLOCKED_STATUSES = new Set(["ready", "sold", "disabled"]);
+
+function pickupInventoryByEmail(items = []) {
+  const inventory = new Map();
+  for (const item of items) {
+    const email = String(item?.email || "").trim().toLowerCase();
+    const status = String(item?.status || "").trim().toLowerCase();
+    if (email && PICKUP_REGISTRATION_BLOCKED_STATUSES.has(status)) inventory.set(email, status);
+  }
+  return inventory;
+}
+
+function directIcloudRegistrationState(jobs = []) {
+  const occupied = occupiedAliasHistory(jobs);
+  const active = jobs.some((job) => RELEASABLE_JOB_STATUSES.has(String(job.status || "")));
+  const completed = jobs.some((job) => job.status === "completed");
+  const disabled = active || completed || occupied.count > 0;
+  return {
+    active,
+    completed,
+    disabled,
+    occupied,
+    state: active ? "in_progress"
+      : occupied.count > 0 ? "occupied"
+        : completed ? "used" : "available",
+  };
+}
 
 function normalizeSelectedIds(input, label, maximum = 500) {
   if (!Array.isArray(input?.ids)) {
@@ -1312,11 +1341,19 @@ function checkoutCheckError(value) {
 }
 
 function trialCheckError(value) {
-  const source = value?.message || value?.error || value || "日本免费试用资格检测失败";
+  const source = value?.message || value?.error || value || "日本 0 元 Checkout 检测失败";
   return safeRemoteText(redactProxySecrets(source)
     .replace(/\b(?:Bearer\s+)?eyJ[A-Za-z0-9._-]+/gi, "[REDACTED]")
-    .replace(/\b(?:cs_live|oaics)_[A-Za-z0-9_-]+/gi, "[REDACTED]"), 180)
-    || "日本免费试用资格检测失败";
+    .replace(/\b(?:cs_(?:live|test)|oaics)_[A-Za-z0-9_-]+/gi, "[REDACTED]"), 180)
+    || "日本 0 元 Checkout 检测失败";
+}
+
+function momoCheckError(value) {
+  const source = value?.message || value?.error || value || "MoMo 资格检测失败";
+  return safeRemoteText(redactProxySecrets(source)
+    .replace(/\b(?:Bearer\s+)?eyJ[A-Za-z0-9._-]+/gi, "[REDACTED]")
+    .replace(/\b(?:cs_(?:live|test)|pk_(?:live|test))_[A-Za-z0-9_-]+/gi, "[REDACTED]"), 180)
+    || "MoMo 资格检测失败";
 }
 
 function publicPasswordSetupTask(task) {
@@ -1419,7 +1456,7 @@ function identityFromEvents(events = []) {
 }
 
 export class RegistrationService {
-  constructor({ db, graph, client, publicBaseUrl, mailboxBaseUrl, browserUrl, inboxLinkMailboxes = null, nfapiCredentialSync = null, checkoutProbe = probeCheckoutType, checkoutProxyResolver = null, trialProbe = probeJpTrialEligibility, trialProxyResolver = null } = {}) {
+  constructor({ db, graph, client, publicBaseUrl, mailboxBaseUrl, browserUrl, inboxLinkMailboxes = null, pickup = null, nfapiCredentialSync = null, checkoutProbe = probeCheckoutType, checkoutProxyResolver = null, trialProbe = probeJpTrialEligibility, trialProxyResolver = null, momoProbe = probeMomoEligibility, momoProxyResolver = null } = {}) {
     this.db = db;
     this.graph = graph;
     this.client = client;
@@ -1427,6 +1464,7 @@ export class RegistrationService {
     this.mailboxBaseUrl = String(mailboxBaseUrl || publicBaseUrl || "").replace(/\/$/, "");
     this.browserUrl = browserUrl || "/alias-hub/browser/vnc.html?autoconnect=true&resize=scale&path=websockify";
     this.inboxLinkMailboxes = inboxLinkMailboxes;
+    this.pickup = pickup;
     this.scanPromises = new Map();
     this.accountAccessTokenRefreshes = new Map();
     this.accountCheckoutChecks = new Map();
@@ -1438,6 +1476,10 @@ export class RegistrationService {
     this.trialProbe = trialProbe;
     this.trialProxyResolver = trialProxyResolver;
     this.trialProxyCache = { proxy: "", expiresAt: 0 };
+    this.accountMomoChecks = new Map();
+    this.momoProbe = momoProbe;
+    this.momoProxyResolver = momoProxyResolver;
+    this.momoProxyCache = { proxy: "", expiresAt: 0 };
     this.accountStatusRefreshAttempts = new Map();
     this.accountStatusCheckOutcomes = new Map();
     this.nfapiCredentialSync = nfapiCredentialSync;
@@ -1450,6 +1492,25 @@ export class RegistrationService {
       }
     } catch {
       // Keep the in-memory Map fallback for callers using an older test database.
+    }
+  }
+
+  pickupRegistrationProtectionEnabled() {
+    return Boolean(this.pickup?.registrationProtectionEnabled?.());
+  }
+
+  async pickupRegistrationInventory({ required = false } = {}) {
+    if (!this.pickupRegistrationProtectionEnabled()) return new Map();
+    try {
+      const result = await this.pickup.listStatuses();
+      return pickupInventoryByEmail(result?.items);
+    } catch (error) {
+      if (!required) return null;
+      throw Object.assign(new Error("取件站库存状态读取失败，为避免误用售卖邮箱，已停止创建注册任务"), {
+        status: 409,
+        code: "PICKUP_REGISTRATION_STATUS_UNAVAILABLE",
+        cause: error,
+      });
     }
   }
 
@@ -1491,6 +1552,8 @@ export class RegistrationService {
     const proxies = parseProxyPool(input);
     setSetting(this.db, "registration_proxy_pool", JSON.stringify(proxies));
     this.checkoutProxyCache = { proxy: "", expiresAt: 0 };
+    this.trialProxyCache = { proxy: "", expiresAt: 0 };
+    this.momoProxyCache = { proxy: "", expiresAt: 0 };
     return {
       count: proxies.length,
       proxies,
@@ -1561,6 +1624,8 @@ export class RegistrationService {
   }
 
   async options() {
+    const pickupInventory = await this.pickupRegistrationInventory();
+    const pickupStatusUnavailable = this.pickupRegistrationProtectionEnabled() && pickupInventory === null;
     const baseJobs = this.db.prepare(`
       SELECT registration_jobs.id, registration_jobs.email, registration_jobs.status, registration_jobs.stage,
         registration_jobs.message, registration_jobs.failure_reason, registration_jobs.created_at,
@@ -1577,52 +1642,59 @@ export class RegistrationService {
     `);
     const accounts = this.db.prepare("SELECT * FROM source_accounts WHERE status = 'connected' AND provider IN ('microsoft', 'google', 'icloud') ORDER BY updated_at DESC").all().map((account) => {
       const direct = account.provider === "icloud";
-      const bases = this.db.prepare("SELECT id, address, kind, label, strategy FROM addresses WHERE account_id = ? AND kind IN ('primary', 'official') AND status = 'active' ORDER BY kind = 'primary' DESC, created_at")
+      const bases = this.db.prepare("SELECT id, address, kind, label, strategy FROM addresses WHERE account_id = ? AND kind IN ('primary', 'official') AND status = 'active' ORDER BY kind = 'primary' DESC, created_at, id")
         .all(account.id)
         .filter((base) => !direct || base.kind === "primary" || isIcloudImportedStrategy(base.strategy));
-      return {
-        id: account.id,
-        email: account.email,
-        display_name: account.display_name,
-        provider: account.provider,
-        registration_mode: direct ? "direct" : "split",
-        max_registration_count: direct ? 1 : 20,
-        bases: bases.map((base) => {
-          const jobs = baseJobs.all(base.id, base.id, base.id);
-          const latest = jobs[0];
-          const occupied = occupiedAliasHistory(jobs);
-          const conflictCount = occupied.count;
-          const activeDirectJob = direct && jobs.some((job) => RELEASABLE_JOB_STATUSES.has(String(job.status || "")));
-          const completedDirectJob = direct && jobs.some((job) => job.status === "completed");
-          const occupiedDirectAlias = direct && conflictCount > 0;
-          const registrationState = activeDirectJob ? "in_progress"
-            : occupiedDirectAlias ? "occupied"
-            : completedDirectJob ? "used"
-              : conflictCount >= 2 ? "likely_exhausted" : (conflictCount === 1 ? "warning" : "available");
-          return {
-            ...base,
-            registration_state: registrationState,
-            registration_disabled: activeDirectJob || completedDirectJob || occupiedDirectAlias,
-            already_exists_count: conflictCount,
-            occupied_alias_count: conflictCount,
-            occupied_aliases: occupied.aliases,
-            occupied_alias_last_seen_at: occupied.lastSeenAt,
-            last_occupied_alias_at: occupied.lastSeenAt,
-            registration_success_count: jobs.filter((job) => job.status === "completed").length,
-            last_registration_status: latest?.status || "",
-            registration_hint: activeDirectJob
-              ? "这个 iCloud 地址已有进行中的注册任务，请等待任务结束。"
-              : occupiedDirectAlias
-                ? "这个 iCloud 地址已被目标站占用，不能重复注册；请导入新的地址。"
-              : completedDirectJob
+      const optionBases = bases.map((base) => {
+        const jobs = baseJobs.all(base.id, base.id, base.id);
+        const latest = jobs[0];
+        const directState = direct ? directIcloudRegistrationState(jobs) : null;
+        const occupied = directState?.occupied || occupiedAliasHistory(jobs);
+        const conflictCount = occupied.count;
+        const pickupStatus = pickupInventory?.get(String(base.address || "").toLowerCase()) || "";
+        const pickupBlocked = direct && (pickupStatusUnavailable || Boolean(pickupStatus));
+        const registrationState = pickupBlocked
+          ? (pickupStatusUnavailable ? "pickup_unknown" : "pickup_listed")
+          : directState?.state
+          || (conflictCount >= 2 ? "likely_exhausted" : (conflictCount === 1 ? "warning" : "available"));
+        return {
+          ...base,
+          registration_state: registrationState,
+          registration_disabled: pickupBlocked || Boolean(directState?.disabled),
+          pickup_status: pickupStatus,
+          pickup_registration_blocked: pickupBlocked,
+          already_exists_count: conflictCount,
+          occupied_alias_count: conflictCount,
+          occupied_aliases: occupied.aliases,
+          occupied_alias_last_seen_at: occupied.lastSeenAt,
+          last_occupied_alias_at: occupied.lastSeenAt,
+          registration_success_count: jobs.filter((job) => job.status === "completed").length,
+          last_registration_status: latest?.status || "",
+          registration_hint: pickupStatusUnavailable && direct
+            ? "取件站库存状态暂时无法确认，为避免误用售卖邮箱，当前禁止注册。"
+            : pickupStatus && direct
+              ? "这个邮箱已在取件站库存中，必须先从取件站删除后才能用于注册。"
+              : directState?.active
+            ? "这个 iCloud 地址已有进行中的注册任务，请等待任务结束。"
+            : conflictCount > 0 && direct
+              ? "这个 iCloud 地址已被目标站占用，不能重复注册；请导入新的地址。"
+              : directState?.completed
                 ? "这个 iCloud 地址已经用于成功注册；请导入新的地址继续注册。"
                 : direct
                   ? "iCloud 地址会直接用于注册，不会生成 +tag 分裂地址。"
                   : registrationState === "likely_exhausted"
                     ? "这个基础地址已标记多个目标站占用别名，建议更换基础地址。"
                     : (registrationState === "warning" ? "这个基础地址已标记目标站占用别名；再次注册请优先更换后缀。" : ""),
-          };
-        }),
+        };
+      });
+      return {
+        id: account.id,
+        email: account.email,
+        display_name: account.display_name,
+        provider: account.provider,
+        registration_mode: direct ? "direct" : "split",
+        max_registration_count: direct ? optionBases.filter((base) => !base.registration_disabled).length : 20,
+        bases: optionBases,
       };
     });
     const proxies = this.getProxyPool();
@@ -1644,13 +1716,16 @@ export class RegistrationService {
     if (!new Set(["source", "inbox_link"]).has(mailboxMode)) {
       throw Object.assign(new Error("注册邮箱来源无效"), { status: 400 });
     }
-    const requestedCount = Number(input.count);
+    const requestedCount = input.count === undefined || input.count === null || input.count === ""
+      ? 1
+      : Number(input.count);
     if (mailboxMode === "inbox_link" && (!Number.isSafeInteger(requestedCount) || requestedCount < 1 || requestedCount > 200)) {
       throw Object.assign(new Error("链接取件注册数量必须是 1 到 200 的整数"), { status: 400 });
     }
-    const count = mailboxMode === "inbox_link"
-      ? requestedCount
-      : Math.max(1, Math.min(20, requestedCount || 1));
+    if (mailboxMode === "source" && (!Number.isSafeInteger(requestedCount) || requestedCount < 1)) {
+      throw Object.assign(new Error("注册数量必须是正整数"), { status: 400 });
+    }
+    let count = requestedCount;
     const addressMode = String(input.addressMode || "split").trim().toLowerCase();
     if (!new Set(["split", "base"]).has(addressMode)) {
       throw Object.assign(new Error("注册邮箱模式无效"), { status: 400 });
@@ -1705,11 +1780,9 @@ export class RegistrationService {
     const base = this.db.prepare("SELECT * FROM addresses WHERE id = ? AND account_id = ? AND kind IN ('primary', 'official') AND status = 'active'").get(Number(input.baseAddressId), account.id);
     if (!base) throw Object.assign(new Error("请选择可用的基础地址"), { status: 400 });
     const directIcloud = account.provider === "icloud";
+    if (!directIcloud) count = Math.min(20, count);
     if (directIcloud && base.kind === "official" && !isIcloudImportedStrategy(base.strategy)) {
       throw Object.assign(new Error("请选择已导入的 iCloud 地址"), { status: 400 });
-    }
-    if (directIcloud && count !== 1) {
-      throw Object.assign(new Error("iCloud 地址每次只能提交 1 个注册任务"), { status: 400 });
     }
     if (directIcloud && customSuffix) {
       throw Object.assign(new Error("iCloud 地址不支持 Plus 分裂后缀，请直接选择已导入的地址"), { status: 400 });
@@ -1723,8 +1796,22 @@ export class RegistrationService {
     const proxies = resolveJobProxies(input, this.getProxyPool());
     let addresses;
     if (directIcloud) {
-      const existing = this.db.prepare(`
-        SELECT status, stage, message, failure_reason
+      const pickupInventory = await this.pickupRegistrationInventory({ required: true });
+      const directBases = this.db.prepare(`
+        SELECT * FROM addresses
+        WHERE account_id = ? AND kind IN ('primary', 'official') AND status = 'active'
+        ORDER BY kind = 'primary' DESC, created_at, id
+      `).all(account.id).filter((item) => item.kind === "primary" || isIcloudImportedStrategy(item.strategy));
+      const selectedIndex = directBases.findIndex((item) => item.id === base.id);
+      if (selectedIndex < 0) throw Object.assign(new Error("请选择已导入的 iCloud 地址"), { status: 400 });
+      if (pickupInventory.has(String(base.address || "").toLowerCase())) {
+        throw Object.assign(new Error("这个邮箱已在取件站售卖库存中，不能用于注册；请先从取件站删除"), {
+          status: 409,
+          code: "PICKUP_EMAIL_REGISTRATION_BLOCKED",
+        });
+      }
+      const directBaseJobs = this.db.prepare(`
+        SELECT email, status, stage, message, failure_reason, created_at, updated_at, finished_at
         FROM registration_jobs
         WHERE base_address_id = ?
           OR (
@@ -1732,21 +1819,25 @@ export class RegistrationService {
             AND address_id = ?
           )
         ORDER BY created_at DESC, id DESC
-      `).all(base.id, base.id);
-      const occupied = existing.find((job) => registrationFailureReason(job) === OCCUPIED_ALIAS_FAILURE_REASON);
-      if (occupied) {
+      `);
+      const selectedState = directIcloudRegistrationState(directBaseJobs.all(base.id, base.id));
+      if (selectedState.occupied.count > 0) {
         throw Object.assign(new Error("这个 iCloud 地址已被目标站占用，不能重复注册，请导入新的地址"), { status: 409 });
       }
-      const activeOrCompleted = existing.find((job) => (
-        RELEASABLE_JOB_STATUSES.has(String(job.status || "")) || job.status === "completed"
-      ));
-      if (activeOrCompleted) {
-        const message = activeOrCompleted.status === "completed"
+      if (selectedState.active || selectedState.completed) {
+        const message = selectedState.completed
           ? "这个 iCloud 地址已经用于成功注册，请导入新的地址"
           : "这个 iCloud 地址已有进行中的注册任务";
         throw Object.assign(new Error(message), { status: 409 });
       }
-      addresses = [base];
+      const available = directBases.slice(selectedIndex).filter((item) => (
+        !pickupInventory.has(String(item.address || "").toLowerCase())
+          && !directIcloudRegistrationState(directBaseJobs.all(item.id, item.id)).disabled
+      ));
+      if (count > available.length) {
+        throw Object.assign(new Error(`从所选 iCloud 地址往下仅有 ${available.length} 个可用地址，最多可注册 ${available.length} 个`), { status: 409 });
+      }
+      addresses = available.slice(0, count);
     } else if (addressMode === "base") {
       const existing = this.db.prepare(`
         SELECT status, stage, message, failure_reason
@@ -1782,8 +1873,7 @@ export class RegistrationService {
     }
     const jobs = [];
     const usedProxySessions = new Set();
-    for (let index = 0; index < addresses.length; index += 1) {
-      const address = addresses[index];
+    const pendingJobs = this.db.transaction(() => addresses.map((address, index) => {
       const proxyTemplate = proxies.length ? proxies[index % proxies.length] : "";
       const proxy = materializeProxySession(proxyTemplate, usedProxySessions);
       const now = nowIso();
@@ -1792,8 +1882,11 @@ export class RegistrationService {
           account_id, address_id, base_address_id, email, status, stage, browser_mode, proxy_label, fingerprint_id,
           message, created_at, updated_at
         ) VALUES (?, ?, ?, ?, 'queued', 'queued', ?, ?, ?, '正在提交注册任务', ?, ?)
-      `).run(account.id, address.id, base.id, address.address, browserMode, maskProxy(proxy), crypto.randomUUID().slice(0, 12), now, now);
+      `).run(account.id, address.id, directIcloud ? address.id : base.id, address.address, browserMode, maskProxy(proxy), crypto.randomUUID().slice(0, 12), now, now);
       const jobId = Number(result.lastInsertRowid);
+      return { address, jobId, proxy };
+    }))();
+    for (const { address, jobId, proxy } of pendingJobs) {
       try {
         const task = await this.client.createTask({
           platform: "chatgpt",
@@ -2020,6 +2113,21 @@ export class RegistrationService {
     return synced.map(publicRegistrationJob);
   }
 
+  jobCounts() {
+    const counts = { total: 0 };
+    this.db.prepare(`
+      SELECT status, COUNT(*) AS count
+      FROM registration_jobs
+      WHERE deleted_at IS NULL
+      GROUP BY status
+    `).all().forEach((row) => {
+      const count = Number(row.count) || 0;
+      counts[String(row.status || "unknown")] = count;
+      counts.total += count;
+    });
+    return counts;
+  }
+
   registrationQueueControl() {
     return this.client.getRegistrationQueueControl();
   }
@@ -2174,12 +2282,34 @@ export class RegistrationService {
   async taskEvents(id) {
     const row = this.getJob(id);
     if (!row) throw Object.assign(new Error("注册任务不存在"), { status: 404 });
-    if (!row.external_task_id) return [];
+    const publicJob = publicRegistrationJob(row);
+    const localFailureEvent = {
+      id: `local-failure-${row.id}`,
+      level: "error",
+      created_at: row.finished_at || row.updated_at || row.created_at,
+      message: `注册失败：${publicJob.display_message || publicJob.message || "未返回失败原因"}`,
+      detail: {
+        source: "alias_hub",
+        email: row.email,
+        stage: row.stage || "unknown",
+        failure_reason: publicJob.failure_reason || "",
+      },
+    };
+    if (!row.external_task_id) return row.status === "failed" ? [localFailureEvent] : [];
     try {
       const response = await this.client.getTaskEvents(row.external_task_id);
       const events = Array.isArray(response) ? response : response.items || response.events || [];
-      return sanitizeRegistrationRemoteValue(events);
+      const sanitized = sanitizeRegistrationRemoteValue(events);
+      return row.status === "failed" ? [...sanitized, localFailureEvent] : sanitized;
     } catch (error) {
+      if (row.status === "failed") {
+        return [localFailureEvent, {
+          id: `remote-log-error-${row.id}`,
+          level: "error",
+          created_at: nowIso(),
+          message: `远程日志读取失败：${redactProxySecrets(error?.message) || "注册服务暂时不可用"}`,
+        }];
+      }
       throw Object.assign(new Error(redactProxySecrets(error?.message) || "读取注册任务事件失败"), {
         status: Number.isInteger(Number(error?.status)) ? Number(error.status) : 502,
       });
@@ -2510,6 +2640,13 @@ export class RegistrationService {
     } catch {
       // Older test databases can still list accounts before running the latest schema.
     }
+    let momoByAccountId = new Map();
+    try {
+      momoByAccountId = new Map(this.db.prepare("SELECT * FROM registered_account_momo_checks").all()
+        .map((item) => [String(item.external_account_id), item]));
+    } catch {
+      // Older test databases can still list accounts before running the latest schema.
+    }
     const plusMailByEmail = plusMailEvidenceByEmail(this.db);
     const nfapiByAccountId = new Map();
     const nfapiBaseUrl = String(getSetting(this.db, "nfapi_base_url", "")).replace(/\/+$/, "");
@@ -2555,6 +2692,7 @@ export class RegistrationService {
         const metadata = metadataByAccountId.get(String(item.id || ""));
         const checkoutCheck = checkoutByAccountId.get(String(item.id || ""));
         const trialCheck = trialByAccountId.get(String(item.id || ""));
+        const momoCheck = momoByAccountId.get(String(item.id || ""));
         const nfapiLink = nfapiByAccountId.get(String(item.id || ""));
         const checkOutcome = this.accountStatusCheckOutcomes.get(String(item.id || ""));
         const checkOutcomeMatches = checkOutcome
@@ -2595,7 +2733,11 @@ export class RegistrationService {
         const checkoutMatches = checkoutCheck
           && String(checkoutCheck.email || "").toLowerCase() === String(item.email || "").toLowerCase();
         const trialMatches = trialCheck
-          && String(trialCheck.email || "").toLowerCase() === String(item.email || "").toLowerCase();
+          && String(trialCheck.email || "").toLowerCase() === String(item.email || "").toLowerCase()
+          && String(trialCheck.evidence || "") === JP_ZERO_TRIAL_EVIDENCE;
+        const momoMatches = momoCheck
+          && String(momoCheck.email || "").toLowerCase() === String(item.email || "").toLowerCase()
+          && MOMO_CHECK_EVIDENCES.includes(String(momoCheck.evidence || ""));
         const nfapiMatches = nfapiLink
           && String(nfapiLink.email || "").toLowerCase() === String(item.email || "").toLowerCase();
         const storedGroupName = metadataMatches ? String(metadata.group_name || "") : "";
@@ -2638,6 +2780,13 @@ export class RegistrationService {
           trial_evidence: trialMatches ? String(trialCheck.evidence || "") : "",
           trial_error: trialMatches ? String(trialCheck.error || "") : "",
           trial_checked_at: trialMatches ? String(trialCheck.checked_at || "") : "",
+          momo_status: momoMatches ? String(momoCheck.status || "unchecked") : "unchecked",
+          momo_eligible: momoMatches && momoCheck.eligible !== null
+            ? Boolean(momoCheck.eligible) : null,
+          momo_methods: momoMatches ? parseJson(momoCheck.methods, []) : [],
+          momo_evidence: momoMatches ? String(momoCheck.evidence || "") : "",
+          momo_error: momoMatches ? String(momoCheck.error || "") : "",
+          momo_checked_at: momoMatches ? String(momoCheck.checked_at || "") : "",
           nfapi: nfapiMatches ? {
             linked: nfapiLink.status === "imported",
             base_url: nfapiLink.nfapi_base_url,
@@ -2953,17 +3102,12 @@ export class RegistrationService {
       ORDER BY created_at DESC LIMIT 1
     `).get(String(accountId));
     if (!job) throw Object.assign(new Error("注册账号不存在"), { status: 404 });
-    const account = await this.client.getAccount(accountId);
-    if (!account) throw Object.assign(new Error("账号已从本地账号池删除"), { status: 404 });
-    if (String(account.platform || "chatgpt").toLowerCase() !== "chatgpt"
-      || String(account.email || "").toLowerCase() !== String(job.email || "").toLowerCase()) {
-      throw Object.assign(new Error("注册账号与任务记录不匹配"), { status: 409 });
-    }
+    const email = String(job.email || "").trim().toLowerCase();
 
     const existing = this.db.prepare(`
       SELECT * FROM registered_account_metadata
       WHERE external_account_id = ? AND email = ? COLLATE NOCASE
-    `).get(String(accountId), account.email);
+    `).get(String(accountId), email);
     const nextCustomName = customName === undefined ? String(existing?.custom_name || "") : customName;
     const nextGroupName = groupName === undefined ? String(existing?.group_name || "") : groupName;
     if (!nextCustomName && !nextGroupName) {
@@ -2980,12 +3124,12 @@ export class RegistrationService {
           custom_name = excluded.custom_name,
           group_name = excluded.group_name,
           updated_at = excluded.updated_at
-      `).run(String(accountId), account.email, nextCustomName, nextGroupName, now, now);
+      `).run(String(accountId), email, nextCustomName, nextGroupName, now, now);
     }
     return {
       item: {
         id: accountId,
-        email: account.email,
+        email,
         custom_name: nextCustomName,
         group_name: nextGroupName,
       },
@@ -3018,16 +3162,10 @@ export class RegistrationService {
       throw Object.assign(new Error("选择中包含不属于本注册页面的账号"), { status: 409 });
     }
 
-    const accounts = await Promise.all(ids.map(async (id) => {
-      const account = await this.client.getAccount(id);
+    const accounts = ids.map((id) => {
       const job = jobByAccountId.get(String(id));
-      if (!account) throw Object.assign(new Error(`账号 #${id} 已从本地账号池删除`), { status: 404 });
-      if (String(account.platform || "chatgpt").toLowerCase() !== "chatgpt"
-        || String(account.email || "").toLowerCase() !== String(job.email || "").toLowerCase()) {
-        throw Object.assign(new Error(`账号 #${id} 与注册记录不匹配`), { status: 409 });
-      }
-      return { id, email: account.email };
-    }));
+      return { id, email: String(job.email || "").trim().toLowerCase() };
+    });
 
     const existingByAccountId = new Map(this.db.prepare(`
       SELECT * FROM registered_account_metadata
@@ -3390,8 +3528,11 @@ export class RegistrationService {
     const accessToken = accessTokenFromAccount(remote);
     if (!accessToken) throw Object.assign(new Error("这个账号尚未获取到 AT"), { status: 409 });
     const result = await this.trialProbe({ accessToken, proxy });
-    if (!result || typeof result !== "object" || typeof result.eligible !== "boolean") {
-      throw Object.assign(new Error("日本免费试用资格探针返回了无效结果"), { status: 502 });
+    if (!result || typeof result !== "object" || typeof result.eligible !== "boolean"
+      || !Number.isFinite(result.amountDue) || result.eligible !== (result.amountDue === 0)
+      || String(result.currency || "") !== "JPY"
+      || String(result.evidence || "") !== JP_ZERO_TRIAL_EVIDENCE) {
+      throw Object.assign(new Error("日本 0 元 Checkout 探针返回了无效结果"), { status: 502 });
     }
     return {
       eligible: result.eligible,
@@ -3423,7 +3564,7 @@ export class RegistrationService {
           trial_status: "rate_limited",
           trial_eligible: null,
           trial_evidence: "",
-          trial_error: "日本免费试用资格检测触发 HTTP 429 限流，请稍后重试",
+          trial_error: "日本 0 元 Checkout 检测触发 HTTP 429 限流，请稍后重试",
           trial_checked_at: "",
         };
       }
@@ -3462,6 +3603,210 @@ export class RegistrationService {
       failed: items.filter((item) => item.trial_status === "failed").length,
       rate_limited: items.filter((item) => item.trial_status === "rate_limited").length,
       skipped: items.filter((item) => item.trial_status === "skipped").length,
+      items,
+      accounts: await this.listRegisteredAccounts({ refreshUnchecked: false }),
+    };
+  }
+
+  persistRegisteredAccountMomoCheck({ id, email, eligible = null, methods = [], evidence = "", status, error = "", checkedAt }) {
+    const accountId = String(id || "");
+    const normalizedEmail = safeRemoteText(email, 320).toLowerCase();
+    const normalizedEligible = typeof eligible === "boolean" ? eligible : null;
+    const normalizedStatus = status === "eligible" && normalizedEligible === true
+      ? "eligible"
+      : status === "ineligible" && normalizedEligible === false
+        ? "ineligible"
+        : "failed";
+    const normalizedMethods = [...new Set((Array.isArray(methods) ? methods : [])
+      .map((method) => String(method || "").trim().toLowerCase())
+      .filter((method) => /^[a-z0-9_]{1,80}$/.test(method)))];
+    const normalizedEvidence = normalizedStatus === "failed" ? "" : safeRemoteText(evidence, 120);
+    const normalizedError = normalizedStatus === "failed" ? momoCheckError(error) : "";
+    const now = nowIso();
+    const effectiveCheckedAt = checkedAt || now;
+    this.db.prepare(`
+      INSERT INTO registered_account_momo_checks
+        (external_account_id, email, status, eligible, methods, evidence, error, checked_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(external_account_id) DO UPDATE SET
+        email = excluded.email,
+        status = excluded.status,
+        eligible = excluded.eligible,
+        methods = excluded.methods,
+        evidence = excluded.evidence,
+        error = excluded.error,
+        checked_at = excluded.checked_at,
+        updated_at = excluded.updated_at
+    `).run(
+      accountId,
+      normalizedEmail,
+      normalizedStatus,
+      normalizedEligible === null ? null : Number(normalizedEligible),
+      JSON.stringify(normalizedMethods),
+      normalizedEvidence,
+      normalizedError,
+      effectiveCheckedAt,
+      now,
+      now,
+    );
+    return {
+      id: Number(accountId),
+      momo_status: normalizedStatus,
+      momo_eligible: normalizedEligible,
+      momo_methods: normalizedMethods,
+      momo_evidence: normalizedEvidence,
+      momo_error: normalizedError,
+      momo_checked_at: effectiveCheckedAt,
+    };
+  }
+
+  async resolveVietnameseMomoProxy() {
+    if (typeof this.momoProxyResolver === "function") {
+      const resolved = String(await this.momoProxyResolver() || "").trim();
+      if (!resolved) throw Object.assign(new Error("未配置 VN MoMo 检测代理"), { status: 409 });
+      return resolved;
+    }
+    if (this.momoProxyCache.proxy && this.momoProxyCache.expiresAt > Date.now()) {
+      return this.momoProxyCache.proxy;
+    }
+    if (typeof this.client.inspectProxy !== "function") {
+      throw Object.assign(new Error("VN MoMo 检测代理服务不可用"), { status: 503 });
+    }
+    const proxies = this.getProxyPool();
+    if (!proxies.length) {
+      throw Object.assign(new Error("代理池为空，请先添加越南代理"), { status: 409 });
+    }
+    const usedSessions = new Set();
+    for (const source of proxies) {
+      const proxy = materializeProxySession(source, usedSessions);
+      try {
+        const inspection = await this.client.inspectProxy({ url: proxy, samples: 1, delay_ms: 0 });
+        const sample = Array.isArray(inspection?.samples) ? inspection.samples[0] : null;
+        if (String(sample?.country_code || "").toUpperCase() !== "VN") continue;
+        this.momoProxyCache = { proxy, expiresAt: Date.now() + 5 * 60 * 1000 };
+        return proxy;
+      } catch {
+        // Continue until a saved proxy is positively identified as a VN exit.
+      }
+    }
+    throw Object.assign(new Error("代理池中没有检测到 VN 出口，请先添加越南代理"), { status: 409 });
+  }
+
+  checkRegisteredAccountMomo(account, proxy) {
+    const accountId = Number(account.id);
+    const existing = this.accountMomoChecks.get(accountId);
+    if (existing) return existing;
+    const promise = this.runRegisteredAccountMomoCheck(account, proxy)
+      .then((result) => this.persistRegisteredAccountMomoCheck({
+        id: accountId,
+        email: account.email,
+        eligible: result.eligible,
+        methods: result.methods,
+        evidence: result.evidence,
+        status: result.eligible ? "eligible" : "ineligible",
+        checkedAt: nowIso(),
+      }))
+      .catch((error) => {
+        if (Number(error?.status) === 429) throw error;
+        return this.persistRegisteredAccountMomoCheck({
+          id: accountId,
+          email: account.email,
+          status: "failed",
+          error,
+          checkedAt: nowIso(),
+        });
+      })
+      .finally(() => this.accountMomoChecks.delete(accountId));
+    this.accountMomoChecks.set(accountId, promise);
+    return promise;
+  }
+
+  async runRegisteredAccountMomoCheck(account, proxy) {
+    const remote = await this.client.getAccount(account.id);
+    if (!remote
+      || String(remote.platform || "chatgpt").toLowerCase() !== "chatgpt"
+      || String(remote.email || "").toLowerCase() !== String(account.email || "").toLowerCase()) {
+      throw Object.assign(new Error("注册账号与远端账号不匹配"), { status: 409 });
+    }
+    const accessToken = accessTokenFromAccount(remote);
+    if (!accessToken) throw Object.assign(new Error("这个账号尚未获取到 AT"), { status: 409 });
+    const result = await this.momoProbe({ accessToken, proxy });
+    if (!result || typeof result !== "object" || typeof result.eligible !== "boolean"
+      || !Array.isArray(result.methods) || !result.methods.length) {
+      throw Object.assign(new Error("MoMo 资格探针返回了无效结果"), { status: 502 });
+    }
+    return {
+      eligible: result.eligible,
+      methods: result.methods,
+      evidence: safeRemoteText(result.evidence, 120),
+    };
+  }
+
+  async checkRegisteredAccountMomoEligibility(input = {}) {
+    const ids = normalizeAccountCheckIds(input, 100);
+    const before = await this.listRegisteredAccounts({ refreshUnchecked: false });
+    const accountById = new Map(before.items.map((item) => [Number(item.id), item]));
+    if (ids.some((id) => !accountById.has(id))) {
+      throw Object.assign(new Error("选择中包含不属于本注册页面的账号"), { status: 409 });
+    }
+
+    const proxy = await this.resolveVietnameseMomoProxy();
+    const selected = ids.map((id) => accountById.get(id));
+    const items = new Array(selected.length);
+    let cursor = 1;
+    let rateLimited = false;
+    const checkOne = async (index) => {
+      try {
+        items[index] = await this.checkRegisteredAccountMomo(selected[index], proxy);
+      } catch (error) {
+        if (Number(error?.status) !== 429) throw error;
+        rateLimited = true;
+        items[index] = {
+          id: Number(selected[index].id),
+          momo_status: "rate_limited",
+          momo_eligible: null,
+          momo_methods: [],
+          momo_evidence: "",
+          momo_error: "MoMo 资格检测触发 HTTP 429 限流，请稍后重试",
+          momo_checked_at: "",
+        };
+      }
+    };
+
+    await checkOne(0);
+    if (!rateLimited && selected.length > 1) {
+      const workers = Array.from(
+        { length: Math.min(MOMO_CHECK_CONCURRENCY, selected.length - 1) },
+        async () => {
+          while (!rateLimited && cursor < selected.length) {
+            const index = cursor;
+            cursor += 1;
+            await checkOne(index);
+          }
+        },
+      );
+      await Promise.all(workers);
+    }
+    for (let index = 0; index < items.length; index += 1) {
+      if (items[index]) continue;
+      items[index] = {
+        id: Number(selected[index].id),
+        momo_status: "skipped",
+        momo_eligible: null,
+        momo_methods: [],
+        momo_evidence: "",
+        momo_error: "本批次触发限流，未继续检测",
+        momo_checked_at: "",
+      };
+    }
+    return {
+      requested: ids.length,
+      checked: items.filter((item) => new Set(["eligible", "ineligible"]).has(item.momo_status)).length,
+      eligible: items.filter((item) => item.momo_status === "eligible").length,
+      ineligible: items.filter((item) => item.momo_status === "ineligible").length,
+      failed: items.filter((item) => item.momo_status === "failed").length,
+      rate_limited: items.filter((item) => item.momo_status === "rate_limited").length,
+      skipped: items.filter((item) => item.momo_status === "skipped").length,
       items,
       accounts: await this.listRegisteredAccounts({ refreshUnchecked: false }),
     };
@@ -3735,10 +4080,11 @@ export class RegistrationService {
         this.db.prepare(`DELETE FROM registered_account_metadata WHERE external_account_id IN (${placeholders})`).run(...deletedIds);
         this.db.prepare(`DELETE FROM registered_account_checkout_checks WHERE external_account_id IN (${placeholders})`).run(...deletedIds);
         this.db.prepare(`DELETE FROM registered_account_trial_checks WHERE external_account_id IN (${placeholders})`).run(...deletedIds);
+        this.db.prepare(`DELETE FROM registered_account_momo_checks WHERE external_account_id IN (${placeholders})`).run(...deletedIds);
         this.db.prepare(`DELETE FROM registered_account_nfapi_links WHERE external_account_id IN (${placeholders})`).run(...deletedIds);
       })();
     }
-    return { requested: ids.length, deleted, failed };
+    return { requested: ids.length, deleted, deleted_ids: deletedIds.map(Number), failed };
   }
 
   externalAccounts({ limit = 100, offset = 0 } = {}) {
@@ -3855,10 +4201,17 @@ export class RegistrationService {
     const emails = this.db.prepare(`
       SELECT id, graph_message_id AS message_id, internet_message_id, received_at AS date,
         sender_address AS "from", subject, preview AS body_preview, preview, body,
-        verification_code
+        body_content_type, verification_code
       FROM mail_messages WHERE ${conditions.join(" AND ")}
       ORDER BY received_at DESC LIMIT ?
-    `).all(...params, top).map((item) => ({ ...item, folder: "inbox", text: item.body || item.preview }));
+    `).all(...params, top).map((item) => {
+      const storedContentType = String(item.body_content_type || "text").toLowerCase();
+      const bodyContentType = storedContentType === "html"
+        || /^\s*(?:<!doctype\s+html\b|<html\b|<head\b|<body\b)/i.test(String(item.body || ""))
+        ? "html"
+        : "text";
+      return { ...item, body_content_type: bodyContentType, folder: "inbox", text: item.body || item.preview };
+    });
     return { success: true, emails };
   }
 }

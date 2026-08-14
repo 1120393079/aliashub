@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, Cable, Check, CircleStop, ClipboardCopy, Copy, CreditCard, Database, Download, ExternalLink, EyeOff, Fingerprint, Gift, Globe2, KeyRound, Link2, ListChecks, LoaderCircle, Mail, Monitor, Network, Pause, Pencil, Play, RefreshCw, Save, ScrollText, Search, Server, ShieldCheck, SlidersHorizontal, Store, Trash2, Upload, UserPlus } from "lucide-react";
+import { AlertTriangle, Cable, Check, CircleStop, ClipboardCopy, Copy, CreditCard, Database, Download, ExternalLink, EyeOff, Fingerprint, Gift, Globe2, KeyRound, Link2, ListChecks, LoaderCircle, Mail, Monitor, Network, Pause, Pencil, Play, RefreshCw, Save, ScrollText, Search, Server, ShieldCheck, SlidersHorizontal, Store, Trash2, Upload, UserPlus, WalletCards } from "lucide-react";
 import { api } from "../api.js";
 import { planAgentIdentityBulk, runAgentIdentityBulk } from "../agent-identity-bulk.js";
 import { Button, ConfirmDialog, EmptyState, FormField, IconButton, LoadingBlock, Modal, Pagination, Segmented, StatusBadge, useToast } from "../components.jsx";
@@ -50,6 +50,7 @@ import {
   ageFromBirth,
   baseOptionLabel,
   deletableStatuses,
+  directRegistrationBases,
   initialAccountPageSize,
   jobStatusLabel,
   preferredBase,
@@ -98,12 +99,31 @@ function TrialStatusCell({ item, compact = false }) {
   const eligible = status === "eligible" && item?.trial_eligible === true;
   const ineligible = status === "ineligible" && item?.trial_eligible === false;
   const failed = status === "failed";
-  const label = eligible ? "有资格" : ineligible ? "无资格" : failed ? "失败" : "未检测";
+  const label = eligible ? "0元" : ineligible ? "非0元" : failed ? "失败" : "未检测";
   const badge = eligible ? "active" : ineligible ? "warning" : failed ? "failed" : "inactive";
   const detail = failed
-    ? String(item?.trial_error || "日本免费试用资格检测失败")
-    : item?.trial_checked_at ? `检测时间：${formatDate(item.trial_checked_at)}` : "尚未通过日本代理检测";
+    ? String(item?.trial_error || "日本 0 元 Checkout 检测失败")
+    : item?.trial_checked_at ? `检测时间：${formatDate(item.trial_checked_at)}` : "尚未检测日本 Checkout 最终金额";
   return <div className={"registration-trial-status" + (compact ? " compact" : "")} title={detail}>
+    <StatusBadge status={badge}>{label}</StatusBadge>
+    {!compact && failed && <small>{detail}</small>}
+  </div>;
+}
+
+function MomoStatusCell({ item, compact = false }) {
+  const status = String(item?.momo_status || "unchecked").toLowerCase();
+  const eligible = status === "eligible" && item?.momo_eligible === true;
+  const ineligible = status === "ineligible" && item?.momo_eligible === false;
+  const failed = status === "failed";
+  const label = eligible ? "可显示" : ineligible ? "不显示" : failed ? "失败" : "未检测";
+  const badge = eligible ? "active" : ineligible ? "warning" : failed ? "failed" : "inactive";
+  const methods = Array.isArray(item?.momo_methods) ? item.momo_methods.join(", ") : "";
+  const detail = failed
+    ? String(item?.momo_error || "MoMo 免费试用页面检测失败")
+    : item?.momo_checked_at
+      ? `检测时间：${formatDate(item.momo_checked_at)}${methods ? `；Stripe methods：${methods}` : ""}`
+      : "尚未检测越南零金额免费试用页面";
+  return <div className={"registration-momo-status" + (compact ? " compact" : "")} title={detail}>
     <StatusBadge status={badge}>{label}</StatusBadge>
     {!compact && failed && <small>{detail}</small>}
   </div>;
@@ -113,6 +133,8 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
   const [view, setView] = useState("tasks");
   const [options, setOptions] = useState(null);
   const [jobs, setJobs] = useState(null);
+  const [jobCounts, setJobCounts] = useState(null);
+  const [jobFilter, setJobFilter] = useState("all");
   const [queueControl, setQueueControl] = useState(null);
   const [queueAction, setQueueAction] = useState("");
   const [jobActionIds, setJobActionIds] = useState(() => new Set());
@@ -140,10 +162,11 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
   const [publishingPickup, setPublishingPickup] = useState(false);
   const [pickupInventory, setPickupInventory] = useState({ loaded: false, byEmail: {}, error: "" });
   const [checkingAccountSignals, setCheckingAccountSignals] = useState(false);
+  const [checkingAccountSignalCount, setCheckingAccountSignalCount] = useState(0);
   const [checkingCheckouts, setCheckingCheckouts] = useState(false);
   const [checkingTrials, setCheckingTrials] = useState(false);
+  const [checkingMomo, setCheckingMomo] = useState(false);
   const accountSignalRefreshBusy = useRef(false);
-  const lastFocusedAccountRefreshAt = useRef(0);
   const [accountGroupFilter, setAccountGroupFilter] = useState("all");
   const [accountSearch, setAccountSearch] = useState("");
   const [accountPage, setAccountPage] = useState(1);
@@ -214,15 +237,21 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
     setForm((current) => {
       const accountId = current.accountId || String(data.accounts[0]?.id || "");
       const account = data.accounts.find((item) => String(item.id) === accountId) || data.accounts[0];
-      const validBase = account?.bases.some((item) => String(item.id) === current.baseAddressId);
+      const direct = account?.registration_mode === "direct";
+      const validBase = account?.bases.some((item) => (
+        String(item.id) === current.baseAddressId && (!direct || !item.registration_disabled)
+      ));
+      const baseAddressId = validBase ? current.baseAddressId : String(preferredBase(account)?.id || "");
+      const directAvailable = directRegistrationBases(account, baseAddressId).length;
       const proxyMatch = current.proxySelection?.match(/^proxy:(\d+)$/);
       const proxySelection = proxyMatch && Number(proxyMatch[1]) >= data.proxies.length ? "auto" : (current.proxySelection || "auto");
-      const direct = account?.registration_mode === "direct";
       return {
         ...current,
         accountId,
-        baseAddressId: validBase ? current.baseAddressId : String(preferredBase(account)?.id || ""),
-        count: direct && current.mailboxMode !== "inbox_link" ? 1 : current.count,
+        baseAddressId,
+        count: direct && current.mailboxMode !== "inbox_link"
+          ? Math.max(1, Math.min(Number(current.count) || 1, directAvailable || 1))
+          : current.count,
         suffix: direct ? "" : current.suffix,
         proxySelection,
       };
@@ -242,6 +271,7 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
       const result = await api("/api/registration/jobs?limit=500");
       if (requestId !== registrationJobsRequest.current) return null;
       setJobs(result.items);
+      setJobCounts(result.counts || null);
       return result.items;
     } catch (error) {
       if (requestId !== registrationJobsRequest.current) return null;
@@ -433,9 +463,15 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
 
   const selectedAccount = useMemo(() => options?.accounts.find((item) => String(item.id) === form.accountId), [options, form.accountId]);
   const selectedBase = useMemo(() => selectedAccount?.bases.find((item) => String(item.id) === form.baseAddressId), [selectedAccount, form.baseAddressId]);
+  const directAvailableBases = useMemo(
+    () => directRegistrationBases(selectedAccount, form.baseAddressId),
+    [selectedAccount, form.baseAddressId],
+  );
   const proxyDraft = useMemo(() => normalizeProxyDraft(proxyText), [proxyText]);
   const activeJobs = jobs?.filter((item) => releasableStatuses.has(item.status) && item.status !== "paused").length || 0;
-  const deletableJobIds = jobs?.filter((item) => deletableStatuses.has(item.status)).map((item) => item.id) || [];
+  const failedJobCount = Number(jobCounts?.failed ?? jobs?.filter((item) => item.status === "failed").length) || 0;
+  const visibleJobs = jobFilter === "failed" ? (jobs || []).filter((item) => item.status === "failed") : (jobs || []);
+  const deletableJobIds = visibleJobs.filter((item) => deletableStatuses.has(item.status)).map((item) => item.id);
   const allJobsSelected = deletableJobIds.length > 0 && deletableJobIds.every((id) => selectedJobIds.includes(id));
   const accountGroups = useMemo(() => {
     const groups = new Map();
@@ -505,7 +541,9 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
       ...current,
       accountId,
       baseAddressId: String(preferredBase(account)?.id || ""),
-      count: direct ? 1 : current.count,
+      count: direct
+        ? Math.max(1, Math.min(Number(current.count) || 1, Number(account?.max_registration_count) || 1))
+        : current.count,
       suffix: direct ? "" : current.suffix,
     }));
   };
@@ -651,8 +689,20 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
           ? await api(`/api/registration/accounts/${deleteTarget.ids[0]}`, { method: "DELETE" })
           : await api("/api/registration/accounts/bulk-delete", { method: "POST", body: { ids: deleteTarget.ids } });
         const failed = result.failed?.length || 0;
+        const deletedIds = new Set((result.deleted_ids || []).map(Number));
         toast(failed ? `已删除 ${result.deleted} 个账号，${failed} 个失败` : `已删除 ${result.deleted} 个注册账号`, failed ? "error" : "success");
-        setSelectedAccountIds((current) => current.filter((id) => !deleteTarget.ids.includes(id)));
+        setAccounts((current) => {
+          if (!current?.items || !deletedIds.size) return current;
+          const items = current.items.filter((item) => !deletedIds.has(Number(item.id)));
+          return {
+            ...current,
+            total: Math.max(0, Number(current.total || 0) - (current.items.length - items.length)),
+            items,
+          };
+        });
+        setSelectedAccountIds((current) => current.filter((id) => !deletedIds.has(Number(id))));
+        setDeleteTarget(null);
+        return;
       }
       setDeleteTarget(null);
       await refreshRegistrationData();
@@ -731,10 +781,14 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
     if (!normalizedIds.length || accountSignalRefreshBusy.current) return null;
     accountSignalRefreshBusy.current = true;
     setCheckingAccountSignals(true);
+    setCheckingAccountSignalCount(normalizedIds.length);
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 180_000);
     try {
       const result = await api("/api/registration/accounts/refresh-status", {
         method: "POST",
         body: { ids: normalizedIds },
+        signal: controller.signal,
       });
       if (!result.accounts || !Array.isArray(result.accounts.items)) {
         throw new Error("状态检测服务未返回账号列表");
@@ -752,11 +806,20 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
       }
       return result;
     } catch (error) {
-      if (notify) toast(error.message || "账号状态检测失败", "error");
+      if (notify) {
+        toast(
+          error.name === "AbortError"
+            ? "账号状态检测等待超时，请缩小筛选范围后重试"
+            : (error.message || "账号状态检测失败"),
+          "error",
+        );
+      }
       return null;
     } finally {
+      window.clearTimeout(timeout);
       accountSignalRefreshBusy.current = false;
       setCheckingAccountSignals(false);
+      setCheckingAccountSignalCount(0);
     }
   }, [toast]);
 
@@ -813,48 +876,49 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
         body: { ids },
       });
       if (!result.accounts || !Array.isArray(result.accounts.items)) {
-        throw new Error("日本免费试用资格检测服务未返回账号列表");
+        throw new Error("日本 0 元 Checkout 检测服务未返回账号列表");
       }
       setAccounts(result.accounts);
       toast(
-        `日本试用资格检测完成：有资格 ${result.eligible || 0}；无资格 ${result.ineligible || 0}${result.failed ? `；失败 ${result.failed}` : ""}${result.rate_limited ? `；限流 ${result.rate_limited}` : ""}${result.skipped ? `；跳过 ${result.skipped}` : ""}`,
+        `日本 0 元检测完成：0 元 ${result.eligible || 0}；非 0 元 ${result.ineligible || 0}${result.failed ? `；失败 ${result.failed}` : ""}${result.rate_limited ? `；限流 ${result.rate_limited}` : ""}${result.skipped ? `；跳过 ${result.skipped}` : ""}`,
         result.failed || result.rate_limited ? "error" : "success",
       );
     } catch (error) {
-      toast(error.message || "日本免费试用资格检测失败", "error");
+      toast(error.message || "日本 0 元 Checkout 检测失败", "error");
     } finally {
       setCheckingTrials(false);
     }
   }, [checkingTrials, pagedAccountItems, selectedAccountIds, toast]);
 
-  useEffect(() => {
-    if (view !== "accounts" || !accounts?.items?.length) return undefined;
-    const refreshOnReturn = () => {
-      if (document.visibilityState !== "visible") return;
-      const now = Date.now();
-      if (now - lastFocusedAccountRefreshAt.current < 30_000) return;
-      const ids = accounts.items
-        .filter((item) => {
-          const type = accountTypeMeta(item).type;
-          const availability = accountSignalText(item, ["availability", "availability_status", "availabilityStatus"], 40).toLowerCase();
-          return availability !== "unavailable" && (type === "free" || type === "unknown");
-        })
-        .map((item) => Number(item.id))
-        .filter(Number.isSafeInteger);
-      if (!ids.length) return;
-      lastFocusedAccountRefreshAt.current = now;
-      refreshAccountSignals(ids, { notify: false });
-    };
-    const onVisibilityChange = () => {
-      if (document.visibilityState === "visible") refreshOnReturn();
-    };
-    window.addEventListener("focus", refreshOnReturn);
-    document.addEventListener("visibilitychange", onVisibilityChange);
-    return () => {
-      window.removeEventListener("focus", refreshOnReturn);
-      document.removeEventListener("visibilitychange", onVisibilityChange);
-    };
-  }, [view, accounts, refreshAccountSignals]);
+  const checkAccountMomo = useCallback(async () => {
+    const ids = selectedAccountIds.length
+      ? selectedAccountIds
+      : pagedAccountItems.map((item) => item.id);
+    if (!ids.length || checkingMomo) return;
+    setCheckingMomo(true);
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 120_000);
+    try {
+      const result = await api("/api/registration/accounts/check-momo", {
+        method: "POST",
+        body: { ids },
+        signal: controller.signal,
+      });
+      if (!result.accounts || !Array.isArray(result.accounts.items)) {
+        throw new Error("MoMo 免费试用页面检测服务未返回账号列表");
+      }
+      setAccounts(result.accounts);
+      toast(
+        `MoMo 免费试用页面检测完成：可显示 ${result.eligible || 0}；不显示 ${result.ineligible || 0}${result.failed ? `；失败 ${result.failed}` : ""}${result.rate_limited ? `；限流 ${result.rate_limited}` : ""}${result.skipped ? `；跳过 ${result.skipped}` : ""}`,
+        result.failed || result.rate_limited ? "error" : "success",
+      );
+    } catch (error) {
+      toast(error.name === "AbortError" ? "MoMo 免费试用页面检测等待超时，请缩小批次后重试" : (error.message || "MoMo 免费试用页面检测失败"), "error");
+    } finally {
+      window.clearTimeout(timeout);
+      setCheckingMomo(false);
+    }
+  }, [checkingMomo, pagedAccountItems, selectedAccountIds, toast]);
 
   const openAccountEditor = (item) => {
     setEditingAccount(item);
@@ -868,16 +932,26 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
     if (!editingAccount) return;
     setSavingAccountMetadata(true);
     try {
-      await api(`/api/registration/accounts/${editingAccount.id}`, {
+      const result = await api(`/api/registration/accounts/${editingAccount.id}`, {
         method: "PATCH",
         body: {
           custom_name: accountEditForm.custom_name,
           group_name: accountEditForm.custom_group_name,
         },
       });
+      const saved = result.item;
+      setAccounts((current) => !current?.items ? current : ({
+        ...current,
+        items: current.items.map((item) => Number(item.id) !== Number(saved.id) ? item : ({
+          ...item,
+          custom_name: saved.custom_name,
+          custom_group_name: saved.group_name,
+          group_name: saved.group_name || item.default_group_name || "",
+          group_source: saved.group_name ? "custom" : (item.default_group_name ? "plan" : ""),
+        })),
+      }));
       toast("账号名称和自定义分组已保存");
       setEditingAccount(null);
-      await loadAccounts();
     } catch (error) {
       toast(error.message, "error");
     } finally {
@@ -917,9 +991,18 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
       toast(groupName
         ? `已将 ${result.updated} 个账号移至“${groupName}”`
         : `已将 ${result.updated} 个账号恢复为套餐自动分组`);
+      const updatedIds = new Set(result.ids.map(Number));
+      setAccounts((current) => !current?.items ? current : ({
+        ...current,
+        items: current.items.map((item) => !updatedIds.has(Number(item.id)) ? item : ({
+          ...item,
+          custom_group_name: result.group_name,
+          group_name: result.group_name || item.default_group_name || "",
+          group_source: result.group_name ? "custom" : (item.default_group_name ? "plan" : ""),
+        })),
+      }));
       setBulkGroupEditIds([]);
       setSelectedAccountIds([]);
-      await loadAccounts();
     } catch (error) {
       toast(error.message, "error");
     } finally {
@@ -1410,6 +1493,17 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
     catch (error) { setLogs([{ id: "error", message: error.message, level: "error" }]); }
   };
 
+  const changeJobFilter = (filter) => {
+    setJobFilter(filter);
+    setSelectedJobIds([]);
+  };
+
+  const showFailedJobs = () => {
+    setView("tasks");
+    changeJobFilter("failed");
+    window.requestAnimationFrame(() => document.getElementById("registration-records")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+  };
+
   const copyAccessToken = async (item) => {
     setCopyingTokenId(item.id);
     try {
@@ -1641,6 +1735,16 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
   const inboxLinkMailboxCount = Number(options.inboxLinkMailboxes?.available || 0);
   const isDirectRegistration = !isInboxLinkRegistration && selectedAccount?.registration_mode === "direct";
   const isBaseAddressRegistration = !isInboxLinkRegistration && !isDirectRegistration && form.addressMode === "base";
+  const directAvailableCount = directAvailableBases.length;
+  const registrationCount = Number(form.count);
+  const registrationCountInvalid = !Number.isSafeInteger(registrationCount) || registrationCount < 1;
+  const registrationCountError = registrationCountInvalid
+    ? "请输入大于等于 1 的整数"
+    : isInboxLinkRegistration && registrationCount > inboxLinkMailboxCount
+      ? `当前仅 ${inboxLinkMailboxCount} 个可用`
+      : isDirectRegistration && registrationCount > directAvailableCount
+        ? `从所选地址往下仅 ${directAvailableCount} 个可用`
+        : "";
   const deleteCount = deleteTarget?.ids?.length || 0;
   const deleteTitle = deletingAccounts
     ? (deleteCount > 1 ? `删除选中的 ${deleteCount} 个注册账号？` : "删除这个注册账号？")
@@ -1656,6 +1760,7 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
         <span><Server size={16} /><b>注册服务</b><StatusBadge status={options.service?.ok ? "active" : "failed"}>{options.service?.ok ? "运行中" : "未连接"}</StatusBadge></span>
         <span><LoaderCircle size={16} /><b>执行中</b><strong>{activeJobs}</strong></span>
         <span><Check size={16} /><b>注册成功</b><strong>{accounts.total}</strong></span>
+        <button className="registration-summary-failed" type="button" onClick={showFailedJobs} title="查看注册失败邮箱、原因和日志"><AlertTriangle size={16} /><b>注册失败</b><strong>{failedJobCount}</strong></button>
         <span><Network size={16} /><b>代理池</b><strong>{options.proxies.length}</strong></span>
       </div>
 
@@ -1691,14 +1796,22 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
               }}><option value="source">邮箱工作台地址</option><option value="inbox_link">链接取件邮箱池（可用 {inboxLinkMailboxCount}）</option></select></FormField>
               {!isInboxLinkRegistration && <div className="form-grid two">
                 <FormField label="源头邮箱"><select value={form.accountId} onChange={(event) => changeAccount(event.target.value)}><option value="">请选择</option>{options.accounts.map((item) => <option key={item.id} value={item.id}>{item.email}</option>)}</select></FormField>
-                <FormField label={isDirectRegistration ? "iCloud 地址类型" : "基础地址"}><select value={form.baseAddressId} onChange={(event) => setForm({ ...form, baseAddressId: event.target.value })}><option value="">请选择</option>{selectedAccount?.bases.map((item) => <option key={item.id} value={item.id} disabled={Boolean(item.registration_disabled)}>{baseOptionLabel(item)}</option>)}</select></FormField>
+                <FormField label={isDirectRegistration ? "iCloud 地址类型" : "基础地址"}><select value={form.baseAddressId} onChange={(event) => {
+                  const baseAddressId = event.target.value;
+                  const available = directRegistrationBases(selectedAccount, baseAddressId).length;
+                  setForm((current) => ({
+                    ...current,
+                    baseAddressId,
+                    ...(isDirectRegistration ? { count: Math.max(1, Math.min(Number(current.count) || 1, available || 1)) } : {}),
+                  }));
+                }}><option value="">请选择</option>{selectedAccount?.bases.map((item) => <option key={item.id} value={item.id} disabled={Boolean(item.registration_disabled)}>{baseOptionLabel(item)}</option>)}</select></FormField>
               </div>}
               {!isInboxLinkRegistration && <OccupiedAliasNotice base={selectedBase} />}
               {!isInboxLinkRegistration && selectedBase?.registration_hint && <div className="inline-alert warning"><AlertTriangle size={16} /><span>{selectedBase.registration_hint}</span></div>}
               {!isInboxLinkRegistration && !isDirectRegistration && <FormField label="注册邮箱模式" hint="基础地址成功率更高；Plus 分裂适合目标站仍接受 +tag 时批量使用"><select value={form.addressMode} onChange={(event) => setForm({ ...form, addressMode: event.target.value, ...(event.target.value === "base" ? { count: 1, suffix: "" } : {}) })}><option value="base">直接使用基础地址（推荐）</option><option value="split">生成 +tag 分裂地址</option></select></FormField>}
               {isInboxLinkRegistration && <div className={`inline-alert ${inboxLinkMailboxCount ? "success" : "warning"}`}><Link2 size={16} /><span>{inboxLinkMailboxCount ? `当前有 ${inboxLinkMailboxCount} 个已绑定链接邮箱可用；输入几个就分配几个。` : "没有可用的链接取件邮箱，请先到邮箱工作台绑定。"}<button type="button" className="bare-button registration-inline-link" onClick={() => onNavigate("inbox-link")}>管理链接邮箱</button></span></div>}
               <div className="form-grid two">
-                <FormField label="注册数量" error={isInboxLinkRegistration && Number(form.count) > inboxLinkMailboxCount ? `当前仅 ${inboxLinkMailboxCount} 个可用` : ""} hint={isInboxLinkRegistration ? "从已绑定可用池按绑定时间依次分配；输入多少就提交多少" : isDirectRegistration || isBaseAddressRegistration ? "当前模式直接使用基础地址，固定为 1 个任务" : form.suffix.trim() ? "批量注册会自动追加 -01、-02 编号" : "留空后缀时，每个账号生成随机分裂邮箱"}><input type="number" min="1" max={isInboxLinkRegistration ? 200 : 20} value={isDirectRegistration || isBaseAddressRegistration ? 1 : form.count} disabled={isDirectRegistration || isBaseAddressRegistration} onChange={(event) => setForm({ ...form, count: Number(event.target.value) })} /></FormField>
+                <FormField label="注册数量" error={registrationCountError} hint={isInboxLinkRegistration ? "从已绑定可用池按绑定时间依次分配；输入多少就提交多少" : isDirectRegistration ? `从所选地址开始按下拉顺序取可用邮箱；当前最多 ${directAvailableCount} 个` : isBaseAddressRegistration ? "当前模式直接使用基础地址，固定为 1 个任务" : form.suffix.trim() ? "批量注册会自动追加 -01、-02 编号" : "留空后缀时，每个账号生成随机分裂邮箱"}><input type="number" min="1" max={isInboxLinkRegistration ? 200 : isDirectRegistration ? Math.max(1, directAvailableCount) : 20} step="1" value={isBaseAddressRegistration ? 1 : form.count} disabled={isBaseAddressRegistration} onChange={(event) => setForm({ ...form, count: Number(event.target.value) })} /></FormField>
                 <FormField label="浏览器模式"><select value={form.browserMode} onChange={(event) => setForm({ ...form, browserMode: event.target.value })}><option value="headed">内嵌指纹浏览器</option><option value="headless">后台指纹浏览器</option></select></FormField>
               </div>
               <div className="form-grid two">
@@ -1711,7 +1824,7 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
                 <label className="registration-password-option"><input type="checkbox" checked={form.setPasswordAfterRegistration} onChange={(event) => setForm({ ...form, setPasswordAfterRegistration: event.target.checked, ...(event.target.checked ? {} : { password: "" }) })} /><span><b>注册后设置密码</b><small>未勾选时，仅在官网注册流程强制要求密码时设置；勾选后会进入 ChatGPT 安全设置并再次读取邮箱验证码。</small></span></label>
               </div>
               <FormField label="指定密码（可选）" hint="填写后使用此密码；留空时由注册服务随机生成。长度 12-128 个字符，不能包含首尾空白。"><input type="password" autoComplete="new-password" minLength={12} maxLength={128} disabled={!form.setPasswordAfterRegistration} value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} placeholder={form.setPasswordAfterRegistration ? "留空自动生成随机密码" : "请先勾选注册后设置密码"} /></FormField>
-              <Button variant="primary" size="lg" icon={Play} loading={starting} disabled={!options.service?.ok || (isInboxLinkRegistration ? !inboxLinkMailboxCount || Number(form.count) < 1 || Number(form.count) > inboxLinkMailboxCount : !form.accountId || !form.baseAddressId || Boolean(selectedBase?.registration_disabled))} onClick={start}>{isInboxLinkRegistration ? "使用链接邮箱池注册" : isDirectRegistration ? "使用此 iCloud 地址注册" : isBaseAddressRegistration ? "使用此基础地址注册" : "开始注册"}</Button>
+              <Button variant="primary" size="lg" icon={Play} loading={starting} disabled={!options.service?.ok || registrationCountInvalid || (isInboxLinkRegistration ? !inboxLinkMailboxCount || registrationCount > inboxLinkMailboxCount : !form.accountId || !form.baseAddressId || Boolean(selectedBase?.registration_disabled) || (isDirectRegistration && registrationCount > directAvailableCount))} onClick={start}>{isInboxLinkRegistration ? "使用链接邮箱池注册" : isDirectRegistration ? "按顺序注册 iCloud 地址" : isBaseAddressRegistration ? "使用此基础地址注册" : "开始注册"}</Button>
             </div>
           </article>
 
@@ -1721,26 +1834,26 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
           </article>
         </section>
 
-        <section className="table-panel registration-task-panel">
-          <header className="panel-header"><div><h2>注册记录</h2><p>邮箱、身份、代理出口和注册结果</p></div><Button size="sm" onClick={() => refreshRegistrationData().catch((error) => toast(error.message, "error"))}>刷新</Button></header>
-          {jobs.length ? <>
+        <section className="table-panel registration-task-panel" id="registration-records">
+          <header className="panel-header"><div><h2>{jobFilter === "failed" ? "注册失败记录" : "注册记录"}</h2><p>{jobFilter === "failed" ? "查看失败邮箱、具体原因和完整注册日志" : "邮箱、身份、代理出口和注册结果"}</p></div><div className="registration-task-header-actions"><Segmented value={jobFilter} onChange={changeJobFilter} ariaLabel="注册记录筛选" items={[{ value: "all", label: "全部", count: Number(jobCounts?.total ?? jobs.length) }, { value: "failed", label: "失败", count: failedJobCount }]} /><Button size="sm" onClick={() => refreshRegistrationData().catch((error) => toast(error.message, "error"))}>刷新</Button></div></header>
+          {visibleJobs.length ? <>
             <div className="registration-bulk-bar">
               <label><input type="checkbox" checked={allJobsSelected} disabled={!deletableJobIds.length} onChange={toggleAllJobs} />全选可删除记录</label>
               <span>已选择 <b>{selectedJobIds.length}</b> 条</span>
               <Button size="sm" variant="danger" icon={Trash2} disabled={!selectedJobIds.length} onClick={() => setDeleteTarget({ kind: "jobs", ids: selectedJobIds })}>删除所选</Button>
             </div>
-            <div className="data-table-wrap"><table className="data-table"><thead><tr><th className="select-column"><input type="checkbox" aria-label="选择全部可删除注册记录" checked={allJobsSelected} disabled={!deletableJobIds.length} onChange={toggleAllJobs} /></th><th>注册邮箱</th><th>随机身份</th><th>指纹会话</th><th>代理 / 出口 IP</th><th>状态</th><th>创建时间</th><th aria-label="操作" /></tr></thead><tbody>{jobs.map((job) => {
+            <div className="data-table-wrap"><table className="data-table registration-jobs-table"><thead><tr><th className="select-column"><input type="checkbox" aria-label="选择全部可删除注册记录" checked={allJobsSelected} disabled={!deletableJobIds.length} onChange={toggleAllJobs} /></th><th>注册邮箱</th><th>随机身份</th><th>指纹会话</th><th>代理 / 出口 IP</th><th>{jobFilter === "failed" ? "失败原因" : "状态"}</th><th>创建时间</th><th aria-label="操作" /></tr></thead><tbody>{visibleJobs.map((job) => {
               const selectable = deletableStatuses.has(job.status);
               const checked = selectedJobIds.includes(job.id);
-              return <tr className={checked ? "selected-row" : ""} key={job.id}><td className="select-column"><input type="checkbox" aria-label={`选择 ${job.email}`} checked={checked} disabled={!selectable} onChange={() => toggleJob(job.id)} /></td><td><button className="registration-email-button" onClick={() => copyText(job.email).then(() => toast("邮箱已复制"))}>{job.email}<Copy size={13} /></button><small className="registration-source">{job.source_email || (job.account_id ? "源邮箱已删除" : "链接取件邮箱")}</small></td><td><div className="registration-identity"><b>{job.display_name || "等待生成"}</b><small>{job.birth_date ? `${job.birth_date} · ${ageFromBirth(job.birth_date)} 岁` : "姓名和年龄自动随机"}</small></div></td><td><code className="fingerprint-code">{job.fingerprint_id}</code><small className="registration-source">{job.browser_mode === "headed" ? "内嵌 Camoufox" : "后台 Camoufox"}</small></td><td><div className="registration-identity"><b>{job.proxy_label}</b><small>{job.exit_ip ? `出口 ${job.exit_ip}` : "等待识别出口 IP"}</small></div></td><td><div className="registration-status"><StatusBadge status={job.status}>{jobStatusLabel(job)}</StatusBadge>{job.failure_reason === "user_already_exists" && <small>建议更换基础地址</small>}</div></td><td><span className="muted-cell">{formatDate(job.created_at)}</span></td><td><JobCommands job={job} busy={jobActionIds.has(job.id)} onLogs={openLogs} onPause={(item) => controlJob(item, "pause")} onResume={(item) => controlJob(item, "resume")} onCancel={cancel} onRelease={setReleaseTarget} onDelete={(item) => setDeleteTarget({ kind: "job", ids: [item.id], item })} /></td></tr>;
+              return <tr className={`${checked ? "selected-row " : ""}${job.status === "failed" ? "registration-failed-row" : ""}`} key={job.id}><td className="select-column"><input type="checkbox" aria-label={`选择 ${job.email}`} checked={checked} disabled={!selectable} onChange={() => toggleJob(job.id)} /></td><td><button className="registration-email-button" onClick={() => copyText(job.email).then(() => toast("邮箱已复制"))}>{job.email}<Copy size={13} /></button><small className="registration-source">{job.source_email || (job.account_id ? "源邮箱已删除" : "链接取件邮箱")}</small></td><td><div className="registration-identity"><b>{job.display_name || "等待生成"}</b><small>{job.birth_date ? `${job.birth_date} · ${ageFromBirth(job.birth_date)} 岁` : "姓名和年龄自动随机"}</small></div></td><td><code className="fingerprint-code">{job.fingerprint_id}</code><small className="registration-source">{job.browser_mode === "headed" ? "内嵌 Camoufox" : "后台 Camoufox"}</small></td><td><div className="registration-identity"><b>{job.proxy_label}</b><small>{job.exit_ip ? `出口 ${job.exit_ip}` : "等待识别出口 IP"}</small></div></td><td><div className="registration-status"><StatusBadge status={job.status}>{jobStatusLabel(job)}</StatusBadge>{job.status === "failed" ? <small title={job.display_message || job.message}>{job.display_message || job.message || "未返回失败原因"}</small> : job.failure_reason === "user_already_exists" && <small>建议更换基础地址</small>}</div></td><td><span className="muted-cell">{formatDate(job.created_at)}</span></td><td><JobCommands job={job} busy={jobActionIds.has(job.id)} onLogs={openLogs} onPause={(item) => controlJob(item, "pause")} onResume={(item) => controlJob(item, "resume")} onCancel={cancel} onRelease={setReleaseTarget} onDelete={(item) => setDeleteTarget({ kind: "job", ids: [item.id], item })} /></td></tr>;
             })}</tbody></table></div>
-            <div className="registration-mobile-list">{jobs.map((job) => {
+            <div className="registration-mobile-list">{visibleJobs.map((job) => {
               const selectable = deletableStatuses.has(job.status);
               const checked = selectedJobIds.includes(job.id);
               return <article className={checked ? "selected" : ""} key={job.id}><header><input type="checkbox" aria-label={`选择 ${job.email}`} checked={checked} disabled={!selectable} onChange={() => toggleJob(job.id)} /><StatusBadge status={job.status}>{jobStatusLabel(job)}</StatusBadge><time>{formatDate(job.created_at)}</time></header><button onClick={() => copyText(job.email).then(() => toast("邮箱已复制"))}>{job.email}<Copy size={14} /></button><dl><div><dt>身份</dt><dd>{job.display_name || "等待生成"}</dd></div><div><dt>出口 IP</dt><dd>{job.exit_ip || "等待识别"}</dd></div><div><dt>代理</dt><dd>{job.proxy_label}</dd></div></dl><footer><span>{job.display_message || job.message || "-"}</span><JobCommands job={job} busy={jobActionIds.has(job.id)} onLogs={openLogs} onPause={(item) => controlJob(item, "pause")} onResume={(item) => controlJob(item, "resume")} onCancel={cancel} onRelease={setReleaseTarget} onDelete={(item) => setDeleteTarget({ kind: "job", ids: [item.id], item })} /></footer></article>;
             })}</div>
-            <div className="table-footer"><span>共 {jobs.length} 个注册任务</span></div>
-          </> : <EmptyState icon={UserPlus} title="还没有注册任务" description="选择源头邮箱和基础地址后开始注册。" />}
+            <div className="table-footer"><span>{jobFilter === "failed" ? `共 ${failedJobCount} 条注册失败记录` : `共 ${Number(jobCounts?.total ?? jobs.length)} 个注册任务`}</span></div>
+          </> : <EmptyState icon={jobFilter === "failed" ? AlertTriangle : UserPlus} title={jobFilter === "failed" ? "没有注册失败记录" : "还没有注册任务"} description={jobFilter === "failed" ? "当前没有未删除的失败邮箱。" : "选择源头邮箱和基础地址后开始注册。"} />}
         </section>
       </>}
 
@@ -1761,9 +1874,10 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
               <span className="registration-selection-count">已选 <b>{selectedAccountIds.length}</b> 个</span>
             </div>
             <div className="registration-account-bulk-actions">
-              <Button size="sm" icon={ListChecks} loading={checkingAccountSignals} disabled={!visibleAccountItems.length || importingNfapi} title={selectedAccountIds.length ? "重新检测所选账号的当前状态和订阅类型" : "检测当前分组内全部账号的状态和订阅类型"} onClick={refreshSelectedAccountSignals}>{selectedAccountIds.length ? "检测所选" : "检测当前筛选"}</Button>
-              <Button size="sm" icon={CreditCard} loading={checkingCheckouts} disabled={!pagedAccountItems.length || importingNfapi || checkingAccountSignals || checkingTrials} title={selectedAccountIds.length ? "用 DE/EUR custom checkout 检测所选账号返回 cs_live 还是 oaics" : "用 DE/EUR custom checkout 检测本页账号返回 cs_live 还是 oaics"} onClick={checkAccountCheckouts}>{selectedAccountIds.length ? "检测 Checkout" : "检测本页 Checkout"}</Button>
-              <Button size="sm" icon={Gift} loading={checkingTrials} disabled={!pagedAccountItems.length || importingNfapi || checkingAccountSignals || checkingCheckouts} title={selectedAccountIds.length ? "通过日本代理检测所选账号是否有 Plus 一个月免费试用资格" : "通过日本代理检测本页账号是否有 Plus 一个月免费试用资格"} onClick={checkAccountTrials}>{selectedAccountIds.length ? "检测日本试用" : "检测本页试用"}</Button>
+              <Button size="sm" icon={ListChecks} loading={checkingAccountSignals} disabled={!visibleAccountItems.length || importingNfapi} title={selectedAccountIds.length ? "重新检测所选账号的当前状态和订阅类型" : "检测当前分组内全部账号的状态和订阅类型"} onClick={refreshSelectedAccountSignals}>{checkingAccountSignals ? `检测中 ${checkingAccountSignalCount}` : (selectedAccountIds.length ? "检测所选" : "检测筛选")}</Button>
+              <Button size="sm" icon={CreditCard} loading={checkingCheckouts} disabled={!pagedAccountItems.length || importingNfapi || checkingAccountSignals || checkingTrials || checkingMomo} title={selectedAccountIds.length ? "用 DE/EUR custom checkout 检测所选账号返回 cs_live 还是 oaics" : "用 DE/EUR custom checkout 检测本页账号返回 cs_live 还是 oaics"} onClick={checkAccountCheckouts}>检测 Checkout</Button>
+              <Button size="sm" icon={Gift} loading={checkingTrials} disabled={!pagedAccountItems.length || importingNfapi || checkingAccountSignals || checkingCheckouts || checkingMomo} title={selectedAccountIds.length ? "通过日本代理检测所选账号的 Plus Checkout 是否为 0 元" : "通过日本代理检测本页账号的 Plus Checkout 是否为 0 元"} onClick={checkAccountTrials}>检测日本0元</Button>
+              <Button size="sm" icon={WalletCards} loading={checkingMomo} disabled={!pagedAccountItems.length || importingNfapi || checkingAccountSignals || checkingCheckouts || checkingTrials} title={selectedAccountIds.length ? "通过越南代理检测所选账号的零金额免费试用最终结账页是否显示 MoMo" : "通过越南代理检测本页账号的零金额免费试用最终结账页是否显示 MoMo"} onClick={checkAccountMomo}>检测 MoMo</Button>
               <Button size="sm" icon={Pencil} disabled={!selectedAccountIds.length || importingNfapi} title="统一修改所选账号的分组" onClick={openBulkGroupEditor}>编辑分组</Button>
               <Button size="sm" variant="primary" icon={Store} loading={publishingPickup} disabled={!selectedAccountIds.length || importingNfapi} title="只把所选账号的邮箱和取件链接上架到买家取件站" onClick={publishSelectedToPickup}>上架取件站</Button>
               <Button size="sm" icon={SlidersHorizontal} disabled={!selectedAccountIds.length || importingNfapi} title="为所选账号统一配置并批量导入 NFapi" onClick={() => openNfapiImporter(selectedAccountIds)}>批量导入</Button>
@@ -1775,7 +1889,7 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
             </div>
           </div>
           {visibleAccountItems.length ? <>
-            <div className="data-table-wrap registration-account-table-wrap"><table className="data-table registration-accounts-table"><thead><tr><th className="select-column"><input type="checkbox" aria-label="选择本页全部注册账号" checked={allAccountsSelected} disabled={!accountIds.length || importingNfapi} onChange={toggleAllAccounts} /></th><th>账号</th><th>凭据</th><th>身份 / 出口</th><th>状态 / 类型</th><th>Checkout</th><th>日本试用</th><th>NFapi</th><th>取件站</th><th>创建时间</th><th className="registration-actions-column" aria-label="操作" /></tr></thead><tbody>{pagedAccountItems.map((item) => {
+            <div className="data-table-wrap registration-account-table-wrap"><table className="data-table registration-accounts-table"><thead><tr><th className="select-column"><input type="checkbox" aria-label="选择本页全部注册账号" checked={allAccountsSelected} disabled={!accountIds.length || importingNfapi} onChange={toggleAllAccounts} /></th><th>账号</th><th>凭据</th><th>身份 / 出口</th><th>状态 / 类型</th><th>Checkout</th><th>日本0元</th><th>MoMo</th><th>NFapi</th><th>取件站</th><th>创建时间</th><th className="registration-actions-column" aria-label="操作" /></tr></thead><tbody>{pagedAccountItems.map((item) => {
               const checked = selectedAccountIds.includes(item.id);
               const nfapiState = nfapiAccountState(item);
               return <tr className={checked ? "selected-row" : ""} key={item.id}>
@@ -1786,6 +1900,7 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
                 <td><AccountSignalCell item={item} disabled={refreshingAccessTokenId !== null || importingNfapi} refreshingAccessToken={String(refreshingAccessTokenId) === String(item.id)} onRefreshAccessToken={refreshAccessToken} /></td>
                 <td><CheckoutStatusCell item={item} /></td>
                 <td><TrialStatusCell item={item} /></td>
+                <td><MomoStatusCell item={item} /></td>
                 <td><div className="registration-nfapi-status" title={nfapiState.error || nfapiState.accountId || nfapiState.label}><StatusBadge status={nfapiState.badge}>{nfapiState.label}</StatusBadge>{nfapiState.shortLived && <small>短期凭据</small>}{nfapiState.accountId && <code>#{nfapiState.accountId}</code>}{nfapiState.error && <small className="error">{nfapiState.error}</small>}</div></td>
                 <td><PickupStatusCell inventory={pickupInventory} email={item.email} /></td>
                 <td><span className="muted-cell">{formatDate(item.created_at)}</span></td>
@@ -1795,7 +1910,7 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
             <div className="registration-mobile-list">{pagedAccountItems.map((item) => {
               const checked = selectedAccountIds.includes(item.id);
               const nfapiState = nfapiAccountState(item);
-              return <article className={checked ? "selected" : ""} key={item.id}><header><input type="checkbox" aria-label={`选择 ${item.email}`} checked={checked} disabled={importingNfapi} onChange={() => toggleAccount(item.id)} /><AccountSignalCell item={item} compact disabled={refreshingAccessTokenId !== null || importingNfapi} refreshingAccessToken={String(refreshingAccessTokenId) === String(item.id)} onRefreshAccessToken={refreshAccessToken} /><time>{formatDate(item.created_at)}</time></header><AccountNameGroup item={item} mobile /><button onClick={() => copyText(item.email).then(() => toast("邮箱已复制"))}>{item.email}<Copy size={14} /></button><div className="registration-mobile-credentials"><PasswordCell value={item.password} status={item.password_status} error={item.password_error} available={item.password_available} onCopy={() => copyText(item.password).then(() => toast("密码已复制"))} /><AccessTokenCell available={item.access_token_available} loading={copyingTokenId === item.id} onCopy={() => copyAccessToken(item)} /></div><div className="registration-mobile-facts"><div className="registration-account-exit"><Globe2 size={14} /><span><small>出口 IP</small><b>{item.exit_ip || "未记录"}</b></span></div><div className="registration-account-exit"><CreditCard size={14} /><span><small>Checkout</small><CheckoutStatusCell item={item} compact /></span></div><div className="registration-account-exit"><Gift size={14} /><span><small>日本试用</small><TrialStatusCell item={item} compact /></span></div><div className="registration-account-exit"><Database size={14} /><span><small>NFapi</small><b>{nfapiState.label}{nfapiState.shortLived ? " · 短期凭据" : ""}</b></span></div><div className="registration-account-exit registration-mobile-pickup"><Store size={14} /><span><small>取件站</small><PickupStatusCell inventory={pickupInventory} email={item.email} compact /></span></div></div>{nfapiState.error && <div className="inline-alert error"><AlertTriangle size={14} /><span>{nfapiState.error}</span></div>}<footer><span>{item.display_name || "未记录"}</span><AccountCommands item={item} checking={checkingAccountSignals} busy={importingNfapi} onRefresh={refreshAccountSignals} onPassword={openPasswordSetup} onNfapi={openNfapiImporter} onMailbox={openAccountMailbox} onEdit={openAccountEditor} onCopy={copyRegisteredAccount} onDelete={(target) => setDeleteTarget({ kind: "account", ids: [target.id], item: target })} /></footer></article>;
+              return <article className={checked ? "selected" : ""} key={item.id}><header><input type="checkbox" aria-label={`选择 ${item.email}`} checked={checked} disabled={importingNfapi} onChange={() => toggleAccount(item.id)} /><AccountSignalCell item={item} compact disabled={refreshingAccessTokenId !== null || importingNfapi} refreshingAccessToken={String(refreshingAccessTokenId) === String(item.id)} onRefreshAccessToken={refreshAccessToken} /><time>{formatDate(item.created_at)}</time></header><AccountNameGroup item={item} mobile /><button onClick={() => copyText(item.email).then(() => toast("邮箱已复制"))}>{item.email}<Copy size={14} /></button><div className="registration-mobile-credentials"><PasswordCell value={item.password} status={item.password_status} error={item.password_error} available={item.password_available} onCopy={() => copyText(item.password).then(() => toast("密码已复制"))} /><AccessTokenCell available={item.access_token_available} loading={copyingTokenId === item.id} onCopy={() => copyAccessToken(item)} /></div><div className="registration-mobile-facts"><div className="registration-account-exit"><Globe2 size={14} /><span><small>出口 IP</small><b>{item.exit_ip || "未记录"}</b></span></div><div className="registration-account-exit"><CreditCard size={14} /><span><small>Checkout</small><CheckoutStatusCell item={item} compact /></span></div><div className="registration-account-exit"><Gift size={14} /><span><small>日本0元</small><TrialStatusCell item={item} compact /></span></div><div className="registration-account-exit"><WalletCards size={14} /><span><small>MoMo</small><MomoStatusCell item={item} compact /></span></div><div className="registration-account-exit"><Database size={14} /><span><small>NFapi</small><b>{nfapiState.label}{nfapiState.shortLived ? " · 短期凭据" : ""}</b></span></div><div className="registration-account-exit registration-mobile-pickup"><Store size={14} /><span><small>取件站</small><PickupStatusCell inventory={pickupInventory} email={item.email} compact /></span></div></div>{nfapiState.error && <div className="inline-alert error"><AlertTriangle size={14} /><span>{nfapiState.error}</span></div>}<footer><span>{item.display_name || "未记录"}</span><AccountCommands item={item} checking={checkingAccountSignals} busy={importingNfapi} onRefresh={refreshAccountSignals} onPassword={openPasswordSetup} onNfapi={openNfapiImporter} onMailbox={openAccountMailbox} onEdit={openAccountEditor} onCopy={copyRegisteredAccount} onDelete={(target) => setDeleteTarget({ kind: "account", ids: [target.id], item: target })} /></footer></article>;
             })}</div>
           </> : <EmptyState icon={KeyRound} title={accountSearch.trim() ? "没有匹配的账号" : "这个分组还没有账号"} description={accountSearch.trim() ? `没有找到邮箱包含“${accountSearch.trim()}”的账号` : undefined} action={accountSearch.trim() ? <Button onClick={() => changeAccountSearch("")}>清除查询</Button> : <Button onClick={() => changeAccountGroupFilter("all")}>查看全部账号</Button>} />}
           <div className="table-footer registration-account-footer">
@@ -2001,7 +2116,8 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
           <datalist id="registration-account-groups">{customAccountGroups.map((group) => <option key={group} value={group} />)}</datalist>
         </div>
       </Modal>
-      <Modal open={Boolean(logJob)} onClose={() => { setLogJob(null); setLogs(null); }} title="注册日志" description={logJob?.email} size="lg">
+      <Modal open={Boolean(logJob)} onClose={() => { setLogJob(null); setLogs(null); }} title={logJob?.status === "failed" ? "注册失败日志" : "注册日志"} description={logJob?.email} size="lg">
+        {logJob?.status === "failed" && <div className="registration-failure-log-summary"><div><span>注册邮箱</span><button type="button" onClick={() => copyText(logJob.email).then(() => toast("邮箱已复制"))}>{logJob.email}<Copy size={13} /></button></div><div><span>失败阶段</span><b>{logJob.stage || "未记录"}</b></div><p>{logJob.display_message || logJob.message || "未返回失败原因"}</p></div>}
         {!logs ? <LoadingBlock rows={6} /> : logs.length ? <div className="registration-log-list">{logs.map((item, index) => <div className={item.level === "error" ? "error" : ""} key={item.id || index}><time>{item.created_at ? formatDate(item.created_at) : String(index + 1).padStart(2, "0")}</time><span>{item.message || item.detail?.message || JSON.stringify(item.detail || item)}</span></div>)}</div> : <EmptyState icon={ScrollText} title="暂无任务日志" />}
       </Modal>
       <ConfirmDialog open={Boolean(releaseTarget)} onClose={() => { if (!releasing) setReleaseTarget(null); }} onConfirm={releaseJob} loading={releasing} danger title="强制释放这个注册任务？" description={releaseTarget ? `将先请求 Frcibly 停止任务 ${releaseTarget.email}，随后只把本地注册记录标记为已中断或已取消。不会删除分裂邮箱、账号凭据或任何已经注册成功的 ChatGPT 账号。` : ""} confirmText="释放任务" />

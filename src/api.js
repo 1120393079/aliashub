@@ -27,7 +27,7 @@ export async function api(path, options = {}) {
   const contentType = response.headers.get("content-type") || "";
   const data = contentType.includes("application/json") ? await response.json() : await response.text();
   if (!response.ok) {
-    throw new ApiError(data?.error || data || "请求失败", response.status, data?.code);
+    throw new ApiError(data?.error || data?.message || data || "请求失败", response.status, data?.code);
   }
   return data;
 }

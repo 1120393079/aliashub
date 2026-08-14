@@ -212,7 +212,7 @@ test("scans bounded iCloud MIME, extracts codes, and skips persisted UIDs", asyn
   assert.equal(result.messages[0].senderAddress, "security@example.com");
   assert.deepEqual(result.messages[0].recipients, ["source@icloud.com"]);
   assert.equal(result.messages[0].isRead, true);
-  assert.equal(result.messages[0].bodyContentType, "text");
+  assert.equal(result.messages[0].bodyContentType, "html");
   assert.match(result.messages[0].body, /482913/);
   assert.equal(JSON.stringify(result).includes(APP_PASSWORD), false);
   assert.equal(configurations.at(-1).auth.user, "source");

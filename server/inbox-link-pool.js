@@ -1,9 +1,9 @@
 import crypto from "node:crypto";
 import { createSourceAccount, nowIso } from "./db.js";
 
-const EMAIL_PATTERN = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+const EMAIL_PATTERN = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/i;
 const DEFAULT_DISPOSE_API_BASE = "https://dispose.lol/api/inbox-link";
-const MAIL_BODY_LIMIT = 120_000;
+const MAIL_BODY_LIMIT = 1_000_000;
 const LINK_LIMIT = 4_096;
 const PUBLIC_LINK_PATHS = new Set(["ib", "inbox", "mail", "mailbox", "p", "pickup", "view"]);
 
@@ -62,6 +62,28 @@ function parseInboxLink(value, lineNumber) {
   return parsed.toString();
 }
 
+function parseInboxLinkRow(line, lineNumber) {
+  const linkStart = line.search(/https:\/\//i);
+  if (linkStart < 0) {
+    throw Object.assign(new Error(`第 ${lineNumber} 行未检测到 HTTPS 取件链接`), { status: 400 });
+  }
+
+  const prefix = line.slice(0, linkStart).trim();
+  let email = "";
+  for (let end = prefix.length; end > 0; end -= 1) {
+    const candidate = prefix.slice(0, end).trimEnd();
+    if (EMAIL_PATTERN.test(candidate)) {
+      email = candidate;
+      break;
+    }
+  }
+  if (!email) {
+    throw Object.assign(new Error(`第 ${lineNumber} 行未检测到有效邮箱`), { status: 400 });
+  }
+
+  return [email, line.slice(linkStart).trim()];
+}
+
 export function maskInboxLinkKey(value) {
   const key = String(value || "");
   return key.length <= 8 ? "*".repeat(key.length) : `${key.slice(0, 4)}...${key.slice(-4)}`;
@@ -107,10 +129,7 @@ export function parseInboxLinkPool(input, { maximum = 200 } = {}) {
     const lineNumber = index + 1;
     const line = lines[index].replace(/^\uFEFF/, "").trim();
     if (!line || line.startsWith("#") || line.startsWith("//")) continue;
-    const parts = line.split(/\s+/);
-    if (parts.length !== 2) {
-      throw Object.assign(new Error(`第 ${lineNumber} 行格式错误，应为：邮箱 空格 取件链接`), { status: 400 });
-    }
+    const parts = parseInboxLinkRow(line, lineNumber);
     const email = parts[0].trim();
     if (!EMAIL_PATTERN.test(email)) {
       throw Object.assign(new Error(`第 ${lineNumber} 行邮箱格式无效`), { status: 400 });
@@ -139,7 +158,7 @@ export function parseInboxLinkPool(input, { maximum = 200 } = {}) {
     }
   }
   if (!entries.length) {
-    throw Object.assign(new Error("链接取件邮箱池为空，请按“邮箱 空格 取件链接”每行填写一组"), { status: 400 });
+    throw Object.assign(new Error("链接取件邮箱池为空，请每行填写邮箱和 HTTPS 取件链接"), { status: 400 });
   }
   return entries;
 }
@@ -499,11 +518,13 @@ export class InboxLinkMailboxService {
       const subject = String(message.subject || "(无主题)");
       const textBody = message.textBody ?? message.text_body ?? message.body;
       const htmlBody = message.htmlBody ?? message.html_body;
-      const rawBody = typeof textBody === "string" && textBody.trim()
-        ? textBody : htmlToText(htmlBody);
+      const html = typeof htmlBody === "string" ? htmlBody.trim() : "";
+      const readableBody = typeof textBody === "string" && textBody.trim()
+        ? textBody : htmlToText(html);
+      const rawBody = html || readableBody;
       const body = String(rawBody || "").slice(0, MAIL_BODY_LIMIT);
-      const preview = `${subject}\n${body}`.replace(/\s+/g, " ").trim().slice(0, 500);
-      const code = verificationCode(`${subject}\n${body}`);
+      const preview = `${subject}\n${readableBody}`.replace(/\s+/g, " ").trim().slice(0, 500);
+      const code = verificationCode(`${subject}\n${readableBody}`);
       const senderValue = message.from || message.sender
         || (message.sender_name && message.sender_address ? `${message.sender_name} <${message.sender_address}>` : message.sender_address);
       const sender = senderParts(senderValue);
@@ -524,7 +545,7 @@ export class InboxLinkMailboxService {
         subject,
         preview,
         body,
-        bodyContentType: "text",
+        bodyContentType: html ? "html" : "text",
         bodyTruncated: String(rawBody || "").length > MAIL_BODY_LIMIT,
         verificationCode: code,
         webLink: "",

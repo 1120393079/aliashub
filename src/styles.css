@@ -162,17 +162,65 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .notification-button span { position: absolute; top: 1px; right: 0; min-width: 16px; height: 16px; padding: 0 4px; border: 2px solid var(--surface); border-radius: 8px; background: var(--coral); color: white; font-size: 9px; line-height: 12px; }
 .page-content { min-height: calc(100vh - 75px); padding: 24px 27px 40px; }
 .page-inbox { padding: 0; }
+.icloud-privacy-page { max-width: 1320px; }
+.icloud-privacy-alert { margin: 0; }
+.icloud-privacy-console { max-width: 760px; overflow: hidden; }
+.icloud-source-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 14px; padding: 16px 17px 0; }
+.icloud-login-state { min-height: 42px; display: flex; align-items: center; gap: 8px; }
+.icloud-create-inline { display: grid; grid-template-columns: minmax(120px, 180px) auto; align-items: end; gap: 12px; padding: 16px 17px; }
+.icloud-create-inline > .button { min-height: 40px; }
+.icloud-privacy-workspace { display: grid; grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr); gap: 15px; align-items: start; }
+.icloud-privacy-login-panel, .icloud-privacy-create-panel { overflow: hidden; }
+.icloud-privacy-panel-title { display: flex; align-items: center; gap: 10px; }
+.icloud-privacy-panel-title > span { display: grid; }
+.icloud-privacy-form { display: grid; gap: 14px; padding: 17px; }
+.icloud-privacy-form > .button { justify-self: start; }
+.icloud-privacy-form-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.icloud-privacy-pending { min-height: 55px; display: flex; align-items: center; gap: 10px; padding: 9px 11px; border: 1px solid color-mix(in srgb, var(--amber) 28%, var(--line)); border-radius: 6px; background: var(--amber-soft); color: var(--amber); }
+.icloud-privacy-pending > span { min-width: 0; display: grid; gap: 3px; }
+.icloud-privacy-pending b { overflow: hidden; color: var(--text); font-size: 11px; text-overflow: ellipsis; }
+.icloud-privacy-pending small { color: var(--text-soft); font-size: 9px; }
+.icloud-privacy-code-input { font: 700 20px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 6px; }
+.icloud-create-progress { display: grid; gap: 7px; margin: 0 17px 16px; padding: 11px; border: 1px solid color-mix(in srgb, var(--green) 26%, var(--line)); border-radius: 6px; background: var(--green-soft); }
+.icloud-create-progress > div { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--green-dark); font-size: 10px; }
+.icloud-create-progress > div b { color: var(--text); font-size: 11px; }
+.icloud-create-progress-track { display: block; height: 5px; border-radius: 3px; background: var(--surface); overflow: hidden; }
+.icloud-create-progress-track i { display: block; height: 100%; border-radius: inherit; background: var(--green); transition: width .25s ease; }
+.icloud-create-progress.running .icloud-create-progress-track i { min-width: 4px; }
+.icloud-create-progress small { color: var(--text-soft); font-size: 9px; }
+.icloud-session-list { display: grid; border-top: 1px solid var(--line); }
+.icloud-session-list > button { min-width: 0; min-height: 58px; display: flex; align-items: center; gap: 9px; border: 0; border-bottom: 1px solid var(--line); padding: 8px 13px; background: var(--surface-2); text-align: left; }
+.icloud-session-list > button:last-child { border-bottom: 0; }
+.icloud-session-list > button:hover, .icloud-session-list > button.active { background: var(--green-soft); }
+.icloud-session-list > button.active { box-shadow: inset 3px 0 0 var(--green); }
+.icloud-session-list > button > span:nth-child(2) { min-width: 0; flex: 1; display: grid; gap: 3px; }
+.icloud-session-list b, .icloud-session-list small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.icloud-session-list b { font-size: 11px; }
+.icloud-session-list small { color: var(--text-faint); font-size: 8px; }
+.icloud-created-result { border-top: 1px solid var(--line); background: var(--surface-2); }
+.icloud-created-result > header { min-height: 48px; display: flex; align-items: center; gap: 8px; padding: 7px 13px; color: var(--green); }
+.icloud-created-result > header b { flex: 1; color: var(--text); font-size: 10px; }
+.icloud-created-result > button { width: 100%; min-height: 37px; display: flex; align-items: center; justify-content: space-between; gap: 8px; border: 0; border-top: 1px solid var(--line); padding: 7px 13px; background: var(--surface); color: var(--green-dark); text-align: left; }
+.icloud-created-result > button span { min-width: 0; overflow: hidden; font-size: 10px; text-overflow: ellipsis; }
+.icloud-mailbox-address { display: inline-flex; align-items: center; gap: 7px; border: 0; background: transparent; color: var(--green-dark); padding: 0; font-weight: 650; }
+.icloud-record-selection { min-height: 46px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--line); padding: 7px 13px; background: var(--coral-soft); color: var(--coral); font-size: 10px; }
+.icloud-record-selection > .button { margin-left: auto; }
+.icloud-mobile-select-all { display: none; }
+.icloud-privacy-mobile-list { display: none; }
 .page-stack { display: grid; gap: 18px; max-width: 1500px; margin: 0 auto; }
 .mobile-bottom-nav { display: none; }
 
 .registration-page > .segmented { justify-self: start; }
 .registration-summary { min-height: 50px; display: flex; align-items: center; gap: 0; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); box-shadow: var(--shadow); overflow-x: auto; }
-.registration-summary > span { min-width: 175px; height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 16px; border-right: 1px solid var(--line); color: var(--text-soft); white-space: nowrap; }
-.registration-summary > span:last-child { border-right: 0; }
+.registration-summary > span, .registration-summary > button { min-width: 175px; height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 16px; border: 0; border-right: 1px solid var(--line); background: transparent; color: var(--text-soft); white-space: nowrap; }
+.registration-summary > :last-child { border-right: 0; }
+.registration-summary > button { cursor: pointer; font: inherit; text-align: left; }
+.registration-summary > button:hover { background: var(--coral-soft); }
 .registration-summary svg { color: var(--green); }
 .registration-summary b { font-size: 10px; font-weight: 600; }
 .registration-summary strong { margin-left: auto; color: var(--text); font-size: 16px; }
 .registration-summary .status-badge { margin-left: auto; }
+.registration-summary .registration-summary-failed svg, .registration-summary .registration-summary-failed strong { color: var(--coral); }
 .registration-queue-bar { min-height: 58px; display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 9px 13px; border: 1px solid color-mix(in srgb, var(--green) 26%, var(--line)); border-radius: 7px; background: var(--surface); box-shadow: var(--shadow); }
 .registration-queue-bar.paused { border-color: color-mix(in srgb, var(--amber) 34%, var(--line)); background: color-mix(in srgb, var(--amber-soft) 44%, var(--surface)); }
 .registration-queue-bar > div:first-child { min-width: 0; display: flex; align-items: center; gap: 10px; }
@@ -332,14 +380,18 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .registration-browser-frame { width: 100%; aspect-ratio: 16 / 10; min-height: 380px; background: #111; }
 .registration-browser-frame iframe { display: block; width: 100%; height: 100%; border: 0; }
 .registration-task-panel, .registration-account-panel { overflow: hidden; }
+.registration-task-header-actions { display: flex; align-items: center; gap: 8px; }
+.registration-task-header-actions .segmented { min-height: 31px; }
+.registration-task-header-actions .segmented button { min-height: 29px; padding: 0 9px; }
+.registration-jobs-table .registration-failed-row { background: color-mix(in srgb, var(--coral-soft) 38%, var(--surface)); }
 .registration-bulk-bar { min-height: 44px; display: flex; align-items: center; gap: 12px; padding: 7px 13px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
 .registration-bulk-bar label { display: inline-flex; align-items: center; gap: 7px; color: var(--text-soft); font-size: 10px; font-weight: 650; white-space: nowrap; }
 .registration-bulk-bar > span { margin-left: auto; color: var(--text-soft); font-size: 10px; }
 .registration-bulk-bar > span b { color: var(--text); }
-.registration-account-toolbar { min-height: 54px; display: grid; grid-template-columns: minmax(280px, 1fr) auto; align-items: center; gap: 10px 16px; padding: 9px 13px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
+.registration-account-toolbar { min-height: 54px; display: grid; grid-template-columns: minmax(0, 1fr); align-items: center; gap: 8px; padding: 9px 13px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
 .registration-account-filters, .registration-account-bulk-actions { min-width: 0; display: flex; align-items: center; gap: 8px; }
-.registration-account-filters { flex-wrap: wrap; }
-.registration-account-bulk-actions { justify-content: flex-end; }
+.registration-account-toolbar > .registration-account-filters { flex-wrap: nowrap; }
+.registration-account-toolbar > .registration-account-bulk-actions { justify-content: flex-start; flex-wrap: wrap; }
 .registration-select-page { display: inline-flex; align-items: center; gap: 7px; color: var(--text-soft); font-size: 10px; font-weight: 650; white-space: nowrap; }
 .registration-selection-count { color: var(--text-soft); font-size: 10px; white-space: nowrap; }
 .registration-selection-count b { color: var(--text); }
@@ -351,7 +403,7 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .registration-bulk-group-option b { font-size: 10px; }
 .registration-bulk-group-option small { margin-top: 3px; color: var(--text-soft); font-size: 8px; line-height: 1.45; }
 .registration-account-table-wrap { scrollbar-gutter: stable; }
-.registration-accounts-table { min-width: 1395px; table-layout: fixed; }
+.registration-accounts-table { min-width: 1490px; table-layout: fixed; }
 .registration-accounts-table th:nth-child(1) { width: 42px; }
 .registration-accounts-table th:nth-child(2) { width: 220px; }
 .registration-accounts-table th:nth-child(3) { width: 160px; }
@@ -359,10 +411,11 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .registration-accounts-table th:nth-child(5) { width: 180px; }
 .registration-accounts-table th:nth-child(6) { width: 92px; }
 .registration-accounts-table th:nth-child(7) { width: 95px; }
-.registration-accounts-table th:nth-child(8) { width: 105px; }
-.registration-accounts-table th:nth-child(9) { width: 115px; }
-.registration-accounts-table th:nth-child(10) { width: 78px; }
-.registration-accounts-table th:nth-child(11) { width: 130px; }
+.registration-accounts-table th:nth-child(8) { width: 90px; }
+.registration-accounts-table th:nth-child(9) { width: 105px; }
+.registration-accounts-table th:nth-child(10) { width: 115px; }
+.registration-accounts-table th:nth-child(11) { width: 78px; }
+.registration-accounts-table th:nth-child(12) { width: 130px; }
 .registration-accounts-table td { height: 76px; padding: 8px 10px; white-space: normal; vertical-align: middle; }
 .registration-accounts-table td:last-child { padding-left: 6px; padding-right: 6px; }
 .registration-actions-column { text-align: center !important; }
@@ -400,7 +453,7 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .registration-identity b { font-size: 10px; }
 .registration-identity small { margin-top: 4px; color: var(--text-faint); font-size: 8px; }
 .registration-status { display: grid; justify-items: start; gap: 4px; }
-.registration-status small { color: var(--coral); font-size: 8px; white-space: nowrap; }
+.registration-status small { max-width: 230px; color: var(--coral); font-size: 8px; line-height: 1.4; overflow-wrap: anywhere; white-space: normal; }
 .registration-account-signal { min-width: 138px; display: grid; justify-items: start; gap: 4px; }
 .registration-account-signal > div { min-width: 0; display: flex; align-items: center; gap: 7px; }
 .registration-account-type { max-width: 130px; overflow: hidden; color: var(--text); font-size: 9px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
@@ -423,12 +476,18 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .registration-checkout-status small { max-width: 84px; overflow: hidden; color: var(--coral); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
 .registration-checkout-status.compact { display: flex; align-items: center; margin-top: 3px; }
 .registration-checkout-status.compact .status-badge { min-height: 20px; padding: 0 6px; font-size: 8px; }
-.status-checkout-cs { color: var(--green-dark); background: var(--green-soft); }
-.status-checkout-oaics { color: var(--purple); background: color-mix(in srgb, var(--purple) 10%, var(--surface)); }
+.status-badge.status-checkout-cs { border: 1px solid color-mix(in srgb, var(--green) 28%, transparent); color: var(--green-dark); background: var(--green-soft); }
+.status-badge.status-checkout-cs i { background: var(--green); }
+.status-badge.status-checkout-oaics { border: 1px solid color-mix(in srgb, var(--purple) 38%, transparent); color: var(--purple); background: var(--purple-soft); }
+.status-badge.status-checkout-oaics i { background: var(--purple); box-shadow: 0 0 0 2px color-mix(in srgb, var(--purple) 15%, transparent); }
 .registration-trial-status { display: grid; justify-items: start; gap: 3px; min-width: 0; }
 .registration-trial-status small { max-width: 88px; overflow: hidden; color: var(--coral); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
 .registration-trial-status.compact { display: flex; align-items: center; margin-top: 3px; }
 .registration-trial-status.compact .status-badge { min-height: 20px; padding: 0 6px; font-size: 8px; }
+.registration-momo-status { display: grid; justify-items: start; gap: 3px; min-width: 0; }
+.registration-momo-status small { max-width: 88px; overflow: hidden; color: var(--coral); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.registration-momo-status.compact { display: flex; align-items: center; margin-top: 3px; }
+.registration-momo-status.compact .status-badge { min-height: 20px; padding: 0 6px; font-size: 8px; }
 .registration-pickup-status { display: grid; justify-items: start; gap: 3px; min-width: 0; }
 .registration-pickup-status a { display: inline-flex; align-items: center; gap: 4px; color: var(--green-dark); font-size: 8px; font-weight: 650; text-decoration: none; }
 .registration-pickup-status a:hover { text-decoration: underline; }
@@ -494,6 +553,7 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .sales-delivery-result textarea { min-height: 250px; color: var(--green-dark); }
 .fingerprint-code { display: block; color: var(--purple); font-size: 9px; }
 .registration-row-command { display: grid; place-items: center; width: 30px; height: 30px; border: 0; border-radius: 6px; background: transparent; color: var(--text-soft); }
+.registration-row-command.registration-log-command { width: auto; grid-auto-flow: column; gap: 4px; padding: 0 7px; font-size: 8px; }
 .registration-row-command:hover { background: var(--surface-3); color: var(--text); }
 .registration-row-command.warning:hover { background: var(--amber-soft); color: var(--amber); }
 .registration-row-command.danger:hover { background: var(--coral-soft); color: var(--coral); }
@@ -564,6 +624,13 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .registration-log-list time { color: var(--text-faint); font: 8px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .registration-log-list span { overflow-wrap: anywhere; font: 9px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .registration-log-list .error span { color: var(--coral); }
+.registration-failure-log-summary { display: grid; grid-template-columns: minmax(0, 1fr) minmax(120px, 0.35fr); gap: 1px; margin-bottom: 12px; overflow: hidden; border: 1px solid color-mix(in srgb, var(--coral) 28%, var(--line)); border-radius: 6px; background: var(--line); }
+.registration-failure-log-summary > div { min-width: 0; display: grid; gap: 5px; background: var(--surface-2); padding: 10px 11px; }
+.registration-failure-log-summary span { color: var(--text-faint); font-size: 8px; }
+.registration-failure-log-summary button { min-width: 0; display: flex; align-items: center; gap: 6px; overflow: hidden; border: 0; background: transparent; padding: 0; color: var(--green-dark); font-size: 10px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.registration-failure-log-summary button svg { flex: 0 0 auto; }
+.registration-failure-log-summary b { font-size: 10px; }
+.registration-failure-log-summary p { grid-column: 1 / -1; margin: 0; background: var(--coral-soft); padding: 10px 11px; color: var(--coral); font-size: 9px; line-height: 1.5; overflow-wrap: anywhere; }
 
 
 .button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 36px; border: 1px solid var(--line-strong); border-radius: 6px; padding: 0 12px; background: var(--surface); color: var(--text); white-space: nowrap; transition: background 0.15s, border-color 0.15s, transform 0.1s; }
@@ -887,6 +954,8 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .mail-read-state.unread { background: var(--blue-soft); color: var(--blue); }
 .mail-attachment-state { background: var(--amber-soft); color: var(--amber); }
 .mail-detail-body { min-height: 0; flex: 1; padding: 24px 28px 40px; overflow-y: auto; }
+.mail-detail-body.mail-detail-html { display: flex; padding: 0; overflow: hidden; background: #fff; }
+.mail-html-frame { min-width: 0; min-height: 0; width: 100%; flex: 1; border: 0; background: #fff; color-scheme: light; }
 .mail-detail-body > svg { color: var(--green); }
 .mail-detail-body p { max-width: 920px; color: var(--text); font-size: 12px; line-height: 1.75; white-space: pre-wrap; overflow-wrap: anywhere; }
 .mail-detail-body > span { color: var(--text-faint); font-size: 11px; }
@@ -1078,16 +1147,38 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .nfapi-mailbox-error { display: flex; align-items: flex-start; gap: 7px; padding: 8px 10px; border-bottom: 1px solid color-mix(in srgb, var(--coral) 28%, var(--line)); background: var(--coral-soft); color: var(--coral); font-size: 8px; line-height: 1.45; }
 .nfapi-mailbox-error svg { flex: 0 0 auto; }
 .nfapi-mail-list { display: grid; }
-.nfapi-mail-item { min-width: 0; display: grid; gap: 6px; padding: 10px 11px; border-bottom: 1px solid var(--line); }
+.nfapi-mail-item { position: relative; min-width: 0; display: grid; gap: 6px; padding: 10px 11px; border-bottom: 1px solid var(--line); transition: background 0.14s ease; }
+.nfapi-mail-item:hover { background: var(--surface-2); }
 .nfapi-mail-item:last-child { border-bottom: 0; }
 .nfapi-mail-item > header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .nfapi-mail-item > header b { min-width: 0; overflow: hidden; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.nfapi-mail-item > header > span { display: flex; align-items: center; gap: 4px; color: var(--text-faint); }
+.nfapi-mail-item > header > span svg { flex: 0 0 auto; }
 .nfapi-mail-item time { flex: 0 0 auto; color: var(--text-faint); font-size: 8px; }
 .nfapi-mail-item strong { overflow: hidden; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .nfapi-mail-item p { display: -webkit-box; overflow: hidden; color: var(--text-soft); font-size: 8px; line-height: 1.5; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-.nfapi-mail-code { width: 100%; min-height: 38px; display: flex; align-items: center; justify-content: center; gap: 8px; border: 1px solid color-mix(in srgb, var(--green) 28%, var(--line)); border-radius: 5px; background: var(--green-soft); color: var(--green-dark); }
+.nfapi-mail-open { position: absolute; inset: 0; z-index: 1; border: 0; background: transparent; cursor: pointer; }
+.nfapi-mail-open:focus-visible { outline: 2px solid var(--green); outline-offset: -3px; }
+.nfapi-mail-code { position: relative; z-index: 2; width: 100%; min-height: 38px; display: flex; align-items: center; justify-content: center; gap: 8px; border: 1px solid color-mix(in srgb, var(--green) 28%, var(--line)); border-radius: 5px; background: var(--green-soft); color: var(--green-dark); }
 .nfapi-mail-code:hover { border-color: var(--green); }
 .nfapi-mail-code span { font: 750 19px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.nfapi-mail-detail { min-height: 100%; display: flex; flex-direction: column; }
+.nfapi-mail-detail > header { min-height: 58px; display: flex; align-items: center; gap: 8px; padding: 9px 10px; border-bottom: 1px solid var(--line); }
+.nfapi-mail-detail > header > span { min-width: 0; display: grid; flex: 1; gap: 3px; }
+.nfapi-mail-detail > header strong, .nfapi-mail-detail > header small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nfapi-mail-detail > header strong { font-size: 11px; }
+.nfapi-mail-detail > header small { color: var(--text-soft); font-size: 8px; }
+.nfapi-mail-detail-meta { display: grid; margin: 0; border-bottom: 1px solid var(--line); background: var(--surface-2); }
+.nfapi-mail-detail-meta > div { min-width: 0; display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 8px; padding: 7px 11px; border-bottom: 1px solid var(--line); }
+.nfapi-mail-detail-meta > div:last-child { border-bottom: 0; }
+.nfapi-mail-detail-meta dt { color: var(--text-faint); font-size: 8px; }
+.nfapi-mail-detail-meta dd { margin: 0; overflow-wrap: anywhere; color: var(--text-soft); font-size: 9px; }
+.nfapi-mail-detail-code { width: auto; margin: 11px 11px 0; }
+.nfapi-mail-detail-body { padding: 13px 14px 22px; }
+.nfapi-mail-detail-body.nfapi-mail-detail-html { min-height: 340px; display: flex; flex: 1; padding: 0; overflow: hidden; background: #fff; }
+.nfapi-mail-html-frame { min-width: 0; min-height: 340px; width: 100%; flex: 1; border: 0; background: #fff; color-scheme: light; }
+.nfapi-mail-detail-body p { color: var(--text); font-size: 9px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+.nfapi-mail-detail-body > span { color: var(--text-faint); font-size: 9px; }
 .nfapi-mailbox-empty { min-height: 240px; display: grid; align-content: center; justify-items: center; gap: 7px; padding: 24px; text-align: center; }
 .nfapi-mailbox-empty svg { color: var(--text-faint); }
 .nfapi-mailbox-empty b { font-size: 10px; }
@@ -1192,10 +1283,35 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
   .topbar-actions > .button { display: none; }
   .page-content { min-height: calc(100vh - 64px); padding: 14px 12px 86px; }
   .page-content.page-inbox { min-height: 0; padding: 0; }
+  .icloud-privacy-workspace { grid-template-columns: 1fr; }
+  .icloud-source-row, .icloud-create-inline { grid-template-columns: 1fr; }
+  .icloud-login-state { min-height: 0; justify-content: space-between; }
+  .icloud-create-inline > .button { width: 100%; }
+  .icloud-privacy-form { padding: 13px; }
+  .icloud-privacy-form > .button { width: 100%; }
+  .icloud-privacy-table .data-table-wrap { display: none; }
+  .icloud-mobile-select-all { min-height: 42px; display: flex; align-items: center; border-bottom: 1px solid var(--line); padding: 8px 12px; }
+  .icloud-mobile-select-all label { display: flex; align-items: center; gap: 8px; color: var(--text-soft); font-size: 10px; font-weight: 650; }
+  .icloud-privacy-mobile-list { display: grid; }
+  .icloud-privacy-mobile-list article { display: grid; border-bottom: 1px solid var(--line); background: var(--surface); }
+  .icloud-privacy-mobile-list article.selected { background: var(--green-soft); }
+  .icloud-privacy-mobile-list article:last-child { border-bottom: 0; }
+  .icloud-privacy-mobile-list header { min-height: 50px; display: flex; align-items: center; gap: 8px; padding: 8px 12px; }
+  .icloud-privacy-mobile-list header > span:nth-child(2) { min-width: 0; flex: 1; display: grid; gap: 2px; }
+  .icloud-privacy-mobile-list header b { overflow: hidden; font-size: 10px; text-overflow: ellipsis; }
+  .icloud-privacy-mobile-list header small { color: var(--text-faint); font-size: 8px; }
+  .icloud-privacy-mobile-list article > button { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; border: 0; border-top: 1px solid var(--line); padding: 12px; background: var(--surface-2); color: var(--green-dark); font-size: 11px; font-weight: 650; text-align: left; overflow-wrap: anywhere; }
+  .icloud-privacy-mobile-list footer { min-height: 36px; display: flex; justify-content: space-between; gap: 10px; padding: 8px 12px; color: var(--text-faint); font-size: 8px; }
   .page-stack { gap: 12px; }
   .registration-page > .segmented { width: 100%; }
   .registration-page > .segmented button { flex: 1; }
-  .registration-summary > span { min-width: 145px; padding: 0 11px; }
+  .registration-summary > span, .registration-summary > button { min-width: 145px; padding: 0 11px; }
+  .registration-task-panel > .panel-header { align-items: flex-start; flex-direction: column; }
+  .registration-task-header-actions { width: 100%; }
+  .registration-task-header-actions .segmented { min-width: 0; flex: 1; }
+  .registration-task-header-actions .segmented button { flex: 1; }
+  .registration-failure-log-summary { grid-template-columns: 1fr; }
+  .registration-failure-log-summary p { grid-column: auto; }
   .registration-launch-form { padding: 13px; }
   .registration-launch-form > .button { width: 100%; }
   .inbox-link-summary { grid-template-columns: 1fr; }
@@ -1293,6 +1409,7 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
   .registration-bulk-bar > .button { width: 100%; }
   .registration-account-toolbar { padding: 9px 10px; }
   .registration-account-filters, .registration-account-bulk-actions { width: 100%; }
+  .registration-account-toolbar > .registration-account-filters { flex-wrap: wrap; }
   .registration-account-bulk-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .registration-account-bulk-actions .button { width: 100%; min-width: 0; padding-left: 7px; padding-right: 7px; }
   .registration-account-footer { gap: 9px; padding: 10px; }
@@ -1388,6 +1505,7 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
   .mail-detail-meta > div { min-width: 0; min-height: 52px; padding: 8px 11px; border-bottom: 1px solid var(--line); }
   .mail-detail-meta > div:nth-child(2n) { border-right: 0; }
   .mail-detail-body { padding: 18px 15px 32px; }
+  .mail-detail-body.mail-detail-html { padding: 0; }
   .mail-detail-body p { font-size: 11px; }
   .data-table-wrap { display: none; }
   .mobile-address-list { display: grid; gap: 9px; padding: 10px; }

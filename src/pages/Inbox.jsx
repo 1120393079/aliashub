@@ -29,6 +29,11 @@ function senderAddress(item) {
   return item.sender_address || item.sender_name || "";
 }
 
+function isHtmlMessage(item) {
+  return String(item?.body_content_type || "").toLowerCase() === "html"
+    || /^\s*(?:<!doctype\s+html\b|<html\b|<head\b|<body\b)/i.test(String(item?.body || ""));
+}
+
 export default function InboxPage({ refreshKey, onDataChange, initialAccountId }) {
   const [accounts, setAccounts] = useState([]);
   const [accountId, setAccountId] = useState(initialAccountId ? String(initialAccountId) : "all");
@@ -168,6 +173,7 @@ export default function InboxPage({ refreshKey, onDataChange, initialAccountId }
   const trashCount = data?.hidden ?? 0;
   const shownCount = folder === "trash" ? trashCount : inboxCount;
   const detailBody = detail?.body || detail?.preview || "";
+  const detailIsHtml = Boolean(detail?.body) && isHtmlMessage(detail);
   const accountById = new Map(accounts.map((account) => [account.id, account]));
   const sourceAccounts = accounts.filter((account) => account.provider !== "inbox_link");
   const inboxLinkAccounts = accounts.filter((account) => account.provider === "inbox_link");
@@ -247,7 +253,7 @@ export default function InboxPage({ refreshKey, onDataChange, initialAccountId }
               <div><dt>邮件状态</dt><dd><span className={`mail-read-state ${detail.is_read ? "read" : "unread"}`}>{detail.is_read ? "已读" : "未读"}</span>{detail.has_attachments && <span className="mail-attachment-state"><Paperclip size={12} />包含附件</span>}</dd></div>
               <div><dt>接收时间</dt><dd>{formatDate(detail.received_at)}</dd></div>
             </dl>
-            <div className="mail-detail-body">{detailError && <div className="mail-detail-error"><AlertCircle size={16} /><span>{detailError}</span><Button size="sm" icon={RefreshCw} onClick={retryDetail}>重试</Button></div>}{detailLoading && <LoaderCircle className="spin" size={16} />}{detailBody ? <p>{detailBody}</p> : !detailLoading && <span>这封邮件没有正文内容。</span>}</div>
+            <div className={`mail-detail-body ${detailIsHtml ? "mail-detail-html" : ""}`}>{detailError && <div className="mail-detail-error"><AlertCircle size={16} /><span>{detailError}</span><Button size="sm" icon={RefreshCw} onClick={retryDetail}>重试</Button></div>}{detailLoading && <LoaderCircle className="spin" size={16} />}{detailBody ? (detailIsHtml ? <iframe className="mail-html-frame" title={`${detail.subject || "邮件"}正文`} sandbox="" referrerPolicy="no-referrer" srcDoc={detail.body} /> : <p>{detailBody}</p>) : !detailLoading && <span>这封邮件没有正文内容。</span>}</div>
           </> : detailError ? <EmptyState icon={AlertCircle} title="邮件内容加载失败" description={detailError} action={<Button icon={RefreshCw} onClick={retryDetail}>重新加载</Button>} /> : <EmptyState icon={UserRound} title="选择一封邮件" description="邮件内容和实际接收地址会显示在这里。" />}
         </article>
       </section>

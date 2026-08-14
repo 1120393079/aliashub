@@ -66,7 +66,12 @@ export function publicAccount(db, row) {
   };
 }
 
-export function importIcloudAliases(db, account, values = [], { type = "", replace = false } = {}) {
+export function importIcloudAliases(db, account, values = [], {
+  type = "",
+  replace = false,
+  purpose = "iCloud 手工导入",
+  remoteConfirmed = false,
+} = {}) {
   if (account?.provider !== "icloud") {
     throw Object.assign(new Error("这个源头邮箱不是 iCloud 账号"), { status: 409, code: "ICLOUD_ACCOUNT_REQUIRED" });
   }
@@ -123,7 +128,7 @@ export function importIcloudAliases(db, account, values = [], { type = "", repla
   const insert = db.prepare(`
     INSERT INTO addresses (
       account_id, address, kind, status, strategy, label, purpose, remote_confirmed, created_at, updated_at
-    ) VALUES (?, ?, 'official', 'active', ?, ?, 'iCloud 手工导入', 0, ?, ?)
+    ) VALUES (?, ?, 'official', 'active', ?, ?, ?, ?, ?, ?)
     ON CONFLICT(account_id, address) DO UPDATE SET
       kind = CASE WHEN addresses.kind = 'primary' THEN 'primary' ELSE 'official' END,
       status = 'active', strategy = excluded.strategy, label = excluded.label,
@@ -143,6 +148,8 @@ export function importIcloudAliases(db, account, values = [], { type = "", repla
         customDomain
           ? "iCloud 自定义域名邮箱"
           : hidden ? "iCloud 隐藏邮箱" : "iCloud 邮箱别名",
+        purpose,
+        remoteConfirmed ? 1 : 0,
         now,
         now,
       );

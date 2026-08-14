@@ -13,7 +13,7 @@ const DEFAULT_REDIRECT_URI = "http://127.0.0.1:12142/";
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 const SCAN_OVERLAP_MS = 10 * 60_000;
 const SCOPES = "openid email profile https://www.googleapis.com/auth/gmail.readonly";
-const MAIL_BODY_LIMIT = 100_000;
+const MAIL_BODY_LIMIT = 1_000_000;
 const EMAIL_PATTERN = /[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+/gi;
 
 function errorWithStatus(message, status = 502, code = "GOOGLE_ERROR") {
@@ -130,8 +130,9 @@ function messageBodyParts(payload) {
 }
 
 function finalizeMessageBody(output) {
-  const raw = output.plain.join("\n").trim() || htmlToText(output.html.join("\n"));
-  return { raw, hasAttachments: output.hasAttachments };
+  const html = output.html.join("\n").trim();
+  const text = output.plain.join("\n").trim() || htmlToText(html);
+  return { text, html, hasAttachments: output.hasAttachments };
 }
 
 function receivedAt(message, payload) {
@@ -652,11 +653,11 @@ export class GoogleGmailClient {
       const graphMessageId = String(message.id || "");
       if (!graphMessageId) continue;
       const content = await this.messageBody(account, graphMessageId, payload, accessToken);
-      const rawBody = content.raw;
+      const rawBody = content.html || content.text;
       const body = rawBody.slice(0, MAIL_BODY_LIMIT);
       const subject = firstHeader(payload, "Subject") || "(无主题)";
-      const preview = String(message.snippet || body).replace(/\s+/g, " ").trim().slice(0, 500);
-      const code = codeFromText(`${subject}\n${preview}\n${body}`);
+      const preview = String(message.snippet || content.text).replace(/\s+/g, " ").trim().slice(0, 500);
+      const code = codeFromText(`${subject}\n${preview}\n${content.text}`);
       const from = parseAddresses(headerValues(payload, "From"))[0] || { name: "", address: "" };
       const toRecipients = parseAddresses(headerValues(payload, "To"));
       const ccRecipients = parseAddresses(headerValues(payload, "Cc"));
@@ -684,7 +685,7 @@ export class GoogleGmailClient {
         subject,
         preview,
         body,
-        bodyContentType: "text",
+        bodyContentType: content.html ? "html" : "text",
         bodyTruncated: rawBody.length > MAIL_BODY_LIMIT,
         verificationCode: code,
         webLink: `https://mail.google.com/mail/u/0/#inbox/${message.threadId || graphMessageId}`,

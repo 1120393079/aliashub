@@ -3,7 +3,7 @@ import { getSetting, nowIso, setSetting } from "./db.js";
 import { NfapiClient, redactNfapiMessage } from "./nfapi-client.js";
 import { registerOpenAiAgentIdentity } from "./openai-agent-identity.js";
 
-const DEFAULT_BASE_URL = "";
+const DEFAULT_BASE_URL = "https://nfapi.naturalflower.cn";
 const NFAPI_OAUTH_CALLBACK = "http://localhost:1455/auth/callback";
 const DEFAULT_OAUTH_SESSION_TTL_MS = 25 * 60_000;
 const DEFAULT_AGENT_IDENTITY_PENDING_TTL_MS = 30 * 60_000;

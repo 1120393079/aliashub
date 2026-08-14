@@ -8,7 +8,11 @@ function poolLineCount(value) {
   const rows = String(value || "")
     .split(/\r?\n/)
     .map((line) => line.trim())
-    .filter((line) => line && !line.startsWith("#") && !line.startsWith("//"));
+    .filter((line) => {
+      if (!line || line.startsWith("#") || line.startsWith("//")) return false;
+      const linkStart = line.search(/https:\/\//i);
+      return linkStart > 0 && line.slice(0, linkStart).includes("@");
+    });
   return new Set(rows).size;
 }
 
@@ -138,13 +142,13 @@ export default function InboxLinkRegistrationPage({ onNavigate }) {
           <div className="inbox-link-form">
             <FormField
               label="邮箱 + 取件链接"
-              hint="每行一组，邮箱与链接用空格隔开；支持任意邮箱和 HTTPS 取件链接"
+              hint="每行一组；自动识别邮箱和 HTTPS 取件链接，中间内容不限"
             >
               <textarea
                 className="inbox-link-editor"
                 value={poolText}
                 onChange={(event) => setPoolText(event.target.value)}
-                placeholder={"name@example.com https://pickup.example.com/?token=xxxxxxxx\nuser@custom-domain.com https://mail.example.net/p/yyyyyyyy"}
+                placeholder={"name@example.com----https://pickup.example.com/mailbox/xxxxxxxx\nuser@custom-domain.com | https://mail.example.net/p/yyyyyyyy"}
                 spellCheck={false}
                 autoComplete="off"
               />
@@ -191,7 +195,7 @@ export default function InboxLinkRegistrationPage({ onNavigate }) {
             const selectable = item.registration_state !== "in_progress";
             return <article className={selected.includes(item.id) ? "selected" : ""} key={item.id}><header><label><input type="checkbox" checked={selected.includes(item.id)} disabled={!selectable} onChange={() => toggle(item.id)} /><b>{item.email}</b></label><StatusBadge status={state.status}>{state.label}</StatusBadge></header><code>{item.masked_link}</code>{chatgpt && <div className="inbox-link-gpt-status"><StatusBadge status={chatgpt.planStatus}>{chatgpt.plan}</StatusBadge><StatusBadge status={chatgpt.atStatus}>{chatgpt.atLabel}</StatusBadge></div>}<footer><span>{formatDate(item.created_at)}</span><span className="row-actions"><Button size="sm" icon={Inbox} disabled={!item.source_account_id} onClick={() => onNavigate("inbox", { accountId: item.source_account_id })}>邮件</Button><Button size="sm" variant="danger" icon={Trash2} loading={deletingId === item.id} disabled={!selectable} onClick={() => remove(item)}>删除并解绑</Button></span></footer></article>;
           })}</div>
-        </> : <EmptyState icon={Link2} title="还没有绑定链接邮箱" description="在上方按“邮箱 空格 取件链接”的格式粘贴并绑定。" />}
+        </> : <EmptyState icon={Link2} title="还没有绑定链接邮箱" description="在上方每行粘贴一个邮箱和对应的 HTTPS 取件链接。" />}
       </section>
       <ConfirmDialog open={bulkDeleteOpen} onClose={() => setBulkDeleteOpen(false)} onConfirm={bulkDelete} loading={bulkDeleting} danger title="批量删除 GPT 账号并解绑？" description={`将永久删除选中邮箱对应的 GPT 账号，同时解除 ${selected.length} 个取件链接绑定并移除邮件中心本地邮件。正在注册的邮箱不会被选中。`} confirmText="确认删除并解绑" />
     </div>

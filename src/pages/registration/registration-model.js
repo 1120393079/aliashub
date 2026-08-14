@@ -30,6 +30,14 @@ export function preferredBase(account) {
     || account?.bases[0];
 }
 
+export function directRegistrationBases(account, baseAddressId) {
+  if (account?.registration_mode !== "direct") return [];
+  const bases = Array.isArray(account.bases) ? account.bases : [];
+  const selectedIndex = bases.findIndex((item) => String(item.id) === String(baseAddressId));
+  if (selectedIndex < 0) return [];
+  return bases.slice(selectedIndex).filter((item) => !item.registration_disabled);
+}
+
 export function occupiedAliasInfo(item) {
   const aliases = Array.isArray(item?.occupied_aliases)
     ? item.occupied_aliases
@@ -51,7 +59,16 @@ export function baseOptionLabel(item) {
       ? "自定义域名"
     : item.strategy === "icloud_mail_alias" ? "邮箱别名" : "";
   const occupied = occupiedAliasInfo(item);
-  const state = item.registration_state === "in_progress"
+  const pickupState = item.registration_state === "pickup_unknown"
+    ? "取件站状态未知 · 禁止注册"
+    : item.pickup_status === "ready"
+      ? "取件站待销售 · 禁止注册"
+      : item.pickup_status === "sold"
+        ? "取件站已售出 · 禁止注册"
+        : item.pickup_status === "disabled"
+          ? "取件站已停用 · 禁止注册"
+          : item.registration_state === "pickup_listed" ? "取件站库存 · 禁止注册" : "";
+  const state = pickupState || (item.registration_state === "in_progress"
     ? "注册进行中"
     : item.registration_state === "used"
       ? "已用于注册"
@@ -61,7 +78,7 @@ export function baseOptionLabel(item) {
         ? "疑似已占用"
         : item.registration_state === "warning"
           ? "有占用冲突"
-          : item.registration_success_count ? `已成功 ${item.registration_success_count}` : "";
+          : item.registration_success_count ? `已成功 ${item.registration_success_count}` : "");
   const details = [occupied.count ? `注册占用 ${occupied.count}` : "", type, state].filter(Boolean).join(" · ");
   return details ? `${item.address}（${details}）` : item.address;
 }

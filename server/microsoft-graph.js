@@ -9,7 +9,7 @@ const GRAPH_ENDPOINT = "https://graph.microsoft.com/v1.0";
 const DEFAULT_CLIENT_ID = "8787a430-6eee-41e1-b914-681d90d35625";
 const REDIRECT_URI = "http://localhost:12141/desktop";
 const SCOPES = "openid profile email offline_access User.Read Mail.Read";
-const MAIL_BODY_LIMIT = 100_000;
+const MAIL_BODY_LIMIT = 1_000_000;
 
 function errorWithStatus(message, status = 502, code = "MICROSOFT_ERROR") {
   return Object.assign(new Error(message), { status, code });
@@ -31,6 +31,24 @@ function safeEqual(left, right) {
 
 function microsoftError(data, fallback) {
   return data?.error_description || data?.error?.message || fallback;
+}
+
+function htmlToText(value) {
+  return String(value || "")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
+    .replace(/<(?:br|\/p|\/div|\/li|\/tr|\/h[1-6])\b[^>]*>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/\r/g, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 export class MicrosoftGraphClient {
@@ -268,7 +286,7 @@ export class MicrosoftGraphClient {
     const { response, data } = await this.jsonRequest(messagesUrl, {
       headers: {
         Authorization: `Bearer ${accessToken}`,
-        Prefer: 'outlook.body-content-type="text"',
+        Prefer: 'outlook.body-content-type="html"',
       },
     });
     if (!response.ok || data.error || !Array.isArray(data.value)) {
@@ -283,7 +301,9 @@ export class MicrosoftGraphClient {
     for (const message of data.value) {
       const rawBody = String(message.body?.content || "");
       const body = rawBody.slice(0, MAIL_BODY_LIMIT);
-      const text = `${message.subject || ""}\n${message.bodyPreview || ""}\n${body}`;
+      const readableBody = String(message.body?.contentType || "").toLowerCase() === "html"
+        ? htmlToText(body) : body;
+      const text = `${message.subject || ""}\n${message.bodyPreview || ""}\n${readableBody}`;
       const code = codeFromText(text);
       const normalizeRecipients = (values) => (Array.isArray(values) ? values : [])
         .map((item) => ({
