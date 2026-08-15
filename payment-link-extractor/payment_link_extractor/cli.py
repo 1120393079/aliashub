@@ -4,17 +4,13 @@ import argparse
 import getpass
 import json
 import os
-import socket
 import sys
-import threading
-from urllib.parse import urlsplit
 
 from .application import extract_payment_link
 from .config import SUPPORTED_COUNTRIES
 from .web.env import load_configured_env, load_env_file
 from .logging_utils import configure_logging, safe_log_text
 from .models import ExtractionConfig
-from .transport import normalize_proxy_url
 
 SUPPORTED_PAYMENT_METHODS = ("paypal", "gopay", "gcash")
 
@@ -79,7 +75,6 @@ def main() -> int:
         serialize=os.getenv("OPLL_LOG_JSON", "false").lower() in {"1", "true", "yes"},
     )
     token = str(args.at or "").strip() or getpass.getpass("OpenAI AT: ").strip()
-    bridge = _start_bridge_if_needed(args.checkout_proxy, args.update_proxy)
     try:
         result = extract_payment_link(
             ExtractionConfig(
@@ -100,35 +95,8 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-    finally:
-        if bridge is not None:
-            bridge.shutdown()
-            bridge.server_close()
     print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
     return 0
-
-
-def _start_bridge_if_needed(*proxies: str):
-    bridge_url = urlsplit(os.getenv("IPROCKET_CHAIN_PROXY", "http://127.0.0.1:18796"))
-    bridge_host = bridge_url.hostname or "127.0.0.1"
-    bridge_port = bridge_url.port or 18796
-    required = False
-    for proxy in proxies:
-        normalized = urlsplit(normalize_proxy_url(proxy))
-        if normalized.hostname == bridge_host and (normalized.port or 80) == bridge_port:
-            required = True
-            break
-    if not required:
-        return None
-    from iprocket_chain_bridge import create_server
-
-    try:
-        bridge = create_server()
-    except OSError:
-        with socket.create_connection((bridge_host, bridge_port), timeout=2):
-            return None
-    threading.Thread(target=bridge.serve_forever, name="iprocket-chain-bridge", daemon=True).start()
-    return bridge
 
 
 def _env_bool(name: str, default: bool) -> bool:

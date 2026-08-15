@@ -335,9 +335,6 @@ def extract_oaics_provider(
     stage_callback: Callable[[str], None] | None = None,
 ) -> dict[str, str]:
     payment_method = normalize_payment_method(config.payment_method)
-    from ..checkout import require_country_currency
-
-    require_country_currency(checkout, config, require_observed_currency=True)
     init_payload = openai_checkout_init_payload(checkout)
     ensure_payment_method_offered(init_payload, payment_method, "oaics checkout")
     ctx = stripe_context(init_payload, checkout)

@@ -6,83 +6,6 @@ const ACTIVE_STATUSES = new Set(["queued", "running", "cancel_requested"]);
 const TERMINAL_STATUSES = new Set(["succeeded", "failed", "cancelled"]);
 const DEFAULT_TIMEOUT_MS = 12 * 60 * 1_000;
 const PAYMENT_COUNTRY_CURRENCIES = Object.freeze({ DE: "EUR", TR: "USD", GB: "EUR" });
-const PAYMENT_PROXY_PROTOCOLS = new Set(["http:", "https:", "socks:", "socks5:", "socks5h:"]);
-
-function paymentVendorHost(value) {
-  const host = String(value || "").trim().toLowerCase().replace(/\.$/, "");
-  return host.endsWith(".iprocket.io")
-    || host.endsWith(".iprocket.pro")
-    || host === "proxy.iproyal.net"
-    || host.endsWith(".iproyal.net")
-    || host === "proxy.iproyal.com"
-    || host.endsWith(".iproyal.com")
-    || host === "1024proxy.io"
-    || host.endsWith(".1024proxy.io");
-}
-
-function splitPaymentProxy(value, separator) {
-  const parts = String(value).split(separator);
-  return parts.length >= 4
-    ? [parts[0], parts[1], parts[2], parts.slice(3).join(separator)]
-    : parts;
-}
-
-function specialPaymentProxy(value) {
-  const source = String(value || "").trim();
-  const encoded = source.match(/^(?:socks|http):\/\/([A-Za-z0-9+/_=-]+)$/i)?.[1];
-  if (encoded) {
-    try {
-      const decoded = Buffer.from(encoded.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
-      if (decoded && !decoded.includes("\uFFFD") && [...decoded.matchAll(/[A-Za-z0-9.-]+/g)]
-        .some((match) => paymentVendorHost(match[0]))) return source;
-    } catch {
-      return "";
-    }
-  }
-  if (!source.includes("://") && !source.includes("@")) {
-    const separator = [":", "|", ",", ";"].find((item) => source.split(item).length >= 4);
-    if (separator) {
-      const parts = splitPaymentProxy(source, separator);
-      const candidates = [[parts[0], parts[1]], [parts[1], parts[0]], [parts[2], parts[1]], [parts[2], parts[3]]];
-      if (parts.length === 4 && parts.every(Boolean) && candidates.some(([host, port]) => (
-        paymentVendorHost(host) && /^\d+$/.test(port) && Number(port) >= 1 && Number(port) <= 65535
-      ))) return source;
-    }
-  }
-  try {
-    const parsed = new URL(source);
-    const authority = source.slice(source.indexOf("://") + 3);
-    const port = Number(parsed.port);
-    if (PAYMENT_PROXY_PROTOCOLS.has(parsed.protocol) && parsed.hostname
-      && Number.isInteger(port) && port >= 1 && port <= 65535
-      && authority.search(/[/?#]/) < 0
-      && parsed.protocol.startsWith("socks") && parsed.username && parsed.password) return source;
-  } catch {
-    return "";
-  }
-  return "";
-}
-
-export function parsePaymentProxyPool(value) {
-  let items = value;
-  if (typeof items === "string") {
-    try { items = JSON.parse(items); } catch { items = items.split(/\r?\n/); }
-  }
-  if (!Array.isArray(items)) return [];
-  const proxies = [];
-  for (const [index, raw] of items.entries()) {
-    const source = String(raw || "").trim();
-    if (!source || source.startsWith("#")) continue;
-    if (/[\u0000-\u001f\u007f-\u009f]/.test(source) || /\s|\\/.test(source)) {
-      throw Object.assign(new Error(`第 ${index + 1} 条代理地址无效`), { status: 400 });
-    }
-    const normalized = specialPaymentProxy(source) || parseProxyPool([source])[0] || "";
-    if (!normalized) throw Object.assign(new Error(`第 ${index + 1} 条代理地址无效`), { status: 400 });
-    if (!proxies.includes(normalized)) proxies.push(normalized);
-  }
-  if (proxies.length > 200) throw Object.assign(new Error("代理池最多保存 200 条"), { status: 400 });
-  return proxies;
-}
 
 function delay(ms) {
   return new Promise((resolve) => {
@@ -150,10 +73,7 @@ function safeProviderUrl(value) {
     const parsed = new URL(source);
     const hostname = parsed.hostname.toLowerCase();
     if (parsed.protocol !== "https:" || parsed.username || parsed.password) return "";
-    const trustedHost = hostname === "paypal.com" || hostname.endsWith(".paypal.com");
-    const trustedPath = parsed.pathname.replace(/\/+$/, "").toLowerCase() === "/agreements/approve";
-    const token = String(parsed.searchParams.get("ba_token") || "").toUpperCase();
-    return trustedHost && trustedPath && token.startsWith("BA-") ? parsed.toString() : "";
+    return hostname === "paypal.com" || hostname.endsWith(".paypal.com") ? parsed.toString() : "";
   } catch {
     return "";
   }
@@ -178,7 +98,6 @@ export class PaymentLinkService {
     fetchFn = globalThis.fetch,
     pollIntervalMs = 1_500,
     timeoutMs = DEFAULT_TIMEOUT_MS,
-    queueTimeoutMs,
   } = {}) {
     this.db = db;
     this.registration = registration;
@@ -187,10 +106,7 @@ export class PaymentLinkService {
     this.fetchFn = fetchFn;
     this.pollIntervalMs = Math.max(100, Number(pollIntervalMs) || 1_500);
     this.timeoutMs = Math.max(10_000, Number(timeoutMs) || DEFAULT_TIMEOUT_MS);
-    this.queueTimeoutMs = Math.max(this.timeoutMs, Number(queueTimeoutMs) || this.timeoutMs * 5);
     this.tracked = new Map();
-    this.reservations = new Set();
-    this.startQueue = Promise.resolve();
     queueMicrotask(() => this.resumeActiveTasks());
   }
 
@@ -220,9 +136,9 @@ export class PaymentLinkService {
   }
 
   proxyPools() {
-    const legacy = parsePaymentProxyPool(getSetting(this.db, "payment_link_proxy_pool", "[]"));
-    const checkout = parsePaymentProxyPool(getSetting(this.db, "payment_link_checkout_proxy_pool", "[]"));
-    const update = parsePaymentProxyPool(getSetting(this.db, "payment_link_update_proxy_pool", "[]"));
+    const legacy = parseProxyPool(getSetting(this.db, "payment_link_proxy_pool", "[]"));
+    const checkout = parseProxyPool(getSetting(this.db, "payment_link_checkout_proxy_pool", "[]"));
+    const update = parseProxyPool(getSetting(this.db, "payment_link_update_proxy_pool", "[]"));
     return {
       checkout: checkout.length ? checkout : legacy,
       update: update.length ? update : legacy,
@@ -231,8 +147,8 @@ export class PaymentLinkService {
 
   saveProxyPool(input) {
     const legacyInput = Array.isArray(input) || typeof input === "string";
-    const checkout = parsePaymentProxyPool(legacyInput ? input : input?.checkout_proxies);
-    const update = parsePaymentProxyPool(legacyInput ? input : input?.update_proxies);
+    const checkout = parseProxyPool(legacyInput ? input : input?.checkout_proxies);
+    const update = parseProxyPool(legacyInput ? input : input?.update_proxies);
     const country = input?.country === undefined ? null : normalizePaymentCountry(input.country);
     const switches = [
       ["payment_link_rotate_checkout_proxy", input?.rotate_checkout_proxy],
@@ -273,7 +189,7 @@ export class PaymentLinkService {
       throw Object.assign(new Error("仅支持 IPRocket HTTPS 代理订阅地址"), { status: 400 });
     }
     const result = await this.request(`/api/proxy/source?url=${encodeURIComponent(sourceUrl)}`);
-    const proxies = parsePaymentProxyPool(Array.isArray(result?.proxies) ? result.proxies : []);
+    const proxies = parseProxyPool(Array.isArray(result?.proxies) ? result.proxies : []);
     if (!proxies.length) throw Object.assign(new Error("IPRocket 代理订阅没有返回代理"), { status: 502 });
     const saved = this.saveProxyPool({
       checkout_proxies: proxies,
@@ -429,53 +345,22 @@ export class PaymentLinkService {
     });
   }
 
-  persistTracked(accountId, taskId, values) {
-    const current = this.row(accountId);
-    if (!current || current.task_id !== taskId) return publicPaymentLink(current);
-    return this.persist(accountId, values);
-  }
-
-  reserveForAccountDeletion(ids) {
-    const keys = [...new Set(ids.map((id) => String(id)))];
-    const reserved = keys.find((key) => this.reservations.has(key));
-    if (reserved) {
-      throw Object.assign(new Error(`账号 #${reserved} 正在提链或执行其他账号操作`), { status: 409 });
-    }
-    const placeholders = keys.map(() => "?").join(",");
-    const active = this.db.prepare(`
-      SELECT external_account_id FROM registered_account_payment_links
-      WHERE external_account_id IN (${placeholders})
-        AND status IN ('queued', 'running', 'cancel_requested')
-      LIMIT 1
-    `).get(...keys);
-    if (active) {
-      throw Object.assign(new Error(`账号 #${active.external_account_id} 正在提链，请等待任务结束`), { status: 409 });
-    }
-    keys.forEach((key) => this.reservations.add(key));
-    return () => keys.forEach((key) => this.reservations.delete(key));
-  }
-
   track(accountId, taskId) {
     const key = String(accountId);
     if (this.tracked.has(key)) return this.tracked.get(key);
     const promise = (async () => {
-      const queueDeadline = Date.now() + this.queueTimeoutMs;
-      let executionDeadline = 0;
+      const deadline = Date.now() + this.timeoutMs;
       let failures = 0;
-      while (executionDeadline ? Date.now() < executionDeadline : Date.now() < queueDeadline) {
+      while (Date.now() < deadline) {
         try {
           const snapshot = await this.request(`/api/tasks/${encodeURIComponent(taskId)}`);
           failures = 0;
           const item = this.applySnapshot(accountId, snapshot);
-          if (!item || item.task_id !== taskId) return item;
           if (TERMINAL_STATUSES.has(item?.status)) return item;
-          if (!executionDeadline && item?.status !== "queued") {
-            executionDeadline = Date.now() + this.timeoutMs;
-          }
         } catch (error) {
           failures += 1;
           if (Number(error.status) === 404 || failures >= 5) {
-            return this.persistTracked(accountId, taskId, {
+            return this.persist(accountId, {
               status: "failed",
               stage: "service_error",
               error: Number(error.status) === 404
@@ -492,10 +377,10 @@ export class PaymentLinkService {
       } catch {
         // The local timeout remains authoritative when cancellation cannot be confirmed.
       }
-      return this.persistTracked(accountId, taskId, {
+      return this.persist(accountId, {
         status: "failed",
-        stage: executionDeadline ? "timeout" : "queue_timeout",
-        error: executionDeadline ? "提链任务执行超时" : "提链任务排队超时",
+        stage: "timeout",
+        error: "提链任务执行超时",
         finished_at: nowIso(),
       });
     })().finally(() => this.tracked.delete(key));
@@ -511,13 +396,7 @@ export class PaymentLinkService {
     rows.forEach((row) => this.track(row.external_account_id, row.task_id));
   }
 
-  start(input = {}) {
-    const operation = this.startQueue.then(() => this.startBatch(input));
-    this.startQueue = operation.catch(() => {});
-    return operation;
-  }
-
-  async startBatch(input = {}) {
+  async start(input = {}) {
     const ids = selectedIds(input);
     if (!this.baseUrl) throw Object.assign(new Error("提链服务尚未配置"), { status: 503 });
     const country = normalizePaymentCountry(
@@ -543,18 +422,11 @@ export class PaymentLinkService {
     let started = 0;
 
     for (const accountId of ids) {
-      const reservationKey = String(accountId);
       const existing = this.row(accountId);
-      if (this.reservations.has(reservationKey) || (existing && ACTIVE_STATUSES.has(existing.status))) {
-        items.push({
-          ...(publicPaymentLink(existing) || { external_account_id: accountId }),
-          accepted: false,
-          error: "这个账号正在提链",
-        });
+      if (existing && ACTIVE_STATUSES.has(existing.status)) {
+        items.push({ ...publicPaymentLink(existing), accepted: false, error: "这个账号正在提链" });
         continue;
       }
-      this.reservations.add(reservationKey);
-      try {
       let credentials;
       try {
         credentials = await this.registration.registeredAccountAccessToken(accountId);
@@ -639,9 +511,6 @@ export class PaymentLinkService {
           finished_at: nowIso(),
         });
         items.push({ ...item, accepted: false });
-      }
-      } finally {
-        this.reservations.delete(reservationKey);
       }
     }
     setSetting(this.db, "payment_link_checkout_proxy_cursor", String(checkoutCursor % checkoutProxies.length));

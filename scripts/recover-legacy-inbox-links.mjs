@@ -1,21 +1,14 @@
 import process from "node:process";
 import crypto from "node:crypto";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import dotenv from "dotenv";
 import { InboxLinkMailboxService } from "../server/inbox-link-pool.js";
 
-const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-dotenv.config({ path: path.join(projectRoot, ".env") });
+dotenv.config({ path: "/opt/alias-hub/.env" });
 
 const sourcePath = process.argv[2];
 if (!sourcePath) throw new Error("backup database path is required");
-const configuredDatabasePath = process.env.DATABASE_PATH || path.join("data", "outlook-alias-hub.db");
-const databasePath = path.isAbsolute(configuredDatabasePath)
-  ? configuredDatabasePath
-  : path.resolve(projectRoot, configuredDatabasePath);
-const current = new Database(databasePath, { timeout: 30_000 });
+const current = new Database(process.env.DATABASE_PATH || "/var/lib/alias-hub/outlook-alias-hub.db", { timeout: 30_000 });
 const source = new Database(sourcePath, { readonly: true });
 const service = new InboxLinkMailboxService({ db: current, encryptionKey: process.env.DATA_ENCRYPTION_KEY });
 

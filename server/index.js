@@ -473,7 +473,7 @@ export function createApp(options = {}) {
     db,
     registration,
     baseUrl: options.pickupBaseUrl || process.env.PICKUP_SERVICE_URL,
-    publicUrl: options.pickupPublicUrl || process.env.PICKUP_PUBLIC_URL || process.env.PICKUP_PUBLIC_BASE_URL,
+    publicUrl: options.pickupPublicUrl || process.env.PICKUP_PUBLIC_URL,
     username: options.pickupUsername || process.env.PICKUP_ADMIN_USERNAME || process.env.ADMIN_USERNAME,
     password: options.pickupPassword || process.env.PICKUP_ADMIN_PASSWORD || process.env.ADMIN_PASSWORD,
     fetchFn: options.pickupFetchFn || options.fetchFn,
@@ -483,13 +483,11 @@ export function createApp(options = {}) {
     db,
     registration,
     baseUrl: options.paymentLinkBaseUrl ?? process.env.PAYMENT_LINK_SERVICE_URL,
-    password: options.paymentLinkPassword ?? process.env.PAYMENT_LINK_SERVICE_PASSWORD,
+    password: options.paymentLinkPassword ?? (process.env.PAYMENT_LINK_SERVICE_PASSWORD || process.env.ADMIN_PASSWORD),
     fetchFn: options.paymentLinkFetchFn || options.fetchFn,
     pollIntervalMs: options.paymentLinkPollIntervalMs,
     timeoutMs: options.paymentLinkTimeoutMs,
-    queueTimeoutMs: options.paymentLinkQueueTimeoutMs,
   });
-  registration.paymentLinks = paymentLinks;
   const nfapi = options.nfapi || new NfapiService({
     db,
     registrationClient,

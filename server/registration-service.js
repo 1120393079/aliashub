@@ -4165,21 +4165,6 @@ export class RegistrationService {
   async deleteRegisteredAccounts(input = {}) {
     const ids = normalizeSelectedIds(input, "注册账号");
     const placeholders = ids.map(() => "?").join(",");
-    let releasePaymentReservations = () => {};
-    if (this.paymentLinks?.reserveForAccountDeletion) {
-      releasePaymentReservations = this.paymentLinks.reserveForAccountDeletion(ids);
-    } else {
-      const activePaymentLink = this.db.prepare(`
-        SELECT external_account_id FROM registered_account_payment_links
-        WHERE external_account_id IN (${placeholders})
-          AND status IN ('queued', 'running', 'cancel_requested')
-        LIMIT 1
-      `).get(...ids.map(String));
-      if (activePaymentLink) {
-        throw Object.assign(new Error(`账号 #${activePaymentLink.external_account_id} 正在提链，请等待任务结束`), { status: 409 });
-      }
-    }
-    try {
     const jobs = this.db.prepare(`
       SELECT * FROM registration_jobs
       WHERE external_account_id IN (${placeholders}) AND status = 'completed'
@@ -4222,14 +4207,10 @@ export class RegistrationService {
         this.db.prepare(`DELETE FROM registered_account_checkout_checks WHERE external_account_id IN (${placeholders})`).run(...deletedIds);
         this.db.prepare(`DELETE FROM registered_account_trial_checks WHERE external_account_id IN (${placeholders})`).run(...deletedIds);
         this.db.prepare(`DELETE FROM registered_account_momo_checks WHERE external_account_id IN (${placeholders})`).run(...deletedIds);
-        this.db.prepare(`DELETE FROM registered_account_payment_links WHERE external_account_id IN (${placeholders})`).run(...deletedIds);
         this.db.prepare(`DELETE FROM registered_account_nfapi_links WHERE external_account_id IN (${placeholders})`).run(...deletedIds);
       })();
     }
     return { requested: ids.length, deleted, deleted_ids: deletedIds.map(Number), failed };
-    } finally {
-      releasePaymentReservations();
-    }
   }
 
   externalAccounts({ limit = 100, offset = 0 } = {}) {

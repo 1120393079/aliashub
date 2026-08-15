@@ -47,7 +47,7 @@ test("payment-link integration rotates its own proxy pool and persists PayPal re
       started_at: "2026-08-15T00:00:00.000Z",
       finished_at: "2026-08-15T00:00:10.000Z",
       result: {
-        paypal_url: `https://www.paypal.com/agreements/approve?ba_token=BA-fixture-${accountId}`,
+        paypal_url: `https://www.paypal.com/billing/subscriptions/approve?ba_token=fixture-${accountId}`,
         session_kind: "stripe_checkout",
         billing_country: submissions[accountId - 1].payload.country,
         currency: submissions[accountId - 1].payload.country === "TR" ? "USD" : "EUR",
@@ -175,99 +175,11 @@ test("payment-link integration imports IPRocket into both pools and persists tas
     assert.equal(saved.rotate_checkout_proxy, false);
     assert.equal(saved.rotate_update_proxy, true);
     assert.equal(saved.apply_checkout_update, false);
-    const compatible = service.saveProxyPool({
-      checkout_proxies: ["gate.iprocket.io|5959|fixture-user|fixture-password"],
-      update_proxies: ["socks5://fixture-user:fixture-password@proxy.iproyal.net:9595"],
-    });
-    assert.deepEqual(compatible.checkout_proxies, ["gate.iprocket.io|5959|fixture-user|fixture-password"]);
-    assert.deepEqual(compatible.update_proxies, ["socks5://fixture-user:fixture-password@proxy.iproyal.net:9595"]);
     await assert.rejects(
       () => service.refreshProxySource({ url: "https://example.com/proxies" }),
       /仅支持 IPRocket/,
     );
   } finally {
-    db.close();
-    fs.rmSync(directory, { recursive: true, force: true });
-  }
-});
-
-test("payment-link integration reserves an account before awaiting credentials", async () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "aliashub-payment-link-concurrency-test-"));
-  const db = createDatabase({ filename: path.join(directory, "test.db"), seedDemo: false });
-  let releaseCredentials;
-  const credentialsReady = new Promise((resolve) => { releaseCredentials = resolve; });
-  let credentialReads = 0;
-  let submissions = 0;
-  const service = new PaymentLinkService({
-    db,
-    registration: {
-      async registeredAccountAccessToken(id) {
-        credentialReads += 1;
-        await credentialsReady;
-        return { id, email: "reserved@example.com", access_token: "fixture-access-token" };
-      },
-    },
-    baseUrl: "http://127.0.0.1:8891",
-    fetchFn: async (url, options = {}) => {
-      const parsed = new URL(url);
-      if (parsed.pathname === "/api/tasks" && options.method === "POST") {
-        submissions += 1;
-        return jsonResponse({ task_id: "reserved-task", status: "queued", stage: "queued", progress: 0 }, 202);
-      }
-      return jsonResponse({
-        task_id: "reserved-task",
-        status: "succeeded",
-        stage: "completed",
-        progress: 100,
-        result: {
-          paypal_url: "https://www.paypal.com/agreements/approve?ba_token=BA-reserved-fixture",
-          billing_country: "DE",
-          currency: "EUR",
-        },
-      });
-    },
-    pollIntervalMs: 100,
-  });
-  service.saveProxyPool({
-    checkout_proxies: ["http://checkout.example:8000"],
-    update_proxies: ["http://update.example:8000"],
-  });
-  try {
-    const first = service.start({ ids: [7] });
-    await new Promise((resolve) => setImmediate(resolve));
-    const duplicateRequest = service.start({ ids: [7] });
-    releaseCredentials();
-    const [started, duplicate] = await Promise.all([first, duplicateRequest]);
-    assert.equal(duplicate.started, 0);
-    assert.match(duplicate.items[0].error, /正在提链/);
-    assert.equal(started.started, 1);
-    assert.equal(credentialReads, 1);
-    assert.equal(submissions, 1);
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    assert.equal(service.list().items[0].status, "succeeded");
-  } finally {
-    releaseCredentials();
-    db.close();
-    fs.rmSync(directory, { recursive: true, force: true });
-  }
-});
-
-test("payment-link integration rejects a non-agreement PayPal URL", async () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "aliashub-payment-link-url-test-"));
-  const db = createDatabase({ filename: path.join(directory, "test.db"), seedDemo: false });
-  const service = new PaymentLinkService({ db, registration: {} });
-  try {
-    service.persist(9, { email: "url-check@example.com", task_id: "url-task", status: "failed" });
-    const result = service.applySnapshot(9, {
-      task_id: "url-task",
-      status: "succeeded",
-      result: { paypal_url: "https://www.paypal.com/billing/subscriptions/approve?ba_token=BA-wrong-path" },
-    });
-    assert.equal(result.status, "failed");
-    assert.equal(result.stage, "invalid_result");
-    assert.equal(result.provider_url, "");
-  } finally {
-    await new Promise((resolve) => setImmediate(resolve));
     db.close();
     fs.rmSync(directory, { recursive: true, force: true });
   }

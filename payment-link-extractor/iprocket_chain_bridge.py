@@ -13,7 +13,7 @@ import urllib.request
 
 LISTEN_HOST = "127.0.0.1"
 LISTEN_PORT = int(os.getenv("IPROCKET_BRIDGE_PORT", "18796"))
-LOCAL_SOCKS_HOST = os.getenv("IPROCKET_PRE_PROXY_HOST", "").strip()
+LOCAL_SOCKS_HOST = os.getenv("IPROCKET_PRE_PROXY_HOST", "127.0.0.1")
 LOCAL_SOCKS_PORT = int(os.getenv("IPROCKET_PRE_PROXY_PORT", "3251"))
 SOURCE_URL = os.getenv(
     "OPLL_PROXY_SOURCE_URL",
@@ -114,12 +114,10 @@ def open_chain(
     else:
         proxy_host, proxy_port, username, password = load_credential()
         protocol = "socks5" if proxy_port in {9595, 59999, 619999} else "http"
-    target = (LOCAL_SOCKS_HOST, LOCAL_SOCKS_PORT) if LOCAL_SOCKS_HOST else (proxy_host, proxy_port)
-    upstream = socket.create_connection(target, timeout=15)
+    upstream = socket.create_connection((LOCAL_SOCKS_HOST, LOCAL_SOCKS_PORT), timeout=15)
     upstream.settimeout(30)
     try:
-        if LOCAL_SOCKS_HOST:
-            socks_connect(upstream, proxy_host, proxy_port)
+        socks_connect(upstream, proxy_host, proxy_port)
         if protocol == "http":
             http_proxy_connect(upstream, destination_host, destination_port, username, password)
         else:
@@ -192,15 +190,7 @@ class Server(socketserver.ThreadingTCPServer):
     daemon_threads = True
 
 
-def create_server() -> Server:
-    return Server((LISTEN_HOST, LISTEN_PORT), Handler)
-
-
-def main() -> int:
-    with create_server() as server:
-        server.serve_forever()
-    return 0
-
-
 if __name__ == "__main__":
-    raise SystemExit(main())
+    load_credential(force=True)
+    with Server((LISTEN_HOST, LISTEN_PORT), Handler) as server:
+        server.serve_forever()

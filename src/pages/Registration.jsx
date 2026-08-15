@@ -552,11 +552,11 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
   );
   const proxyDraft = useMemo(() => normalizeProxyDraft(proxyText), [proxyText]);
   const paymentCheckoutProxyDraft = useMemo(
-    () => normalizeProxyDraft(paymentCheckoutProxyText, { payment: true }),
+    () => normalizeProxyDraft(paymentCheckoutProxyText),
     [paymentCheckoutProxyText],
   );
   const paymentUpdateProxyDraft = useMemo(
-    () => normalizeProxyDraft(paymentUpdateProxyText, { payment: true }),
+    () => normalizeProxyDraft(paymentUpdateProxyText),
     [paymentUpdateProxyText],
   );
   const paymentLinkByAccountId = useMemo(() => Object.fromEntries(

@@ -100,7 +100,6 @@ def extract_payment_link(
             )
         else:
             raise ConfigurationError(f"unsupported checkout session: {checkout.get('cs_id')}")
-        require_country_currency(checkout, config, require_observed_currency=True)
         amount_due_minor, amount_currency = checkout_payable_amount(checkout)
         scale = currency_minor_scale(amount_currency)
         amount_due = amount_due_minor / (10**scale)

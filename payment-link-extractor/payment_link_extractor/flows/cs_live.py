@@ -491,14 +491,7 @@ def extract_cs_live_provider(
     init_payload, stripe_js_id = stripe_init(config, checkout, log, stripe)
     totals = extract_checkout_totals(init_payload)
     checkout["payable_amount_minor"] = totals.get("due")
-    observed_currency = str(totals.get("currency") or "").strip().upper()
-    if not observed_currency:
-        raise ProtocolError(502, "cs_live Stripe init did not confirm its currency")
-    checkout["currency"] = observed_currency
-    checkout["currency_observed"] = True
-    from ..checkout import require_country_currency
-
-    require_country_currency(checkout, config, require_observed_currency=True)
+    checkout["currency"] = str(totals.get("currency") or checkout.get("currency") or "GBP").upper()
     ensure_payment_method_offered(init_payload, payment_method, "cs_live Stripe init")
     hosted_url = str(init_payload.get("stripe_hosted_url") or "").strip()
     if not hosted_url:
