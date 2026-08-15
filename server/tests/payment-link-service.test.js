@@ -50,7 +50,9 @@ test("payment-link integration rotates its own proxy pool and persists PayPal re
         paypal_url: `https://www.paypal.com/billing/subscriptions/approve?ba_token=fixture-${accountId}`,
         session_kind: "stripe_checkout",
         billing_country: submissions[accountId - 1].payload.country,
-        currency: submissions[accountId - 1].payload.country === "TR" ? "USD" : "EUR",
+        currency: submissions[accountId - 1].payload.country === "TR"
+          ? "USD"
+          : submissions[accountId - 1].payload.country === "GB" ? "GBP" : "EUR",
         amount_due: 20,
       },
     });
@@ -79,17 +81,17 @@ test("payment-link integration rotates its own proxy pool and persists PayPal re
     assert.equal(saved.checkout_proxy_count, 2);
     assert.equal(saved.update_proxy_count, 2);
     assert.equal(saved.country, "GB");
-    assert.equal(saved.currency, "EUR");
+    assert.equal(saved.currency, "GBP");
     assert.deepEqual(saved.countries, [
       { code: "DE", currency: "EUR" },
       { code: "TR", currency: "USD" },
-      { code: "GB", currency: "EUR" },
+      { code: "GB", currency: "GBP" },
     ]);
     const started = await service.start({ ids: [1, 2] });
     assert.equal(started.started, 2);
     assert.equal(started.failed, 0);
     assert.equal(started.country, "GB");
-    assert.equal(started.currency, "EUR");
+    assert.equal(started.currency, "GBP");
 
     await new Promise((resolve) => setTimeout(resolve, 200));
     const overview = service.list();
@@ -97,7 +99,7 @@ test("payment-link integration rotates its own proxy pool and persists PayPal re
     assert.ok(overview.items.every((item) => item.status === "succeeded"));
     assert.ok(overview.items.every((item) => item.provider_url.startsWith("https://www.paypal.com/")));
     assert.ok(overview.items.every((item) => item.billing_country === "GB"));
-    assert.ok(overview.items.every((item) => item.currency === "EUR"));
+    assert.ok(overview.items.every((item) => item.currency === "GBP"));
     assert.ok(submissions.every((item) => item.payload.country === "GB"));
     assert.equal(submissions[0].payload.checkout_proxy, "http://first-user:first-password@first-proxy.example:8001");
     assert.equal(submissions[1].payload.checkout_proxy, "http://second-user:second-password@second-proxy.example:8002");

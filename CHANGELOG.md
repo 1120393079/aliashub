@@ -15,7 +15,7 @@ All notable changes to AliasHub are documented in this file.
   tests, Docker image, and Full Compose integration.
 - Added direct PayPal billing-agreement link extraction for registered accounts,
   persistent task progress, independent Checkout and Update proxy pools, proxy
-  rotation and subscription import, plus DE/EUR, TR/USD, and GB/EUR billing
+  rotation and subscription import, plus DE/EUR, TR/USD, and GB/GBP billing
   profiles.
 - Added the complete payment-link extractor source, workbench, CLI, Docker image,
   and Full Compose integration so the direct-link flow is reproducible from a

@@ -40,7 +40,7 @@ the installation that you control.
   detect the Japanese Plus one-month trial offer through a verified Japan exit.
 - Generate PayPal billing-agreement links directly from selected registered
   accounts through the bundled extractor, with independent Checkout and Update
-  proxy pools and billing profiles for DE/EUR, TR/USD, and GB/EUR.
+  proxy pools and billing profiles for DE/EUR, TR/USD, and GB/GBP.
 - Restore accounts removed from the worker's local account pool from JSON, CSV,
   JSONL, TXT, or email-only input while reconnecting their retained AliasHub
   registration and mailbox resources.
@@ -248,7 +248,7 @@ tree.
 
 Full Compose mode configures the internal service URL and a generated shared
 password automatically. In the AliasHub registration workspace, save separate
-Checkout and Update proxy pools, choose DE/EUR, TR/USD, or GB/EUR, select up to
+Checkout and Update proxy pools, choose DE/EUR, TR/USD, or GB/GBP, select up to
 50 registered accounts, and run **直接提链**. The standalone workbench and CLI
 remain available for deployments that need them; see
 [`payment-link-extractor/README.md`](payment-link-extractor/README.md).

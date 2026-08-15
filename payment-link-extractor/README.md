@@ -5,7 +5,7 @@ AliasHub 自带的独立 PayPal 提链服务。源码、Web 工作台和 API 均
 ## 功能
 
 - PayPal BA 链接提取与重定向解析
-- DE / EUR、TR / USD、GB / EUR 账单组合
+- DE / EUR、TR / USD、GB / GBP 账单组合
 - Checkout Proxy 与 Update Proxy 独立配置和轮换
 - 异步任务、进度事件、取消、重试、批量删除与 WebSocket 推送
 - IPRocket 订阅导入、代理探测和可选链式代理桥

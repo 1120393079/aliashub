@@ -22,7 +22,7 @@ STRIPE_RUNTIME_VERSION = "692f102a8f"
 OPENAI_CUSTOM_STRIPE_RUNTIME_VERSION = STRIPE_RUNTIME_VERSION
 
 COUNTRY_PROFILES = {
-    "GB": {"currency": "EUR", "locale": "en-GB", "timezone": "Europe/London"},
+    "GB": {"currency": "GBP", "locale": "en-GB", "timezone": "Europe/London"},
     "US": {"currency": "USD", "locale": "en-US", "timezone": "America/New_York"},
     "BR": {"currency": "USD", "locale": "pt-BR", "timezone": "America/Sao_Paulo"},
     "DE": {"currency": "EUR", "locale": "de-DE", "timezone": "Europe/Berlin"},

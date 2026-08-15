@@ -5,7 +5,7 @@ import { materializeProxySession, maskProxy, parseProxyPool, redactProxySecrets 
 const ACTIVE_STATUSES = new Set(["queued", "running", "cancel_requested"]);
 const TERMINAL_STATUSES = new Set(["succeeded", "failed", "cancelled"]);
 const DEFAULT_TIMEOUT_MS = 12 * 60 * 1_000;
-const PAYMENT_COUNTRY_CURRENCIES = Object.freeze({ DE: "EUR", TR: "USD", GB: "EUR" });
+const PAYMENT_COUNTRY_CURRENCIES = Object.freeze({ DE: "EUR", TR: "USD", GB: "GBP" });
 
 function delay(ms) {
   return new Promise((resolve) => {
