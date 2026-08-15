@@ -3,7 +3,6 @@ import { getSetting, nowIso, setSetting } from "./db.js";
 import { NfapiClient, redactNfapiMessage } from "./nfapi-client.js";
 import { registerOpenAiAgentIdentity } from "./openai-agent-identity.js";
 
-const DEFAULT_BASE_URL = "https://nfapi.naturalflower.cn";
 const NFAPI_OAUTH_CALLBACK = "http://localhost:1455/auth/callback";
 const DEFAULT_OAUTH_SESSION_TTL_MS = 25 * 60_000;
 const DEFAULT_AGENT_IDENTITY_PENDING_TTL_MS = 30 * 60_000;
@@ -94,7 +93,8 @@ function boolean(value, fallback, label) {
 }
 
 export function normalizeNfapiBaseUrl(value) {
-  const raw = String(value || DEFAULT_BASE_URL).trim();
+  const raw = String(value || "").trim();
+  if (!raw) return "";
   let parsed;
   try { parsed = new URL(raw); } catch { throw errorWithStatus("NFapi 地址格式无效"); }
   if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
@@ -862,7 +862,7 @@ export class NfapiService {
   }
 
   baseUrl() {
-    return this.baseUrlOverride || normalizeNfapiBaseUrl(getSetting(this.db, "nfapi_base_url", DEFAULT_BASE_URL));
+    return this.baseUrlOverride || normalizeNfapiBaseUrl(getSetting(this.db, "nfapi_base_url", ""));
   }
 
   apiKey() {

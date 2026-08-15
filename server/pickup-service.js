@@ -113,7 +113,7 @@ export class PickupService {
     this.db = db;
     this.registration = registration;
     this.baseUrl = normalizeBaseUrl(baseUrl);
-    this.publicUrl = String(publicUrl || "https://pickup.naturalflower.cn").trim().replace(/\/+$/, "");
+    this.publicUrl = String(publicUrl || "http://127.0.0.1:4190").trim().replace(/\/+$/, "");
     this.username = String(username || "admin");
     this.password = String(password || "");
     this.fetch = fetchFn;

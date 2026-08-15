@@ -343,6 +343,33 @@ const schema = `
   CREATE INDEX IF NOT EXISTS idx_registered_account_momo_checks_email
     ON registered_account_momo_checks(email COLLATE NOCASE, updated_at DESC);
 
+  CREATE TABLE IF NOT EXISTS registered_account_payment_links (
+    external_account_id TEXT PRIMARY KEY,
+    email TEXT NOT NULL,
+    task_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'queued',
+    stage TEXT NOT NULL DEFAULT 'queued',
+    progress INTEGER NOT NULL DEFAULT 0,
+    provider_url TEXT NOT NULL DEFAULT '',
+    proxy_label TEXT NOT NULL DEFAULT '',
+    checkout_proxy_label TEXT NOT NULL DEFAULT '',
+    update_proxy_label TEXT NOT NULL DEFAULT '',
+    session_kind TEXT NOT NULL DEFAULT '',
+    billing_country TEXT NOT NULL DEFAULT '',
+    currency TEXT NOT NULL DEFAULT '',
+    amount_due REAL,
+    error TEXT NOT NULL DEFAULT '',
+    started_at TEXT,
+    finished_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_registered_account_payment_links_status
+    ON registered_account_payment_links(status, updated_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_registered_account_payment_links_email
+    ON registered_account_payment_links(email COLLATE NOCASE, updated_at DESC);
+
   CREATE TABLE IF NOT EXISTS registered_account_nfapi_links (
     external_account_id TEXT NOT NULL,
     email TEXT NOT NULL COLLATE NOCASE,
@@ -758,6 +785,14 @@ export function createDatabase({ filename, seedDemo = false } = {}) {
   if (!accountStatusCheckColumns.includes("evidence_path")) {
     db.exec("ALTER TABLE registered_account_status_checks ADD COLUMN evidence_path TEXT NOT NULL DEFAULT ''");
   }
+  const paymentLinkColumns = db.pragma("table_info(registered_account_payment_links)")
+    .map((column) => column.name);
+  if (!paymentLinkColumns.includes("checkout_proxy_label")) {
+    db.exec("ALTER TABLE registered_account_payment_links ADD COLUMN checkout_proxy_label TEXT NOT NULL DEFAULT ''");
+  }
+  if (!paymentLinkColumns.includes("update_proxy_label")) {
+    db.exec("ALTER TABLE registered_account_payment_links ADD COLUMN update_proxy_label TEXT NOT NULL DEFAULT ''");
+  }
   const nfapiOAuthColumns = db.pragma("table_info(nfapi_oauth_import_sessions)").map((column) => column.name);
   if (!nfapiOAuthColumns.includes("external_account_id")) {
     db.exec("ALTER TABLE nfapi_oauth_import_sessions ADD COLUMN external_account_id INTEGER NOT NULL DEFAULT 0");
@@ -787,7 +822,18 @@ export function createDatabase({ filename, seedDemo = false } = {}) {
     extension_api_key: "",
     registration_connector_key: "",
     registration_proxy_pool: "[]",
-    nfapi_base_url: "https://nfapi.naturalflower.cn",
+    payment_link_proxy_pool: "[]",
+    payment_link_proxy_cursor: "0",
+    payment_link_checkout_proxy_pool: "[]",
+    payment_link_update_proxy_pool: "[]",
+    payment_link_checkout_proxy_cursor: "0",
+    payment_link_update_proxy_cursor: "0",
+    payment_link_proxy_source_url: "",
+    payment_link_country: "DE",
+    payment_link_rotate_checkout_proxy: "true",
+    payment_link_rotate_update_proxy: "true",
+    payment_link_apply_checkout_update: "true",
+    nfapi_base_url: "",
     nfapi_admin_api_key_encrypted: "",
     nfapi_import_defaults: "{}",
     nfapi_last_connected_at: "",

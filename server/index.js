@@ -4,7 +4,7 @@ import { timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import "dotenv/config";
 import express from "express";
-import { deleteSplitAddresses, generateSplits, importIcloudAliases, JobRunner, parseJson, publicAccount, syncOfficialAddresses } from "./account-service.js";
+import { deleteSelectedAddresses, deleteSplitAddresses, generateSplits, importIcloudAliases, JobRunner, parseJson, publicAccount, syncOfficialAddresses } from "./account-service.js";
 import { createAuth } from "./auth.js";
 import { isIcloudImportedStrategy, microsoftDomains, normalizeIcloudAliasEmail, normalizeMicrosoftEmail } from "./address-generator.js";
 import { audit, createDatabase, createSourceAccount, getSettings, nowIso, setSetting } from "./db.js";
@@ -19,6 +19,7 @@ import { NfapiCredentialStore, NfapiCredentialSync } from "./nfapi-credential-sy
 import { MicrosoftRegistrationRunnerService } from "./microsoft-registration-runner-service.js";
 import { MicrosoftRegistrationService } from "./microsoft-registration-service.js";
 import { PickupService } from "./pickup-service.js";
+import { PaymentLinkService } from "./payment-link-service.js";
 import { RegistrationClient } from "./registration-client.js";
 import { RegistrationService } from "./registration-service.js";
 
@@ -101,7 +102,33 @@ function addressQuery(db, { accountId, kind, strategy, q, page = 1, limit = 50 }
         )
           AND lower(registration_history.status) = 'failed'
           AND registration_history.failure_reason = 'user_already_exists'
-      ) THEN 1 ELSE 0 END AS registration_occupied
+      ) THEN 1 ELSE 0 END AS registration_occupied,
+      (
+        SELECT COUNT(*)
+        FROM registration_jobs AS failed_registration
+        WHERE (
+          failed_registration.address_id = addresses.id
+          OR (
+            addresses.kind IN ('primary', 'official')
+            AND failed_registration.base_address_id = addresses.id
+            AND failed_registration.email = addresses.address COLLATE NOCASE
+          )
+        )
+          AND lower(failed_registration.status) = 'failed'
+      ) AS registration_failure_count,
+      COALESCE((
+        SELECT lower(latest_registration.status)
+        FROM registration_jobs AS latest_registration
+        WHERE latest_registration.address_id = addresses.id
+          OR (
+            addresses.kind IN ('primary', 'official')
+            AND latest_registration.base_address_id = addresses.id
+            AND latest_registration.email = addresses.address COLLATE NOCASE
+          )
+        ORDER BY COALESCE(latest_registration.finished_at, latest_registration.updated_at, latest_registration.created_at) DESC,
+          latest_registration.id DESC
+        LIMIT 1
+      ), '') AS last_registration_status
     FROM addresses
     JOIN source_accounts ON source_accounts.id = addresses.account_id
     LEFT JOIN addresses parent ON parent.id = addresses.parent_address_id
@@ -109,8 +136,55 @@ function addressQuery(db, { accountId, kind, strategy, q, page = 1, limit = 50 }
     ORDER BY CASE addresses.kind WHEN 'primary' THEN 0 WHEN 'official' THEN 1 ELSE 2 END, addresses.created_at DESC
     LIMIT ? OFFSET ?
   `).all(...params, limit, (page - 1) * limit)
-    .map((item) => ({ ...item, registration_occupied: Boolean(item.registration_occupied) }));
+    .map((item) => ({
+      ...item,
+      registration_occupied: Boolean(item.registration_occupied),
+      registration_failure_count: Number(item.registration_failure_count) || 0,
+      registration_failed: item.last_registration_status === "failed",
+    }));
   return { items, total, page, pages: Math.max(1, Math.ceil(total / limit)) };
+}
+
+function failedRegistrationAddressIds(db, { accountId, kind, strategy, q } = {}) {
+  const conditions = [
+    "source_accounts.provider <> 'inbox_link'",
+    `(addresses.kind = 'split' OR (
+      source_accounts.provider = 'icloud'
+      AND addresses.kind = 'official'
+      AND addresses.strategy IN ('icloud_mail_alias', 'icloud_hide_my_email', 'icloud_custom_domain')
+    ))`,
+    `COALESCE((
+      SELECT lower(latest_registration.status)
+      FROM registration_jobs AS latest_registration
+      WHERE latest_registration.address_id = addresses.id
+        OR (
+          addresses.kind IN ('primary', 'official')
+          AND latest_registration.base_address_id = addresses.id
+          AND latest_registration.email = addresses.address COLLATE NOCASE
+        )
+      ORDER BY COALESCE(latest_registration.finished_at, latest_registration.updated_at, latest_registration.created_at) DESC,
+        latest_registration.id DESC
+      LIMIT 1
+    ), '') = 'failed'`,
+  ];
+  const params = [];
+  if (accountId) { conditions.push("addresses.account_id = ?"); params.push(Number(accountId)); }
+  if (kind && kind !== "all") { conditions.push("addresses.kind = ?"); params.push(kind); }
+  if (strategy) { conditions.push("addresses.strategy = ?"); params.push(String(strategy)); }
+  if (q) {
+    conditions.push("(addresses.address LIKE ? OR addresses.label LIKE ? OR addresses.purpose LIKE ? OR source_accounts.email LIKE ?)");
+    const term = `%${q}%`;
+    params.push(term, term, term, term);
+  }
+  const ids = db.prepare(`
+    SELECT addresses.id
+    FROM addresses
+    JOIN source_accounts ON source_accounts.id = addresses.account_id
+    WHERE ${conditions.join(" AND ")}
+    ORDER BY addresses.created_at DESC, addresses.id DESC
+    LIMIT 5000
+  `).all(...params).map((item) => Number(item.id));
+  return { ids, count: ids.length };
 }
 
 function publicMessage(row, { includeBody = false } = {}) {
@@ -399,12 +473,23 @@ export function createApp(options = {}) {
     db,
     registration,
     baseUrl: options.pickupBaseUrl || process.env.PICKUP_SERVICE_URL,
-    publicUrl: options.pickupPublicUrl || process.env.PICKUP_PUBLIC_URL,
+    publicUrl: options.pickupPublicUrl || process.env.PICKUP_PUBLIC_URL || process.env.PICKUP_PUBLIC_BASE_URL,
     username: options.pickupUsername || process.env.PICKUP_ADMIN_USERNAME || process.env.ADMIN_USERNAME,
     password: options.pickupPassword || process.env.PICKUP_ADMIN_PASSWORD || process.env.ADMIN_PASSWORD,
     fetchFn: options.pickupFetchFn || options.fetchFn,
   });
   registration.pickup = pickup;
+  const paymentLinks = options.paymentLinks || new PaymentLinkService({
+    db,
+    registration,
+    baseUrl: options.paymentLinkBaseUrl ?? process.env.PAYMENT_LINK_SERVICE_URL,
+    password: options.paymentLinkPassword ?? process.env.PAYMENT_LINK_SERVICE_PASSWORD,
+    fetchFn: options.paymentLinkFetchFn || options.fetchFn,
+    pollIntervalMs: options.paymentLinkPollIntervalMs,
+    timeoutMs: options.paymentLinkTimeoutMs,
+    queueTimeoutMs: options.paymentLinkQueueTimeoutMs,
+  });
+  registration.paymentLinks = paymentLinks;
   const nfapi = options.nfapi || new NfapiService({
     db,
     registrationClient,
@@ -746,6 +831,18 @@ export function createApp(options = {}) {
     try { res.json(await pickup.importRegisteredAccounts(req.body || {})); }
     catch (error) { next(error); }
   });
+  app.get("/api/registration/payment-links", (_req, res, next) => {
+    try { res.json(paymentLinks.list()); } catch (error) { next(error); }
+  });
+  app.put("/api/registration/payment-links/proxies", (req, res, next) => {
+    try { res.json(paymentLinks.saveProxyPool(req.body || {})); } catch (error) { next(error); }
+  });
+  app.post("/api/registration/payment-links/proxy-source", async (req, res, next) => {
+    try { res.json(await paymentLinks.refreshProxySource(req.body || {})); } catch (error) { next(error); }
+  });
+  app.post("/api/registration/payment-links/tasks", async (req, res, next) => {
+    try { res.status(202).json(await paymentLinks.start(req.body || {})); } catch (error) { next(error); }
+  });
   app.put("/api/registration/proxies", (req, res, next) => {
     try { res.json(registration.saveProxyPool(req.body?.proxies)); } catch (error) { next(error); }
   });
@@ -824,7 +921,7 @@ export function createApp(options = {}) {
     try { res.json(await registration.updateRegisteredAccountMetadata(req.params.id, req.body || {})); } catch (error) { next(error); }
   });
   app.post("/api/registration/accounts/:id/refresh-at", async (req, res, next) => {
-    try { res.json(await registration.refreshRegisteredAccountAccessToken(req.params.id)); } catch (error) { next(error); }
+    try { res.json(await registration.refreshRegisteredAccountAccessToken(req.params.id, req.body || {})); } catch (error) { next(error); }
   });
   app.get("/api/registration/accounts/:id/access-token", async (req, res, next) => {
     try { res.json(await registration.registeredAccountAccessToken(req.params.id)); } catch (error) { next(error); }
@@ -1194,6 +1291,15 @@ export function createApp(options = {}) {
     }));
   });
 
+  app.get("/api/addresses/registration-failures", (req, res) => {
+    res.json(failedRegistrationAddressIds(db, {
+      accountId: req.query.accountId,
+      kind: req.query.kind,
+      strategy: req.query.strategy,
+      q: req.query.q,
+    }));
+  });
+
   app.patch("/api/addresses/:id", (req, res, next) => {
     try {
       const item = db.prepare("SELECT * FROM addresses WHERE id = ?").get(Number(req.params.id));
@@ -1205,17 +1311,56 @@ export function createApp(options = {}) {
     } catch (error) { next(error); }
   });
 
-  app.post("/api/addresses/bulk-delete", (req, res, next) => {
+  app.post("/api/addresses/bulk-delete", async (req, res, next) => {
     try {
-      const accountId = req.body?.accountId && req.body.accountId !== "all" ? Number(req.body.accountId) : null;
-      if (accountId && !db.prepare("SELECT 1 FROM source_accounts WHERE id = ?").get(accountId)) {
+      const accountValue = req.body?.accountId;
+      const accountId = accountValue && accountValue !== "all" ? Number(accountValue) : null;
+      if (accountId !== null && (!Number.isSafeInteger(accountId) || accountId <= 0)) {
+        throw Object.assign(new Error("源头邮箱 ID 无效"), { status: 400 });
+      }
+      if (accountId !== null && !db.prepare("SELECT 1 FROM source_accounts WHERE id = ?").get(accountId)) {
         throw Object.assign(new Error("源头邮箱不存在"), { status: 404 });
       }
-      res.json(deleteSplitAddresses(db, {
-        ids: req.body?.ids,
-        accountId,
-        all: req.body?.mode === "all",
-      }));
+      if (req.body?.mode === "all") {
+        return res.json(deleteSplitAddresses(db, { accountId, all: true }));
+      }
+      const ids = [...new Set((Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number)
+        .filter((id) => Number.isInteger(id) && id > 0))];
+      if (!ids.length) throw Object.assign(new Error("请选择要删除的地址"), { status: 400 });
+      if (ids.length > 5_000) throw Object.assign(new Error("单次最多删除 5000 个地址"), { status: 400 });
+      const params = [...ids];
+      const accountCondition = accountId ? "AND addresses.account_id = ?" : "";
+      if (accountId) params.push(accountId);
+      const items = db.prepare(`
+        SELECT addresses.*, source_accounts.provider AS source_provider
+        FROM addresses
+        JOIN source_accounts ON source_accounts.id = addresses.account_id
+        WHERE addresses.id IN (${ids.map(() => "?").join(",")}) ${accountCondition}
+      `).all(...params);
+      const activeRegistration = db.prepare(`
+        SELECT 1 FROM registration_jobs
+        WHERE (
+          registration_jobs.address_id = ?
+          OR (registration_jobs.base_address_id = ? AND registration_jobs.email = ? COLLATE NOCASE)
+        )
+          AND lower(registration_jobs.status) IN ('queued', 'pending', 'claimed', 'running', 'paused', 'cancel_requested')
+        LIMIT 1
+      `);
+      if (items.some((item) => activeRegistration.get(item.id, item.id, item.address))) {
+        throw Object.assign(new Error("所选地址中有邮箱正在注册，请等待任务结束后再删除"), { status: 409 });
+      }
+      const importedIcloud = items.filter((item) => item.source_provider === "icloud"
+        && item.kind === "official" && isIcloudImportedStrategy(item.strategy));
+      if (importedIcloud.length && pickup.registrationProtectionEnabled()) {
+        const inventory = await pickup.listStatuses();
+        const listed = new Set((inventory.items || [])
+          .filter((item) => ["ready", "sold"].includes(String(item.status || "").toLowerCase()))
+          .map((item) => String(item.email || "").toLowerCase()));
+        if (importedIcloud.some((item) => listed.has(String(item.address || "").toLowerCase()))) {
+          throw Object.assign(new Error("所选邮箱包含取件站售卖库存，请先从取件站下架"), { status: 409 });
+        }
+      }
+      return res.json(deleteSelectedAddresses(db, { ids, accountId }));
     } catch (error) { next(error); }
   });
 
@@ -1634,7 +1779,7 @@ export function createApp(options = {}) {
     if (PUBLIC_AGENT_IDENTITY_ERROR_CODES.has(error?.code)) body.code = error.code;
     res.status(status).json(body);
   });
-  return { app, db, graph, gmail, icloud, inbox, inboxLinkMailboxes, extension, jobs, registration, pickup, nfapi, nfapiCredentialSync, microsoftRegistration, microsoftRegistrationRunner };
+  return { app, db, graph, gmail, icloud, inbox, inboxLinkMailboxes, extension, jobs, registration, pickup, paymentLinks, nfapi, nfapiCredentialSync, microsoftRegistration, microsoftRegistrationRunner };
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

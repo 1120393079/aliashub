@@ -144,6 +144,12 @@ cmp -s "$BACKUP_DIR/env-before.sha256" "$BACKUP_DIR/env-after.sha256" || {
   exit 1
 }
 
+# A full-suite update may introduce new generated secrets. The current setup
+# script only adds missing values and never replaces existing configuration.
+if [[ "$MODE" == "--full" ]]; then
+  bash "$ROOT_DIR/scripts/setup-local.sh" --full
+fi
+
 case "$MODE" in
   --full)
     docker compose -f "$ROOT_DIR/compose.yaml" -f "$ROOT_DIR/compose.full.yaml" up -d --build

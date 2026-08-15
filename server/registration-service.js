@@ -210,6 +210,32 @@ function firstRemoteText(...values) {
   return "";
 }
 
+function plusDateFromAccount(item = {}, plusMail = null) {
+  const overview = item.overview && typeof item.overview === "object" && !Array.isArray(item.overview)
+    ? item.overview : {};
+  const candidates = [
+    item.plus_at,
+    item.plusAt,
+    item.plus_started_at,
+    item.plusStartedAt,
+    item.subscription_started_at,
+    item.subscriptionStartedAt,
+    item.subscription_start_at,
+    item.subscriptionStartAt,
+    item.plan_started_at,
+    item.planStartedAt,
+    overview.plus_at,
+    overview.plus_started_at,
+    overview.subscription_started_at,
+    overview.subscription_start_at,
+    overview.plan_started_at,
+    plusMail?.received_at,
+  ];
+  return candidates
+    .map((value) => safeRemoteText(value, 80))
+    .find((value) => Number.isFinite(Date.parse(value))) || "";
+}
+
 const PLUS_MAIL_CONFIRMATION_MAX_AGE_MS = 35 * 24 * 60 * 60 * 1_000;
 
 function plusConfirmationAccountId(message = {}) {
@@ -256,6 +282,45 @@ function plusMailMatchesAccount(mail, account = {}) {
     accountCredential(account, ["account_id", "accountId", "chatgpt_account_id", "chatgptAccountId"]),
   ].map((value) => safeRemoteText(value, 100)).filter(Boolean));
   return accountIds.has(mailAccountId);
+}
+
+function isAccountDeletionMail(message = {}) {
+  const subject = String(message.subject || "");
+  const preview = String(message.preview || "");
+  const body = String(message.body || "");
+  const text = `${subject} ${preview} ${body}`.replace(/\s+/g, " ").trim();
+  if (!text) return false;
+  const sender = String(message.sender_address || "").trim().toLowerCase();
+  const trustedSender = /(?:^|@)(?:[a-z0-9-]+\.)*(?:openai|chatgpt)\.(?:com|net)(?:$|>)/i.test(sender);
+  if (!trustedSender) return false;
+  const accountWord = "(?:account|user|账号|账户|用户)";
+  const deletionWord = "(?:deleted|deactivated|disabled|suspended|banned|terminated|removed|删除|停用|禁用|暂停|封禁)";
+  return new RegExp(`${accountWord}.{0,120}${deletionWord}|${deletionWord}.{0,120}${accountWord}`, "i").test(text);
+}
+
+function accountDeletionMailEvidenceByEmail(db, sourceIds = [], emails = []) {
+  if (!sourceIds.length || !emails.length) return new Map();
+  const sourcePlaceholders = sourceIds.map(() => "?").join(",");
+  const emailPlaceholders = emails.map(() => "?").join(",");
+  const rows = db.prepare(`
+    SELECT mail_messages.recipient_address, mail_messages.sender_address,
+      mail_messages.subject, mail_messages.preview, mail_messages.body,
+      mail_messages.received_at,
+      lower(CASE WHEN trim(mail_messages.recipient_address) <> ''
+        THEN mail_messages.recipient_address ELSE COALESCE(addresses.address, '') END) AS matched_email
+    FROM mail_messages
+    LEFT JOIN addresses ON addresses.id = mail_messages.address_id
+    WHERE mail_messages.account_id IN (${sourcePlaceholders})
+      AND lower(CASE WHEN trim(mail_messages.recipient_address) <> ''
+        THEN mail_messages.recipient_address ELSE COALESCE(addresses.address, '') END) IN (${emailPlaceholders})
+    ORDER BY mail_messages.received_at DESC, mail_messages.id DESC
+  `).all(...sourceIds, ...emails);
+  const evidence = new Map();
+  for (const row of rows) {
+    const email = String(row.matched_email || "").trim().toLowerCase();
+    if (email && !evidence.has(email) && isAccountDeletionMail(row)) evidence.set(email, row);
+  }
+  return evidence;
 }
 
 function recentPlusMailConfirmation(mail, now = Date.now()) {
@@ -422,6 +487,7 @@ function isAuthoritativeStatusSource(source, { terminal = false } = {}) {
   const normalized = safeAccountCheckText(source, 120).toLowerCase();
   if (/^(?:backend[-_]?api)(?:[/:_-]|$)/.test(normalized)) return true;
   if (normalized === "registration-refresh") return true;
+  if (terminal && normalized === "mail/account-deletion") return true;
   return !terminal && normalized === "api/auth/session+jwt";
 }
 
@@ -980,7 +1046,8 @@ function accountStatusSignals(item = {}, persistedOutcome = null) {
     overview.credential_status,
     overview.credential_state,
   ));
-  if (credentialEvidence && CREDENTIAL_EXPIRED_CODES.has(credentialEvidence.code)) credentialStatus = "expired";
+  if (terminalEvidence) credentialStatus = "revoked";
+  else if (credentialEvidence && CREDENTIAL_EXPIRED_CODES.has(credentialEvidence.code)) credentialStatus = "expired";
   else if (credentialEvidence && CREDENTIAL_REVOKED_CODES.has(credentialEvidence.code)) credentialStatus = "revoked";
   else if (credentialStatus === "unknown" && confirmedActive) credentialStatus = "valid";
   else if (credentialStatus === "unknown" && !anyCredentialAvailable) credentialStatus = "missing";
@@ -1528,15 +1595,23 @@ export class RegistrationService {
 
   async syncLatestNfapiCredentials(accounts) {
     if (!this.nfapiCredentialSync) return { attempted: 0, synced: 0, failed: 0, items: [] };
-    const result = await this.nfapiCredentialSync.syncAccounts(accounts);
-    if (result.failed > 0) {
-      const failed = result.items.find((item) => !item.ok);
-      throw Object.assign(new Error(failed?.error || "NFapi 最新凭据同步失败"), {
-        status: 502,
-        code: "NFAPI_CREDENTIAL_SYNC_FAILED",
-      });
+    try {
+      const result = await this.nfapiCredentialSync.syncAccounts(accounts);
+      return result && typeof result === "object" ? result : {
+        attempted: accounts.length,
+        synced: 0,
+        failed: accounts.length,
+        items: [],
+      };
+    } catch (error) {
+      return {
+        attempted: accounts.length,
+        synced: 0,
+        failed: accounts.length,
+        items: [],
+        error: safeAccountCheckText(error, 180) || "NFapi 最新凭据同步失败",
+      };
     }
-    return result;
   }
 
   requireConnectorKey(req, res, next) {
@@ -1648,6 +1723,7 @@ export class RegistrationService {
       const optionBases = bases.map((base) => {
         const jobs = baseJobs.all(base.id, base.id, base.id);
         const latest = jobs[0];
+        const failedJobs = jobs.filter((job) => job.status === "failed");
         const directState = direct ? directIcloudRegistrationState(jobs) : null;
         const occupied = directState?.occupied || occupiedAliasHistory(jobs);
         const conflictCount = occupied.count;
@@ -1669,6 +1745,11 @@ export class RegistrationService {
           occupied_alias_last_seen_at: occupied.lastSeenAt,
           last_occupied_alias_at: occupied.lastSeenAt,
           registration_success_count: jobs.filter((job) => job.status === "completed").length,
+          registration_failure_count: failedJobs.length,
+          last_registration_failure_at: failedJobs[0]?.finished_at
+            || failedJobs[0]?.updated_at
+            || failedJobs[0]?.created_at
+            || "",
           last_registration_status: latest?.status || "",
           registration_hint: pickupStatusUnavailable && direct
             ? "取件站库存状态暂时无法确认，为避免误用售卖邮箱，当前禁止注册。"
@@ -2372,6 +2453,21 @@ export class RegistrationService {
     return matches[0];
   }
 
+  registeredAccountRefreshProxy(job, proxySelection) {
+    const selection = String(proxySelection || "original").trim().toLowerCase();
+    if (selection === "original") return this.registeredAccountOriginalProxy(job, "刷新 AT");
+    const match = selection.match(/^proxy:(\d+)$/);
+    if (!match) {
+      throw Object.assign(new Error("AT 刷新代理选择无效"), { status: 400 });
+    }
+    const proxies = this.getProxyPool();
+    const index = Number(match[1]);
+    if (!Number.isSafeInteger(index) || index < 0 || index >= proxies.length) {
+      throw Object.assign(new Error("选择的 AT 刷新代理已不存在，请刷新页面后重试"), { status: 409 });
+    }
+    return proxies[index];
+  }
+
   passwordSetupProxy(job) {
     return this.registeredAccountOriginalProxy(job, "补设密码");
   }
@@ -2715,14 +2811,19 @@ export class RegistrationService {
           status_reason: preserveNonPlanStatus
             ? accountSignals.status_reason : "检测到与当前 workspace 匹配的 ChatGPT Plus 开通确认邮件",
           status_retryable: preserveNonPlanStatus ? accountSignals.status_retryable : false,
-          status_evidence_path: "mail_messages.account_manage_link+subject+body",
+          status_evidence_path: preserveNonPlanStatus
+            ? accountSignals.status_evidence_path : "mail_messages.account_manage_link+subject+body",
           status_checked_at: plusMail.received_at,
           status_confirmed_at: plusMail.received_at,
-          status_source: "mail/plus-confirmation",
+          status_source: preserveNonPlanStatus
+            ? accountSignals.status_source : "mail/plus-confirmation",
           plan_state: "subscribed",
           plan_name: "chatgptplusplan",
           display_status: "subscribed",
         } : accountSignals;
+        const plusAt = (effectiveSignals.account_type === "plus" || mailPromoted)
+          ? plusDateFromAccount(item, plusMailMatchesAccount(plusMail, item) ? plusMail : null)
+          : "";
         const checkState = mailPromoted ? "checked" : checkOutcomeMatches
           ? (checkOutcome.detection_status === "confirmed" ? "checked" : "failed")
           : "";
@@ -2753,6 +2854,7 @@ export class RegistrationService {
           ...effectiveSignals,
           mail_plus_confirmed: Boolean(plusMail),
           mail_plus_confirmed_at: plusMail?.received_at || "",
+          plus_at: plusAt,
           mail_plus_subject: plusMail?.subject || "",
           mail_plus_account_id: plusMail?.account_id || "",
           status_check_state: checkState,
@@ -2963,7 +3065,9 @@ export class RegistrationService {
       selected = before.items.filter((item) => ids.includes(Number(item.id)));
     }
     const emailById = new Map(selected.map((item) => [Number(item.id), String(item.email || "")]));
-    if (!skipNfapiSync) await this.syncLatestNfapiCredentials(selected);
+    const nfapiSync = skipNfapiSync
+      ? { attempted: 0, synced: 0, failed: 0, items: [] }
+      : await this.syncLatestNfapiCredentials(selected);
     const placeholders = ids.map(() => "?").join(",");
     const jobs = this.db.prepare(`
       SELECT external_account_id, email, proxy_label
@@ -3007,6 +3111,7 @@ export class RegistrationService {
       return outcome;
     });
 
+    await this.scanRegisteredAccountMailEvidence(selected);
     const accounts = await this.listRegisteredAccounts({ refreshUnchecked: false });
     const selectedAfter = accounts.items.filter((item) => ids.includes(Number(item.id)));
     const accountById = new Map(selectedAfter.map((item) => [Number(item.id), item]));
@@ -3017,6 +3122,9 @@ export class RegistrationService {
       const mailPlanOverride = account.mail_plus_confirmed === true
         && account.account_type === "plus"
         && outcome.account_type !== "plus";
+      const mailAccountInvalid = account.availability === "unavailable"
+        && normalizeCheckCode(account.status_code) === "account_deleted"
+        && String(account.status_source || "").toLowerCase() === "mail/account-deletion";
       const merged = {
         ...outcome,
         account_status: outcome.account_status !== "unknown" || credentialTerminal
@@ -3044,6 +3152,19 @@ export class RegistrationService {
         merged.source = "mail/plus-confirmation";
         merged.evidence_path = "mail_messages.account_manage_link+subject+body";
         merged.checked_at = String(account.mail_plus_confirmed_at || outcome.checked_at);
+      }
+      if (mailAccountInvalid) {
+        merged.checked = true;
+        merged.detection_status = "confirmed";
+        merged.account_status = "deleted";
+        merged.credential_status = "revoked";
+        merged.code = "account_deleted";
+        merged.reason = String(account.status_reason || "对应邮箱收到 OpenAI 账号删除通知，判定账户被封禁");
+        merged.retryable = false;
+        merged.source = "mail/account-deletion";
+        merged.evidence_path = "mail_messages.sender+subject+preview+body";
+        merged.checked_at = String(account.status_checked_at || outcome.checked_at);
+        merged.error = "";
       }
       merged.type = merged.account_type;
       merged.type_raw = merged.account_type_raw;
@@ -3077,6 +3198,11 @@ export class RegistrationService {
       unavailable: selectedAfter.filter((item) => item.availability === "unavailable").length,
       unchecked: selectedAfter.filter((item) => item.availability === "unchecked").length,
       types: typeCounts,
+      nfapi_sync: {
+        attempted: Math.max(0, Number(nfapiSync?.attempted) || 0),
+        synced: Math.max(0, Number(nfapiSync?.synced) || 0),
+        failed: Math.max(0, Number(nfapiSync?.failed) || 0),
+      },
       items: publicResults,
       accounts,
     };
@@ -3901,17 +4027,17 @@ export class RegistrationService {
     return { id: accountId, email: credentials.email, credentials };
   }
 
-  refreshRegisteredAccountAccessToken(id) {
+  refreshRegisteredAccountAccessToken(id, input = {}) {
     const accountId = positiveAccountId(id);
     const existing = this.accountAccessTokenRefreshes.get(accountId);
     if (existing) return existing;
-    const promise = this.runRegisteredAccountAccessTokenRefresh(accountId)
+    const promise = this.runRegisteredAccountAccessTokenRefresh(accountId, input)
       .finally(() => this.accountAccessTokenRefreshes.delete(accountId));
     this.accountAccessTokenRefreshes.set(accountId, promise);
     return promise;
   }
 
-  async runRegisteredAccountAccessTokenRefresh(accountId) {
+  async runRegisteredAccountAccessTokenRefresh(accountId, input = {}) {
     const job = this.db.prepare(`
       SELECT * FROM registration_jobs
       WHERE external_account_id = ? AND status = 'completed'
@@ -3955,7 +4081,7 @@ export class RegistrationService {
       });
     };
 
-    const proxy = this.registeredAccountOriginalProxy(job, "刷新 AT");
+    const proxy = this.registeredAccountRefreshProxy(job, input?.proxy_selection);
     try {
       await this.client.upsertOutlookEmailProviderSetting({
         apiUrl: this.mailboxBaseUrl,
@@ -4039,6 +4165,21 @@ export class RegistrationService {
   async deleteRegisteredAccounts(input = {}) {
     const ids = normalizeSelectedIds(input, "注册账号");
     const placeholders = ids.map(() => "?").join(",");
+    let releasePaymentReservations = () => {};
+    if (this.paymentLinks?.reserveForAccountDeletion) {
+      releasePaymentReservations = this.paymentLinks.reserveForAccountDeletion(ids);
+    } else {
+      const activePaymentLink = this.db.prepare(`
+        SELECT external_account_id FROM registered_account_payment_links
+        WHERE external_account_id IN (${placeholders})
+          AND status IN ('queued', 'running', 'cancel_requested')
+        LIMIT 1
+      `).get(...ids.map(String));
+      if (activePaymentLink) {
+        throw Object.assign(new Error(`账号 #${activePaymentLink.external_account_id} 正在提链，请等待任务结束`), { status: 409 });
+      }
+    }
+    try {
     const jobs = this.db.prepare(`
       SELECT * FROM registration_jobs
       WHERE external_account_id IN (${placeholders}) AND status = 'completed'
@@ -4081,10 +4222,14 @@ export class RegistrationService {
         this.db.prepare(`DELETE FROM registered_account_checkout_checks WHERE external_account_id IN (${placeholders})`).run(...deletedIds);
         this.db.prepare(`DELETE FROM registered_account_trial_checks WHERE external_account_id IN (${placeholders})`).run(...deletedIds);
         this.db.prepare(`DELETE FROM registered_account_momo_checks WHERE external_account_id IN (${placeholders})`).run(...deletedIds);
+        this.db.prepare(`DELETE FROM registered_account_payment_links WHERE external_account_id IN (${placeholders})`).run(...deletedIds);
         this.db.prepare(`DELETE FROM registered_account_nfapi_links WHERE external_account_id IN (${placeholders})`).run(...deletedIds);
       })();
     }
     return { requested: ids.length, deleted, deleted_ids: deletedIds.map(Number), failed };
+    } finally {
+      releasePaymentReservations();
+    }
   }
 
   externalAccounts({ limit = 100, offset = 0 } = {}) {
@@ -4116,11 +4261,9 @@ export class RegistrationService {
   }
 
   async scanRegisteredAccountMailEvidence(accounts = []) {
-    const candidates = accounts.filter((item) => {
-      const type = normalizeRemoteSignal(item?.account_type, "unknown");
-      return !new Set(["plus", "pro", "team", "business", "enterprise", "edu", "trial"])
-        .has(type);
-    });
+    const candidates = accounts.filter((item) => (
+      Number.isSafeInteger(Number(item?.id)) && String(item?.email || "").trim()
+    ));
     if (!candidates.length) return false;
 
     const ids = candidates.map((item) => Number(item.id));
@@ -4135,7 +4278,6 @@ export class RegistrationService {
       WHERE registration_jobs.external_account_id IN (${placeholders})
         AND registration_jobs.status = 'completed'
         AND source_accounts.status = 'connected'
-        AND source_accounts.provider = 'inbox_link'
       ORDER BY registration_jobs.created_at DESC, registration_jobs.id DESC
     `).all(...ids.map(String));
     const sourceById = new Map();
@@ -4146,8 +4288,39 @@ export class RegistrationService {
     }
 
     const sources = [...sourceById.values()];
-    for (let offset = 0; offset < sources.length; offset += 8) {
-      await Promise.allSettled(sources.slice(offset, offset + 8).map((account) => this.scanAccount(account)));
+    const sourcesToScan = sources.filter((account) => ["icloud", "inbox_link"]
+      .includes(String(account.provider || "").toLowerCase()));
+    for (let offset = 0; offset < sourcesToScan.length; offset += 8) {
+      await Promise.allSettled(sourcesToScan.slice(offset, offset + 8).map((account) => this.scanAccount(account)));
+    }
+    const deletionEvidence = accountDeletionMailEvidenceByEmail(
+      this.db,
+      sources.map((item) => Number(item.id)),
+      [...emailById.values()],
+    );
+    const accountIdByEmail = new Map([...emailById.entries()].map(([id, email]) => [email, id]));
+    for (const [email, message] of deletionEvidence) {
+      const accountId = accountIdByEmail.get(email);
+      if (!accountId) continue;
+      const checkedAt = nowIso();
+      this.persistAccountStatusOutcome({
+        external_account_id: String(accountId),
+        email,
+        detection_status: "confirmed",
+        account_status: "deleted",
+        credential_status: "revoked",
+        subscription_status: "unknown",
+        account_type: "unknown",
+        account_type_raw: "",
+        code: "account_deleted",
+        reason: "对应邮箱收到 OpenAI 账号删除通知，判定账户被封禁",
+        retryable: false,
+        source: "mail/account-deletion",
+        http_status: 0,
+        evidence_path: "mail_messages.sender+subject+preview+body",
+        checked_at: checkedAt,
+        attempted_at: nowIso(),
+      });
     }
     return sources.length > 0;
   }

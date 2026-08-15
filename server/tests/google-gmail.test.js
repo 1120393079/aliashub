@@ -12,8 +12,6 @@ import { jsonRequest } from "./http-harness.js";
 
 const CLIENT_ID = "google-client-id.apps.googleusercontent.com";
 const CLIENT_SECRET = "google-client-secret";
-const BUILTIN_CLIENT_ID = "406964657835-aq8lmia8j95dhl1a2bvharmfk3t1hgqj.apps.googleusercontent.com";
-const BUILTIN_CLIENT_SECRET = "kSmqreRr0qwBWJgbf5Y-PjSU";
 const REDIRECT_URI = "http://127.0.0.1:12142/";
 
 function json(data, status = 200) {
@@ -48,28 +46,25 @@ function encoded(value) {
   return Buffer.from(value, "utf8").toString("base64url");
 }
 
-test("starts Google PKCE authorization with the built-in loopback client by default", async () => {
+test("requires an explicitly configured Google OAuth client", async () => {
   const current = fixture();
   const gmail = new GoogleGmailClient({
     db: current.db,
     encryptionKey: "test-key",
-    redirectUri: "http://localhost:9999/wrong-callback",
   });
   try {
     assert.deepEqual(gmail.configuration(), {
-      google_oauth_client_id: BUILTIN_CLIENT_ID,
-      google_oauth_client_secret_configured: true,
+      google_oauth_client_id: "",
+      google_oauth_client_secret_configured: false,
       google_oauth_redirect_uri: REDIRECT_URI,
-      google_oauth_configured: true,
-      google_oauth_client_mode: "builtin",
-      google_oauth_client: "内置邮件公共客户端",
+      google_oauth_configured: false,
+      google_oauth_client_mode: "custom",
+      google_oauth_client: "自定义 OAuth 客户端",
     });
-    const result = await gmail.startAuthorization();
-    const authorizationUrl = new URL(result.authorizationUrl);
-    assert.equal(authorizationUrl.searchParams.get("client_id"), BUILTIN_CLIENT_ID);
-    assert.equal(authorizationUrl.searchParams.get("redirect_uri"), REDIRECT_URI);
-    assert.equal(authorizationUrl.searchParams.get("code_challenge_method"), "S256");
-    assert.match(authorizationUrl.searchParams.get("scope"), /gmail\.readonly/);
+    await assert.rejects(
+      () => gmail.startAuthorization(),
+      (error) => error.code === "GOOGLE_OAUTH_NOT_CONFIGURED" && error.status === 409,
+    );
   } finally {
     current.close();
   }
@@ -120,7 +115,7 @@ test("stores custom Google OAuth configuration safely and starts PKCE authorizat
   }
 });
 
-test("does not pair the built-in Google secret with a custom client ID", async () => {
+test("does not start Google OAuth when a custom client ID has no matching secret", async () => {
   const current = fixture();
   const gmail = new GoogleGmailClient({ db: current.db, encryptionKey: "test-key" });
   try {
@@ -136,12 +131,15 @@ test("does not pair the built-in Google secret with a custom client ID", async (
   }
 });
 
-test("completes built-in Google OAuth and stores an encrypted refresh token", async () => {
+test("completes custom Google OAuth and stores an encrypted refresh token", async () => {
   const current = fixture();
   const calls = [];
   const gmail = new GoogleGmailClient({
     db: current.db,
     encryptionKey: "test-key",
+    clientId: CLIENT_ID,
+    clientSecret: CLIENT_SECRET,
+    redirectUri: REDIRECT_URI,
     fetchFn: async (url, options = {}) => {
       calls.push({ url: String(url), options });
       if (String(url).endsWith("/token")) {
@@ -176,8 +174,8 @@ test("completes built-in Google OAuth and stores an encrypted refresh token", as
     assert.equal(result.account.supports_plus_aliases, true);
 
     const tokenBody = calls[0].options.body;
-    assert.equal(tokenBody.get("client_id"), BUILTIN_CLIENT_ID);
-    assert.equal(tokenBody.get("client_secret"), BUILTIN_CLIENT_SECRET);
+    assert.equal(tokenBody.get("client_id"), CLIENT_ID);
+    assert.equal(tokenBody.get("client_secret"), CLIENT_SECRET);
     assert.equal(tokenBody.get("grant_type"), "authorization_code");
     assert.ok(tokenBody.get("code_verifier"));
     const token = current.db.prepare("SELECT * FROM google_tokens WHERE account_id = ?").get(result.account.id);

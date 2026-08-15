@@ -33,7 +33,7 @@ const BROWSER_MODE_OPTIONS = [
 ]
 
 const ACCOUNT_TOOL_BUTTON_CLASS = 'h-8 shrink-0 whitespace-nowrap bg-transparent'
-const DEFAULT_CHATGPT_WORKSPACE_IDS = 'd1869eec-4d2d-4fce-967f-a1a6b906d51e'
+const DEFAULT_CHATGPT_WORKSPACE_IDS = ''
 
 function getAccountOverview(acc: any) {
   return acc?.overview || {}
@@ -602,7 +602,7 @@ function RegisterModal({
                       <textarea
                         value={chatgptWorkspaceIds}
                         onChange={(e) => setChatgptWorkspaceIds(e.target.value)}
-                        placeholder={DEFAULT_CHATGPT_WORKSPACE_IDS}
+                        placeholder="输入 Workspace ID，多个可换行"
                         className="control-surface control-surface-compact w-full min-h-20 font-mono text-xs"
                       />
                       <div className="mt-1 text-xs text-[var(--text-muted)]">

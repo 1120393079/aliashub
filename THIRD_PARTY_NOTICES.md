@@ -36,6 +36,17 @@ License and [Playwright for Python](https://playwright.dev/python/) under the
 Apache License 2.0. Browser binaries installed for storefront automation retain
 their respective upstream licenses and notices.
 
+## Payment-link extractor dependencies
+
+The bundled `payment-link-extractor/` service uses
+[Flask](https://flask.palletsprojects.com/) and Werkzeug under the BSD-3-Clause
+License, [Requests](https://requests.readthedocs.io/) under the Apache License
+2.0, [curl-cffi](https://curl-cffi.readthedocs.io/) under the MIT License, and
+[Loguru](https://loguru.readthedocs.io/) under the MIT License. WebSocket support
+is provided by Flask-Sock and simple-websocket under the MIT License. Installed
+packages and their transitive dependencies retain their respective upstream
+licenses and notices.
+
 ## AliasHub license
 
 AliasHub's original project code and this combined source distribution are

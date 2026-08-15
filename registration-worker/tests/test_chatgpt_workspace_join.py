@@ -17,14 +17,14 @@ def test_parse_workspace_ids_accepts_commas_and_lines():
 
 def test_extract_verification_link_accepts_chatgpt_workspace_invite():
     html = """
-    <a href="https://chatgpt.com/k12-invite?inv_ws_name=w&amp;wId=d1869eec-4d2d-4fce-967f-a1a6b906d51e&amp;aiId=abc">
+    <a href="https://chatgpt.com/k12-invite?inv_ws_name=w&amp;wId=11111111-1111-4111-8111-111111111111&amp;aiId=abc">
       Join workspace
     </a>
     """
 
     assert _extract_verification_link(html, "k12-invite") == (
         "https://chatgpt.com/k12-invite?inv_ws_name=w"
-        "&wId=d1869eec-4d2d-4fce-967f-a1a6b906d51e&aiId=abc"
+        "&wId=11111111-1111-4111-8111-111111111111&aiId=abc"
     )
 
 

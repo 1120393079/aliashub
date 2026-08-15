@@ -104,8 +104,8 @@ def test_export_workspace_cpa_session_from_browser_switches_workspace_and_saves(
             if arg and arg.get("workspaceId"):
                 return {
                     "ok": True,
-                    "selectedText": "schools.nyc.gov Workspace #82254",
-                    "profileText": "schools.nyc.gov Workspace #82254",
+                    "selectedText": "school.example Workspace #10001",
+                    "profileText": "school.example Workspace #10001",
                 }
             return json.dumps(
                 {
@@ -117,7 +117,7 @@ def test_export_workspace_cpa_session_from_browser_switches_workspace_and_saves(
     page = FakePage()
     result = export_workspace_cpa_session_from_browser(
         page,
-        workspace_id="d1869eec-4d2d-4fce-967f-a1a6b906d51e",
+        workspace_id="11111111-1111-4111-8111-111111111111",
         output_dir=tmp_path,
         now=datetime(2026, 7, 1, 1, 2, 3, tzinfo=timezone.utc),
     )
@@ -127,7 +127,7 @@ def test_export_workspace_cpa_session_from_browser_switches_workspace_and_saves(
         "https://chatgpt.com/api/auth/session",
     ]
     workspace_args = [arg for arg in page.evaluate_args if isinstance(arg, dict) and arg.get("workspaceId")]
-    assert workspace_args[0]["workspaceId"] == "d1869eec-4d2d-4fce-967f-a1a6b906d51e"
+    assert workspace_args[0]["workspaceId"] == "11111111-1111-4111-8111-111111111111"
     assert result["ok"] is True
     assert result["account_id"] == "workspace-account"
     assert result["email"] == "member@example.com"
@@ -150,22 +150,22 @@ def test_switch_chatgpt_workspace_via_profile_menu_uses_profile_menu():
             self.evaluate_calls.append((script, arg))
             return {
                 "ok": True,
-                "selectedText": "schools.nyc.gov Workspace #82254",
-                "profileText": "schools.nyc.gov Workspace #82254",
+                "selectedText": "school.example Workspace #10001",
+                "profileText": "school.example Workspace #10001",
             }
 
     page = FakePage()
     result = switch_chatgpt_workspace_via_profile_menu(
         page,
-        workspace_id="631e1603-06cf-4f0b-b79b-d09fbfcfe98d",
+        workspace_id="22222222-2222-4222-8222-222222222222",
     )
 
     assert page.gotos == ["https://chatgpt.com/"]
     script, arg = page.evaluate_calls[0]
     assert "accounts-profile-button" in script
     assert "menuitemradio" in script
-    assert arg["workspaceId"] == "631e1603-06cf-4f0b-b79b-d09fbfcfe98d"
-    assert result["profileText"] == "schools.nyc.gov Workspace #82254"
+    assert arg["workspaceId"] == "22222222-2222-4222-8222-222222222222"
+    assert result["profileText"] == "school.example Workspace #10001"
 
 
 def test_switch_chatgpt_workspace_via_profile_menu_waits_for_each_menu_step():
@@ -227,28 +227,28 @@ def test_switch_chatgpt_workspace_via_profile_menu_waits_for_each_menu_step():
                     "ok": True,
                     "x": 50,
                     "y": 60,
-                    "text": "schools.nyc.gov Workspace #82254",
+                    "text": "school.example Workspace #10001",
                 }
             if "WORKSPACE_READY_TARGET" in script:
                 if not self.workspace_clicked:
                     return {"ok": False, "summary": "workspace not selected"}
                 return {
                     "ok": True,
-                    "text": "schools.nyc.gov Workspace #82254",
+                    "text": "school.example Workspace #10001",
                     "source": "profile",
                 }
-            return "schools.nyc.gov Workspace #82254" if self.workspace_clicked else "ss Personal Account"
+            return "school.example Workspace #10001" if self.workspace_clicked else "ss Personal Account"
 
     page = FakePage()
     result = switch_chatgpt_workspace_via_profile_menu(
         page,
-        workspace_id="631e1603-06cf-4f0b-b79b-d09fbfcfe98d",
+        workspace_id="22222222-2222-4222-8222-222222222222",
     )
 
     assert page.gotos == ["https://chatgpt.com/"]
     assert page.mouse_clicks == [(10, 20), (30, 40), (50, 60)]
     assert page.mouse_moves == [(30, 40)]
-    assert result["profileText"] == "schools.nyc.gov Workspace #82254"
+    assert result["profileText"] == "school.example Workspace #10001"
 
 
 def test_switch_chatgpt_workspace_via_profile_menu_reclicks_until_next_step_and_accepts_welcome():
@@ -306,14 +306,14 @@ def test_switch_chatgpt_workspace_via_profile_menu_reclicks_until_next_step_and_
                     "ok": True,
                     "x": 50,
                     "y": 60,
-                    "text": "schools.nyc.gov Workspace #82254",
+                    "text": "school.example Workspace #10001",
                 }
             if "WORKSPACE_READY_TARGET" in script:
                 if self.workspace_clicks < 1:
                     return {"ok": False, "summary": "welcome not visible"}
                 return {
                     "ok": True,
-                    "text": "Welcome to the schools.nyc.gov Workspace #82254 workspace",
+                    "text": "Welcome to the school.example Workspace #10001 workspace",
                     "source": "welcome",
                 }
             return "AL Aurora Lewis Personal account"
@@ -321,12 +321,12 @@ def test_switch_chatgpt_workspace_via_profile_menu_reclicks_until_next_step_and_
     page = FakePage()
     result = switch_chatgpt_workspace_via_profile_menu(
         page,
-        workspace_id="631e1603-06cf-4f0b-b79b-d09fbfcfe98d",
+        workspace_id="22222222-2222-4222-8222-222222222222",
         timeout_ms=2500,
     )
 
     assert page.mouse_clicks == [(10, 20), (10, 20), (30, 40), (30, 40), (50, 60)]
-    assert result["profileText"] == "Welcome to the schools.nyc.gov Workspace #82254 workspace"
+    assert result["profileText"] == "Welcome to the school.example Workspace #10001 workspace"
     assert result["readySource"] == "welcome"
 
 
@@ -389,14 +389,14 @@ def test_switch_chatgpt_workspace_via_profile_menu_waits_for_welcome_after_radio
                     "ok": True,
                     "x": 50,
                     "y": 60,
-                    "text": "schools.nyc.gov Workspace #82254",
+                    "text": "school.example Workspace #10001",
                 }
             if "WORKSPACE_READY_TARGET" in script:
                 self.ready_checks += 1
                 if self.workspace_clicked and self.radio_missing_checks > 0:
                     return {
                         "ok": True,
-                        "text": "Welcome to the schools.nyc.gov Workspace #82254 workspace",
+                        "text": "Welcome to the school.example Workspace #10001 workspace",
                         "source": "welcome",
                     }
                 return {"ok": False, "summary": "welcome not visible yet"}
@@ -405,13 +405,13 @@ def test_switch_chatgpt_workspace_via_profile_menu_waits_for_welcome_after_radio
     page = FakePage()
     result = switch_chatgpt_workspace_via_profile_menu(
         page,
-        workspace_id="631e1603-06cf-4f0b-b79b-d09fbfcfe98d",
+        workspace_id="22222222-2222-4222-8222-222222222222",
         timeout_ms=5000,
     )
 
     assert page.mouse_clicks == [(10, 20), (30, 40), (50, 60)]
     assert result["readySource"] == "welcome"
-    assert result["profileText"] == "Welcome to the schools.nyc.gov Workspace #82254 workspace"
+    assert result["profileText"] == "Welcome to the school.example Workspace #10001 workspace"
 
 
 def test_switch_chatgpt_workspace_via_profile_menu_recovers_navigation_with_welcome_signal():
@@ -468,7 +468,7 @@ def test_switch_chatgpt_workspace_via_profile_menu_recovers_navigation_with_welc
                     "ok": True,
                     "x": 50,
                     "y": 60,
-                    "text": "schools.nyc.gov Workspace #82254",
+                    "text": "school.example Workspace #10001",
                 }
             if "WORKSPACE_READY_TARGET" in script:
                 self.ready_checks += 1
@@ -479,7 +479,7 @@ def test_switch_chatgpt_workspace_via_profile_menu_recovers_navigation_with_welc
                     raise RuntimeError("Execution context was destroyed, most likely because of a navigation")
                 return {
                     "ok": True,
-                    "text": "Welcome to the schools.nyc.gov Workspace #82254 workspace",
+                    "text": "Welcome to the school.example Workspace #10001 workspace",
                     "source": "welcome",
                 }
             return "SW Stella Wilson Personal account"
@@ -487,14 +487,14 @@ def test_switch_chatgpt_workspace_via_profile_menu_recovers_navigation_with_welc
     page = FakePage()
     result = switch_chatgpt_workspace_via_profile_menu(
         page,
-        workspace_id="631e1603-06cf-4f0b-b79b-d09fbfcfe98d",
+        workspace_id="22222222-2222-4222-8222-222222222222",
         timeout_ms=5000,
     )
 
     assert page.mouse_clicks == [(10, 20), (30, 40), (50, 60)]
     assert result["navigationRecovered"] is True
     assert result["readySource"] == "welcome"
-    assert result["profileText"] == "Welcome to the schools.nyc.gov Workspace #82254 workspace"
+    assert result["profileText"] == "Welcome to the school.example Workspace #10001 workspace"
 
 
 def test_switch_chatgpt_workspace_via_profile_menu_skips_menu_when_already_workspace():
@@ -514,19 +514,19 @@ def test_switch_chatgpt_workspace_via_profile_menu_skips_menu_when_already_works
             if arg is not None:
                 self.menu_evaluate_called = True
                 raise AssertionError("menu switching should be skipped")
-            return "schools.nyc.gov Workspace #82254"
+            return "school.example Workspace #10001"
 
     page = FakePage()
     result = switch_chatgpt_workspace_via_profile_menu(
         page,
-        workspace_id="631e1603-06cf-4f0b-b79b-d09fbfcfe98d",
+        workspace_id="22222222-2222-4222-8222-222222222222",
     )
 
     assert page.gotos == ["https://chatgpt.com/"]
     assert page.waited is True
     assert page.menu_evaluate_called is False
     assert result["alreadyWorkspace"] is True
-    assert result["profileText"] == "schools.nyc.gov Workspace #82254"
+    assert result["profileText"] == "school.example Workspace #10001"
 
 
 def test_switch_chatgpt_workspace_via_profile_menu_tolerates_navigation_after_click():
@@ -546,13 +546,13 @@ def test_switch_chatgpt_workspace_via_profile_menu_tolerates_navigation_after_cl
             self.evaluate_count += 1
             if arg and arg.get("workspaceId"):
                 raise RuntimeError("Execution context was destroyed, most likely because of a navigation")
-            return "schools.nyc.gov Workspace #82254"
+            return "school.example Workspace #10001"
 
     page = FakePage()
     result = switch_chatgpt_workspace_via_profile_menu(
         page,
-        workspace_id="631e1603-06cf-4f0b-b79b-d09fbfcfe98d",
+        workspace_id="22222222-2222-4222-8222-222222222222",
     )
 
     assert page.waited is True
-    assert result["profileText"] == "schools.nyc.gov Workspace #82254"
+    assert result["profileText"] == "school.example Workspace #10001"

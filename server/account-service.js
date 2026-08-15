@@ -329,6 +329,71 @@ export function deleteSplitAddresses(db, { ids = [], accountId, all = false } = 
   return { deleted: items.length, accountIds: [...byAccount.keys()] };
 }
 
+export function deleteSelectedAddresses(db, { ids = [], accountId } = {}) {
+  const normalizedIds = [...new Set((Array.isArray(ids) ? ids : []).map(Number)
+    .filter((id) => Number.isInteger(id) && id > 0))];
+  if (normalizedIds.length > 5_000) throw Object.assign(new Error("单次最多删除 5000 个地址"), { status: 400 });
+  if (!normalizedIds.length) throw Object.assign(new Error("请选择要删除的地址"), { status: 400 });
+
+  const conditions = [`addresses.id IN (${normalizedIds.map(() => "?").join(",")})`];
+  const params = [...normalizedIds];
+  if (accountId) {
+    conditions.push("addresses.account_id = ?");
+    params.push(Number(accountId));
+  }
+  const items = db.prepare(`
+    SELECT addresses.id, addresses.account_id, addresses.address, addresses.kind,
+      addresses.strategy, source_accounts.provider AS source_provider
+    FROM addresses
+    JOIN source_accounts ON source_accounts.id = addresses.account_id
+    WHERE ${conditions.join(" AND ")}
+  `).all(...params);
+  const typed = items.map((item) => ({
+    ...item,
+    imported_icloud: item.source_provider === "icloud"
+      && item.kind === "official"
+      && isIcloudImportedStrategy(item.strategy),
+  }));
+  if (typed.some((item) => item.kind !== "split" && !item.imported_icloud)) {
+    throw Object.assign(new Error("所选地址包含不能从本地删除的源头号或官方别名"), { status: 409 });
+  }
+  if (!typed.length) return {
+    deleted: 0,
+    split_deleted: 0,
+    imported_icloud_deleted: 0,
+    accountIds: [],
+    ids: [],
+  };
+
+  const summaries = new Map();
+  const remove = db.prepare("DELETE FROM addresses WHERE id = ?");
+  db.transaction(() => {
+    for (const item of typed) {
+      remove.run(item.id);
+      const current = summaries.get(item.account_id) || { split: 0, importedIcloud: 0 };
+      if (item.imported_icloud) current.importedIcloud += 1;
+      else current.split += 1;
+      summaries.set(item.account_id, current);
+    }
+    for (const [sourceAccountId, summary] of summaries) {
+      const count = summary.split + summary.importedIcloud;
+      audit(db, sourceAccountId, "address", "批量删除本地地址", `共删除 ${count} 个`, {
+        count,
+        split_count: summary.split,
+        imported_icloud_count: summary.importedIcloud,
+      });
+    }
+  })();
+  const splitDeleted = typed.filter((item) => !item.imported_icloud).length;
+  return {
+    deleted: typed.length,
+    split_deleted: splitDeleted,
+    imported_icloud_deleted: typed.length - splitDeleted,
+    accountIds: [...summaries.keys()],
+    ids: typed.map((item) => item.id),
+  };
+}
+
 export function persistInboxScanResult(db, account, result = {}) {
   const insertCode = db.prepare(`
     INSERT OR IGNORE INTO verification_codes (account_id, address_id, fingerprint, code, sender, subject, preview, received_at, created_at)

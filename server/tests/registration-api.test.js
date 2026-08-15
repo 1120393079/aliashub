@@ -405,7 +405,7 @@ test("registration integration generates isolated addresses and exposes mailbox 
         "https://proxy.example:8443",
         "socks5://127.0.0.1:1080",
         "plain-proxy.example:3128",
-        "gate-us.kookeey.info:1000:5465911-root1234:base-secret-TR-50663419-30m",
+        "gate-us.kookeey.info:1000:kookeey-user:base-secret-TR-50663419-30m",
         "[2001:db8::2]:8081:ipv6-user:ipv6-password",
       ];
       const saved = await jsonRequest(runtime.app, "/api/registration/proxies", {
@@ -419,7 +419,7 @@ test("registration integration generates isolated addresses and exposes mailbox 
         accepted[1],
         accepted[2],
         "http://plain-proxy.example:3128",
-        "http://5465911-root1234:base-secret-TR-50663419-30m@gate-us.kookeey.info:1000",
+        "http://kookeey-user:base-secret-TR-50663419-30m@gate-us.kookeey.info:1000",
         "http://ipv6-user:ipv6-password@[2001:db8::2]:8081",
       ]);
       assert.deepEqual(saved.body.proxyMetadata, [
@@ -436,12 +436,12 @@ test("registration integration generates isolated addresses and exposes mailbox 
         null,
       ]);
       const serializedMetadata = JSON.stringify(saved.body.proxyMetadata);
-      assert.doesNotMatch(serializedMetadata, /5465911-root1234|base-secret|50663419|gate-us/i);
+      assert.doesNotMatch(serializedMetadata, /kookeey-user|base-secret|50663419|gate-us/i);
 
       const options = await jsonRequest(runtime.app, "/api/registration/options");
       assert.equal(options.response.status, 200);
       assert.deepEqual(options.body.proxyMetadata, saved.body.proxyMetadata);
-      assert.doesNotMatch(JSON.stringify(options.body.proxyMetadata), /5465911-root1234|base-secret|50663419|gate-us/i);
+      assert.doesNotMatch(JSON.stringify(options.body.proxyMetadata), /kookeey-user|base-secret|50663419|gate-us/i);
     });
 
     await t.test("encodes credentials from host-port-user-password proxy syntax before forwarding", async () => {

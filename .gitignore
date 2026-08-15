@@ -41,6 +41,15 @@ playwright-report/
 test-results/
 artifacts/
 captures/
+*.har
+*.har.*
+*.pid
+acc*.json
+*_accounts.txt
+otp_*.txt
+task_events.txt
+progress.txt
+pytest_out.txt
 .DS_Store
 .idea/
 .vscode/

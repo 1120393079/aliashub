@@ -18,6 +18,11 @@ The bundled `mail-pickup/` source and its dependency declarations must remain
 in the release. Do not include its database, merchant session, proxy settings,
 browser profile, inbound token, HMAC secret, or administrator credentials.
 
+The bundled `payment-link-extractor/` source, templates, static assets, and
+dependency declarations must also remain in the release. Do not include its
+Access Tokens, task history, proxy pools, subscription URLs, logs, `.env`, or
+virtual environment.
+
 ## 2. Remove deployment state
 
 Confirm that the repository contains no:
@@ -54,7 +59,13 @@ npm ci
 npm test
 npm run test:pickup
 npm run build
-REQUIRE_LICENSE=1 CHECK_GIT_HISTORY=1 ./scripts/check-public-release.sh
+(
+  cd payment-link-extractor
+  python3 -m unittest discover -s tests -v
+  python3 -c 'import ast,pathlib; [ast.parse(p.read_text(encoding="utf-8-sig"), filename=str(p)) for p in pathlib.Path(".").rglob("*.py")]'
+)
+PUBLIC_RELEASE_DENYLIST_FILE=/path/to/private-identifiers.txt \
+  REQUIRE_LICENSE=1 CHECK_GIT_HISTORY=1 ./scripts/check-public-release.sh
 ```
 
 If a release ZIP is needed:
@@ -68,10 +79,13 @@ Extract the archive into a temporary directory and inspect it independently. Run
 `scripts/check-public-release.sh` against the extracted directory as a final
 content check.
 
-The bundled checker catches forbidden file types, the known private deployment
-identifier, and common token formats. It is a release gate, not a complete secret
-detector. Review changes manually and use an additional history-aware scanner
-such as Gitleaks in CI when available.
+The optional denylist is an untracked UTF-8 text file containing one literal
+private hostname, address, account identifier, or other deployment marker per
+line; blank lines and lines beginning with `#` are ignored. The bundled checker
+catches those local identifiers, forbidden file types, and common token formats.
+It is a release gate, not a complete secret detector. Review changes manually
+and use an additional history-aware scanner such as Gitleaks in CI when
+available.
 
 ## 5. Validate a clean installation
 
@@ -80,14 +94,17 @@ database:
 
 - core Docker Compose on loopback;
 - full Docker Compose with the bundled registration worker and noVNC ports still
-  bound to loopback, plus Mail Pickup bound to loopback on port `4190`;
+  bound to loopback, Mail Pickup on port `4190`, and the payment-link extractor
+  on port `18794`;
 - the documented remote HTTPS reverse-proxy setup.
 
 Verify mailbox OAuth, inbox scanning, address generation, connector pairing,
 backup/restore, Pickup publication/query flows, and upgrades. Test registration
-with newly issued non-production fixtures. Confirm core mode remains fully
-usable without the worker or Pickup service and that SUB2 remains disabled until
-each deployer supplies its own service URL and Admin API Key.
+with newly issued non-production fixtures. Verify DE/EUR, TR/USD, and GB/EUR
+payment-link task creation with dedicated non-production proxy fixtures. Confirm
+core mode remains fully usable without the worker, Pickup service, or extractor,
+and that SUB2 remains disabled until each deployer supplies its own service URL
+and Admin API Key.
 
 ## 6. Tag and publish
 

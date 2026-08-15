@@ -6,6 +6,7 @@ dist
 node_modules
 release
 registration-worker
+payment-link-extractor
 scripts/deploy-production.sh
 *.db*
 *.sqlite*

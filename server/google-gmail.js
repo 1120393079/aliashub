@@ -7,8 +7,6 @@ const AUTHORIZE_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 const USERINFO_ENDPOINT = "https://openidconnect.googleapis.com/v1/userinfo";
 const GMAIL_ENDPOINT = "https://gmail.googleapis.com/gmail/v1";
-const BUILTIN_CLIENT_ID = "406964657835-aq8lmia8j95dhl1a2bvharmfk3t1hgqj.apps.googleusercontent.com";
-const BUILTIN_CLIENT_SECRET = "kSmqreRr0qwBWJgbf5Y-PjSU";
 const DEFAULT_REDIRECT_URI = "http://127.0.0.1:12142/";
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 const SCAN_OVERLAP_MS = 10 * 60_000;
@@ -181,7 +179,7 @@ export class GoogleGmailClient {
   }
 
   get clientId() {
-    return this.configuredClientId || BUILTIN_CLIENT_ID;
+    return this.configuredClientId;
   }
 
   get configuredClientId() {
@@ -206,7 +204,7 @@ export class GoogleGmailClient {
       const configuredSecret = this.configuredClientSecret;
       if (configuredSecret) return configuredSecret;
     }
-    return targetClientId === BUILTIN_CLIENT_ID ? BUILTIN_CLIENT_SECRET : "";
+    return "";
   }
 
   get clientSecret() {
@@ -214,7 +212,6 @@ export class GoogleGmailClient {
   }
 
   get redirectUri() {
-    if (this.clientId === BUILTIN_CLIENT_ID) return DEFAULT_REDIRECT_URI;
     return this.redirectUriOverride || getSetting(this.db, "google_oauth_redirect_uri", DEFAULT_REDIRECT_URI) || DEFAULT_REDIRECT_URI;
   }
 
@@ -222,14 +219,13 @@ export class GoogleGmailClient {
     const clientId = this.clientId;
     const clientSecretConfigured = Boolean(this.clientSecret);
     const redirectUri = this.redirectUri;
-    const mode = clientId === BUILTIN_CLIENT_ID ? "builtin" : "custom";
     return {
       google_oauth_client_id: clientId,
       google_oauth_client_secret_configured: clientSecretConfigured,
       google_oauth_redirect_uri: redirectUri,
       google_oauth_configured: Boolean(clientId && clientSecretConfigured && redirectUri),
-      google_oauth_client_mode: mode,
-      google_oauth_client: mode === "builtin" ? "内置邮件公共客户端" : "自定义 OAuth 客户端",
+      google_oauth_client_mode: "custom",
+      google_oauth_client: "自定义 OAuth 客户端",
     };
   }
 
@@ -503,7 +499,7 @@ export class GoogleGmailClient {
       `).run(profile.name || email.split("@")[0], now, account.id);
       this.db.prepare("DELETE FROM oauth_code_sessions WHERE id = ?").run(session.id);
       audit(this.db, account.id, "account", "Google OAuth 授权完成", email, {
-        client: sessionClientId === BUILTIN_CLIENT_ID ? "内置邮件公共客户端" : "自定义 Google OAuth 客户端",
+        client: "自定义 Google OAuth 客户端",
         flow: "authorization_code_pkce",
         scope,
       });

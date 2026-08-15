@@ -92,6 +92,7 @@ export function AccountSignalCell({ item, compact = false, onRefreshAccessToken,
   const retryableValue = accountSignalValue(item, ["status_retryable", "statusRetryable", "validity_retryable", "validityRetryable", "retryable"]);
   const retryable = retryableValue === true || ["1", "true", "yes"].includes(String(retryableValue).toLowerCase());
   const remoteStatus = accountSignalText(item, ["display_status", "displayStatus", "lifecycle_status", "lifecycleStatus", "status"], 80).toLowerCase();
+  const accountStatus = accountSignalText(item, ["account_status", "accountStatus", "lifecycle_status", "lifecycleStatus", "display_status", "displayStatus"], 80).toLowerCase();
   const fallbackAvailability = new Set(["active", "registered", "valid", "trial", "subscribed"]).has(remoteStatus)
     ? "available" : definitiveUnavailableCodes.has(statusCode) ? "unavailable" : "unchecked";
   const rawAvailability = accountSignalText(item, ["availability", "availability_status", "availabilityStatus"], 40).toLowerCase();
@@ -101,9 +102,11 @@ export function AccountSignalCell({ item, compact = false, onRefreshAccessToken,
     || /(?:TIMEOUT|NETWORK|PROXY|RATE_LIMIT|UPSTREAM|HTTP_5\d\d|CLOUDFLARE|CHALLENGE|TEMPORAR|UNRECOGNIZED)/.test(statusCode);
   const transient = availability !== "unavailable" && (checkFailed || retryable || transientCode);
   const terminalAccountInvalid = availability === "unavailable"
-    && /^(?:ACCOUNT|USER)_(?:BANNED|DISABLED|DEACTIVATED|DELETED|SUSPENDED)$/.test(statusCode);
+    && (/^(?:ACCOUNT|USER)_(?:BANNED|DISABLED|DEACTIVATED|DELETED|SUSPENDED)$/.test(statusCode)
+      || new Set(["banned", "disabled", "deactivated", "deleted", "suspended"]).has(accountStatus));
+  const accountDeleted = /^(?:ACCOUNT|USER)_DELETED$/.test(statusCode) || accountStatus === "deleted";
   const meta = terminalAccountInvalid
-    ? { label: "AT 失效", badge: "failed" }
+    ? { label: accountDeleted ? "账户被封禁" : "账户失效", badge: "failed" }
     : transient && availability === "unchecked"
       ? { label: "待复检", badge: "warning" }
       : accountAvailabilityMeta[availability];
@@ -122,7 +125,6 @@ export function AccountSignalCell({ item, compact = false, onRefreshAccessToken,
       : checkState === "checked" ? "刚刚完成状态检测"
         : statusConflict ? "最新 API 已确认可用"
           : checkedAt ? `检测 ${relativeTime(checkedAt)}` : "等待状态检测");
-  const accountStatus = accountSignalText(item, ["account_status", "accountStatus", "lifecycle_status", "lifecycleStatus", "display_status", "displayStatus"], 80);
   const credentialStatus = accountSignalText(item, ["credential_status", "credentialStatus", "validity_status", "validityStatus"], 80);
   const subscriptionStatus = accountSignalText(item, ["subscription_status", "subscriptionStatus", "plan_status", "planStatus", "plan_state", "planState"], 80);
   const source = accountSignalText(item, ["status_source", "statusSource", "validity_source", "validitySource", "check_source", "checkSource", "source"], 120);

@@ -9,10 +9,14 @@ services:
       PICKUP_PUBLIC_URL: "${PICKUP_PUBLIC_BASE_URL:-http://127.0.0.1:4190}"
       PICKUP_ADMIN_USERNAME: "${PICKUP_ADMIN_USERNAME:-admin}"
       PICKUP_ADMIN_PASSWORD: "${PICKUP_ADMIN_PASSWORD:-}"
+      PAYMENT_LINK_SERVICE_URL: http://payment-link-extractor:18794
+      PAYMENT_LINK_SERVICE_PASSWORD: "${PAYMENT_LINK_SERVICE_PASSWORD:?run ./scripts/setup-local.sh --full first}"
     depends_on:
       registration-worker:
         condition: service_healthy
       mail-pickup:
+        condition: service_healthy
+      payment-link-extractor:
         condition: service_healthy
 
   registration-worker:
@@ -72,3 +76,39 @@ services:
     volumes:
       - ./data/mail-pickup:/app/data
       - ./data:/alias-data:ro
+
+  payment-link-extractor:
+    build:
+      context: ./payment-link-extractor
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    environment:
+      OPLL_WEB_HOST: 0.0.0.0
+      OPLL_WEB_PORT: 18794
+      OPLL_WEB_PASSWORD: "${PAYMENT_LINK_SERVICE_PASSWORD:?run ./scripts/setup-local.sh --full first}"
+      OPLL_COUNTRY: DE
+      OPLL_FORCE_COUNTRY: ""
+      OPLL_PAYMENT_METHOD: paypal
+      OPLL_UPDATE_CHECKOUT: "true"
+      OPLL_TASK_WORKERS: "${PAYMENT_LINK_TASK_WORKERS:-4}"
+      OPLL_TASK_TTL_SECONDS: "${PAYMENT_LINK_TASK_TTL_SECONDS:-3600}"
+      OPLL_TASK_EVENT_HISTORY_SIZE: "${PAYMENT_LINK_TASK_EVENT_HISTORY_SIZE:-500}"
+      OPLL_LOG_LEVEL: "${PAYMENT_LINK_LOG_LEVEL:-INFO}"
+      OPLL_LOG_FILE: /app/data/payment-link.log
+      OPLL_LOG_JSON: "${PAYMENT_LINK_LOG_JSON:-false}"
+      IPROCKET_CHAIN_PROXY: http://127.0.0.1:18796
+      IPROCKET_BRIDGE_PORT: 18796
+      IPROCKET_PRE_PROXY_HOST: "${PAYMENT_LINK_IPROCKET_PRE_PROXY_HOST:-}"
+      IPROCKET_PRE_PROXY_PORT: "${PAYMENT_LINK_IPROCKET_PRE_PROXY_PORT:-3251}"
+    ports:
+      - "127.0.0.1:${PAYMENT_LINK_SERVICE_PORT:-18794}:18794"
+    volumes:
+      - ./data/payment-link-extractor:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,socket,urllib.request; r=urllib.request.Request('http://127.0.0.1:18794/api/health', headers={'X-Workbench-Password': os.environ.get('OPLL_WEB_PASSWORD', '')}); urllib.request.urlopen(r, timeout=3).read(); socket.create_connection(('127.0.0.1', 18796), 3).close()"]
+      interval: 15s
+      timeout: 5s
+      start_period: 10s
+      retries: 4
