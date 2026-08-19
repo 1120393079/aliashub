@@ -276,6 +276,150 @@ test("connects and scans网易邮箱 while keeping the auth code encrypted", asy
   );
 });
 
+test("scans every selectable网易文件夹 and recovers messages missed by INBOX-only scans", async (t) => {
+  const { db } = context(t);
+  const rawMessage = ({ id, subject, code, to = "alias@aka.yeah.net" }) => Buffer.from([
+    "From: OpenAI <noreply@tm.openai.com>",
+    `To: Alias <${to}>`,
+    `Subject: ${subject}`,
+    `Message-ID: <${id}@example.com>`,
+    "Date: Tue, 19 Aug 2026 15:00:00 +0000",
+    "MIME-Version: 1.0",
+    "Content-Type: text/plain; charset=utf-8",
+    "",
+    `Use ${code} to verify your account.`,
+  ].join("\r\n"));
+  const messages = {
+    INBOX: {
+      11: rawMessage({ id: "same", subject: "Your verification code is 111111", code: "111111" }),
+    },
+    "接收账单": {
+      21: rawMessage({ id: "same", subject: "Your verification code is 111111", code: "111111" }),
+      22: rawMessage({ id: "custom", subject: "Your verification code is 222222", code: "222222" }),
+    },
+    "注册steam帐号": {
+      31: rawMessage({ id: "steam", subject: "Your verification code is 333333", code: "333333" }),
+    },
+  };
+  const uidValidity = { INBOX: 1n, "接收账单": 1023n, "注册steam帐号": 1022n };
+  const openedPaths = [];
+  const searchQueries = [];
+  let fetches = 0;
+  const client = new NeteaseImapClient({
+    db,
+    encryptionKey: "netease-test-encryption-key",
+    imapFactory() {
+      return {
+        usable: false,
+        mailbox: { uidValidity: 1n },
+        async connect() { this.usable = true; },
+        async list() {
+          return [
+            { path: "INBOX", specialUse: "\\Inbox", flags: new Set() },
+            { path: "接收账单", flags: new Set() },
+            { path: "注册steam帐号", flags: new Set() },
+            { path: "系统父文件夹", flags: new Set(["\\Noselect"]) },
+            { path: "已发送", specialUse: "\\Sent", flags: new Set(["\\Sent"]) },
+            { path: "草稿箱", specialUse: "\\Drafts", flags: new Set(["\\Drafts"]) },
+            { path: "全部邮件", specialUse: "\\All", flags: new Set(["\\All"]) },
+          ];
+        },
+        async mailboxOpen(pathname, options) {
+          assert.equal(options.readOnly, true);
+          openedPaths.push(pathname);
+          this.currentPath = pathname;
+          return { uidValidity: uidValidity[pathname] || 0n };
+        },
+        async search(query, options) {
+          assert.equal(options.uid, true);
+          searchQueries.push({ path: this.currentPath, query });
+          return Object.keys(messages[this.currentPath] || {}).map(Number);
+        },
+        async fetchOne(uid) {
+          fetches += 1;
+          return {
+            uid,
+            flags: new Set(),
+            internalDate: new Date("2026-08-19T15:00:00.000Z"),
+            size: messages[this.currentPath][uid].length,
+            source: messages[this.currentPath][uid],
+          };
+        },
+        async logout() { this.usable = false; },
+        close() {},
+      };
+    },
+  });
+
+  const connected = await client.connectAccount({
+    email: "owner@163.com",
+    authCode: AUTH_CODE,
+    aliases: ["alias@aka.yeah.net"],
+  });
+  openedPaths.length = 0;
+  searchQueries.length = 0;
+  // Simulate an earlier INBOX-only scan. The custom folders must still be
+  // searched in the bounded backfill window so their messages are not hidden
+  // by the INBOX cursor.
+  db.prepare("UPDATE source_accounts SET last_inbox_scan_at = ? WHERE id = ?")
+    .run("2026-08-19T16:00:00.000Z", connected.account.id);
+  const account = db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(connected.account.id);
+  const result = await client.scanInbox(account);
+
+  assert.deepEqual(openedPaths, ["INBOX", "接收账单", "注册steam帐号"]);
+  assert.equal(searchQueries[0].path, "INBOX");
+  assert.ok(searchQueries[0].query.since instanceof Date);
+  assert.deepEqual(searchQueries.slice(1).map((item) => item.path), ["接收账单", "注册steam帐号"]);
+  searchQueries.slice(1).forEach((item) => {
+    assert.ok(item.query.since instanceof Date);
+    assert.ok(item.query.since.getTime() < Date.now() - 24 * 60 * 60_000);
+  });
+  assert.equal(result.foldersScanned, 3);
+  assert.equal(result.foldersTotal, 3);
+  assert.equal(result.messages.length, 3);
+  assert.deepEqual(result.items.map((item) => item.code), ["111111", "222222", "333333"]);
+  assert.equal(result.messages.filter((item) => item.internetMessageId.includes("same@")).length, 1);
+  assert.equal(result.messages.some((item) => item.graphMessageId.startsWith("netease:1023-")), true);
+  assert.equal(result.folderErrors.length, 0);
+
+  persistInboxScanResult(db, account, result);
+  const repeated = await client.scanInbox(
+    db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(connected.account.id),
+  );
+  assert.equal(repeated.messages.length, 0);
+  assert.equal(repeated.items.length, 0);
+  // The duplicate copy is fetched once to inspect its Message-ID, then is
+  // removed from the returned result; persisted graph ids remain idempotent.
+  assert.equal(fetches, 5);
+});
+
+test("does not acknowledge a网易 LIST transport failure", async (t) => {
+  const { db } = context(t);
+  let closed = 0;
+  const client = new NeteaseImapClient({
+    db,
+    encryptionKey: "netease-test-encryption-key",
+    imapFactory() {
+      return {
+        usable: false,
+        async connect() { this.usable = true; },
+        async mailboxOpen() { return { uidValidity: 1n }; },
+        async list() { throw Object.assign(new Error("socket reset"), { code: "ECONNRESET" }); },
+        async logout() { this.usable = false; closed += 1; },
+        close() { closed += 1; },
+      };
+    },
+  });
+  const connected = await client.connectAccount({ email: "owner@163.com", authCode: AUTH_CODE });
+  const account = db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(connected.account.id);
+  await assert.rejects(
+    () => client.scanInbox(account),
+    (error) => error.status === 503 && error.code === "NETEASE_IMAP_UNAVAILABLE",
+  );
+  assert.equal(db.prepare("SELECT status FROM source_accounts WHERE id = ?").get(account.id).status, "connected");
+  assert.ok(closed >= 1);
+});
+
 test("replaces网易 aliases and rejects mapping one alias to two母号", async (t) => {
   const { db } = context(t);
   const first = createSourceAccount(db, {

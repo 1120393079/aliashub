@@ -703,7 +703,7 @@ export class JobRunner {
           : account.provider === "mailcom"
             ? "正在读取 Mail.com 收件箱"
           : account.provider === "netease"
-            ? "正在读取网易邮箱收件箱"
+            ? "正在读取网易邮箱所有文件夹"
           : account.provider === "inbox_link" ? "正在读取链接取件邮箱" : "正在读取 Outlook 收件箱",
       started_at: nowIso(),
     });
