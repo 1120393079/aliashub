@@ -188,7 +188,7 @@ export default function InboxPage({ refreshKey, onDataChange, initialAccountId }
   const confirmCount = confirm?.ids?.length || 1;
   const confirmTitle = confirmAction === "purge" ? "永久删除所选邮件？" : (confirmAction === "restore" ? "恢复邮件？" : "移到回收站？");
   const confirmDescription = confirmAction === "purge"
-    ? `将从 AliasHub 永久删除选中的 ${confirmCount} 封邮件，删除后无法恢复，且不会在下次扫描时重新出现。邮箱服务商中的原邮件和验证码记录不会被删除。`
+    ? `将从注册工作站永久删除选中的 ${confirmCount} 封邮件，删除后无法恢复，且不会在下次扫描时重新出现。邮箱服务商中的原邮件和验证码记录不会被删除。`
     : (confirmAction === "restore" ? `将选中的 ${confirmCount} 封邮件恢复到网站收件箱。` : `将选中的 ${confirmCount} 封邮件从网站收件箱隐藏，邮箱服务商中的原邮件不会被删除。`);
 
   return (

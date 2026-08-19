@@ -4,8 +4,94 @@ import { materializeProxySession, maskProxy, parseProxyPool, redactProxySecrets 
 
 const ACTIVE_STATUSES = new Set(["queued", "running", "cancel_requested"]);
 const TERMINAL_STATUSES = new Set(["succeeded", "failed", "cancelled"]);
+const ACCOUNT_DELETE_SQL_BATCH_SIZE = 500;
 const DEFAULT_TIMEOUT_MS = 12 * 60 * 1_000;
-const PAYMENT_COUNTRY_CURRENCIES = Object.freeze({ DE: "EUR", TR: "USD", GB: "GBP" });
+const PAYMENT_COUNTRY_CURRENCIES = Object.freeze({
+  DE: "EUR",
+  TR: "USD",
+  GB: "GBP",
+  US: "USD",
+  BR: "BRL",
+  TH: "USD",
+  JP: "JPY",
+});
+const PAYMENT_PROXY_PROTOCOLS = new Set(["http:", "https:", "socks:", "socks5:", "socks5h:"]);
+
+function paymentVendorHost(value) {
+  const host = String(value || "").trim().toLowerCase().replace(/\.$/, "");
+  return host.endsWith(".iprocket.io")
+    || host.endsWith(".iprocket.pro")
+    || host === "proxy.iproyal.net"
+    || host.endsWith(".iproyal.net")
+    || host === "proxy.iproyal.com"
+    || host.endsWith(".iproyal.com")
+    || host === "1024proxy.io"
+    || host.endsWith(".1024proxy.io");
+}
+
+function splitPaymentProxy(value, separator) {
+  const parts = String(value).split(separator);
+  return parts.length >= 4
+    ? [parts[0], parts[1], parts[2], parts.slice(3).join(separator)]
+    : parts;
+}
+
+function specialPaymentProxy(value) {
+  const source = String(value || "").trim();
+  const encoded = source.match(/^(?:socks|http):\/\/([A-Za-z0-9+/_=-]+)$/i)?.[1];
+  if (encoded) {
+    try {
+      const decoded = Buffer.from(encoded.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+      if (decoded && !decoded.includes("\uFFFD") && [...decoded.matchAll(/[A-Za-z0-9.-]+/g)]
+        .some((match) => paymentVendorHost(match[0]))) return source;
+    } catch {
+      return "";
+    }
+  }
+  if (!source.includes("://") && !source.includes("@")) {
+    const separator = [":", "|", ",", ";"].find((item) => source.split(item).length >= 4);
+    if (separator) {
+      const parts = splitPaymentProxy(source, separator);
+      const candidates = [[parts[0], parts[1]], [parts[1], parts[0]], [parts[2], parts[1]], [parts[2], parts[3]]];
+      if (parts.length === 4 && parts.every(Boolean) && candidates.some(([host, port]) => (
+        paymentVendorHost(host) && /^\d+$/.test(port) && Number(port) >= 1 && Number(port) <= 65535
+      ))) return source;
+    }
+  }
+  try {
+    const parsed = new URL(source);
+    const authority = source.slice(source.indexOf("://") + 3);
+    const port = Number(parsed.port);
+    if (PAYMENT_PROXY_PROTOCOLS.has(parsed.protocol) && parsed.hostname
+      && Number.isInteger(port) && port >= 1 && port <= 65535
+      && authority.search(/[/?#]/) < 0
+      && parsed.protocol.startsWith("socks") && parsed.username && parsed.password) return source;
+  } catch {
+    return "";
+  }
+  return "";
+}
+
+export function parsePaymentProxyPool(value) {
+  let items = value;
+  if (typeof items === "string") {
+    try { items = JSON.parse(items); } catch { items = items.split(/\r?\n/); }
+  }
+  if (!Array.isArray(items)) return [];
+  const proxies = [];
+  for (const [index, raw] of items.entries()) {
+    const source = String(raw || "").trim();
+    if (!source || source.startsWith("#")) continue;
+    if (/[\u0000-\u001f\u007f-\u009f]/.test(source) || /\s|\\/.test(source)) {
+      throw Object.assign(new Error(`第 ${index + 1} 条代理地址无效`), { status: 400 });
+    }
+    const normalized = specialPaymentProxy(source) || parseProxyPool([source])[0] || "";
+    if (!normalized) throw Object.assign(new Error(`第 ${index + 1} 条代理地址无效`), { status: 400 });
+    if (!proxies.includes(normalized)) proxies.push(normalized);
+  }
+  if (proxies.length > 200) throw Object.assign(new Error("代理池最多保存 200 条"), { status: 400 });
+  return proxies;
+}
 
 function delay(ms) {
   return new Promise((resolve) => {
@@ -22,7 +108,7 @@ function booleanSetting(db, key, fallback = true) {
 function normalizePaymentCountry(value) {
   const country = String(value ?? "DE").trim().toUpperCase();
   if (!Object.hasOwn(PAYMENT_COUNTRY_CURRENCIES, country)) {
-    throw Object.assign(new Error("提链账单国家仅支持 DE、TR 或 GB"), { status: 400 });
+    throw Object.assign(new Error("提链国家仅支持 DE、TR、GB、US、BR、TH 或 JP"), { status: 400 });
   }
   return country;
 }
@@ -73,7 +159,10 @@ function safeProviderUrl(value) {
     const parsed = new URL(source);
     const hostname = parsed.hostname.toLowerCase();
     if (parsed.protocol !== "https:" || parsed.username || parsed.password) return "";
-    return hostname === "paypal.com" || hostname.endsWith(".paypal.com") ? parsed.toString() : "";
+    const trustedHost = hostname === "paypal.com" || hostname.endsWith(".paypal.com");
+    const trustedPath = parsed.pathname.replace(/\/+$/, "").toLowerCase() === "/agreements/approve";
+    const token = String(parsed.searchParams.get("ba_token") || "").toUpperCase();
+    return trustedHost && trustedPath && token.startsWith("BA-") ? parsed.toString() : "";
   } catch {
     return "";
   }
@@ -98,6 +187,7 @@ export class PaymentLinkService {
     fetchFn = globalThis.fetch,
     pollIntervalMs = 1_500,
     timeoutMs = DEFAULT_TIMEOUT_MS,
+    queueTimeoutMs,
   } = {}) {
     this.db = db;
     this.registration = registration;
@@ -106,7 +196,10 @@ export class PaymentLinkService {
     this.fetchFn = fetchFn;
     this.pollIntervalMs = Math.max(100, Number(pollIntervalMs) || 1_500);
     this.timeoutMs = Math.max(10_000, Number(timeoutMs) || DEFAULT_TIMEOUT_MS);
+    this.queueTimeoutMs = Math.max(this.timeoutMs, Number(queueTimeoutMs) || this.timeoutMs * 5);
     this.tracked = new Map();
+    this.reservations = new Set();
+    this.startQueue = Promise.resolve();
     queueMicrotask(() => this.resumeActiveTasks());
   }
 
@@ -136,9 +229,9 @@ export class PaymentLinkService {
   }
 
   proxyPools() {
-    const legacy = parseProxyPool(getSetting(this.db, "payment_link_proxy_pool", "[]"));
-    const checkout = parseProxyPool(getSetting(this.db, "payment_link_checkout_proxy_pool", "[]"));
-    const update = parseProxyPool(getSetting(this.db, "payment_link_update_proxy_pool", "[]"));
+    const legacy = parsePaymentProxyPool(getSetting(this.db, "payment_link_proxy_pool", "[]"));
+    const checkout = parsePaymentProxyPool(getSetting(this.db, "payment_link_checkout_proxy_pool", "[]"));
+    const update = parsePaymentProxyPool(getSetting(this.db, "payment_link_update_proxy_pool", "[]"));
     return {
       checkout: checkout.length ? checkout : legacy,
       update: update.length ? update : legacy,
@@ -147,8 +240,8 @@ export class PaymentLinkService {
 
   saveProxyPool(input) {
     const legacyInput = Array.isArray(input) || typeof input === "string";
-    const checkout = parseProxyPool(legacyInput ? input : input?.checkout_proxies);
-    const update = parseProxyPool(legacyInput ? input : input?.update_proxies);
+    const checkout = parsePaymentProxyPool(legacyInput ? input : input?.checkout_proxies);
+    const update = parsePaymentProxyPool(legacyInput ? input : input?.update_proxies);
     const country = input?.country === undefined ? null : normalizePaymentCountry(input.country);
     const switches = [
       ["payment_link_rotate_checkout_proxy", input?.rotate_checkout_proxy],
@@ -189,7 +282,7 @@ export class PaymentLinkService {
       throw Object.assign(new Error("仅支持 IPRocket HTTPS 代理订阅地址"), { status: 400 });
     }
     const result = await this.request(`/api/proxy/source?url=${encodeURIComponent(sourceUrl)}`);
-    const proxies = parseProxyPool(Array.isArray(result?.proxies) ? result.proxies : []);
+    const proxies = parsePaymentProxyPool(Array.isArray(result?.proxies) ? result.proxies : []);
     if (!proxies.length) throw Object.assign(new Error("IPRocket 代理订阅没有返回代理"), { status: 502 });
     const saved = this.saveProxyPool({
       checkout_proxies: proxies,
@@ -233,6 +326,7 @@ export class PaymentLinkService {
       checkout_proxy_label: String(values.checkout_proxy_label ?? existing?.checkout_proxy_label ?? "").slice(0, 240),
       update_proxy_label: String(values.update_proxy_label ?? existing?.update_proxy_label ?? "").slice(0, 240),
       session_kind: String(values.session_kind ?? existing?.session_kind ?? "").slice(0, 120),
+      request_country: String(values.request_country ?? existing?.request_country ?? "").trim().toUpperCase().slice(0, 12),
       billing_country: String(values.billing_country ?? existing?.billing_country ?? "").slice(0, 12),
       currency: String(values.currency ?? existing?.currency ?? "").slice(0, 12),
       amount_due: values.amount_due === null ? null : Number(values.amount_due ?? existing?.amount_due),
@@ -248,12 +342,12 @@ export class PaymentLinkService {
       INSERT INTO registered_account_payment_links (
         external_account_id, email, task_id, status, stage, progress, provider_url,
         proxy_label, checkout_proxy_label, update_proxy_label,
-        session_kind, billing_country, currency, amount_due, error,
+        session_kind, request_country, billing_country, currency, amount_due, error,
         started_at, finished_at, created_at, updated_at
       ) VALUES (
         @external_account_id, @email, @task_id, @status, @stage, @progress, @provider_url,
         @proxy_label, @checkout_proxy_label, @update_proxy_label,
-        @session_kind, @billing_country, @currency, @amount_due, @error,
+        @session_kind, @request_country, @billing_country, @currency, @amount_due, @error,
         @started_at, @finished_at, @created_at, @updated_at
       )
       ON CONFLICT(external_account_id) DO UPDATE SET
@@ -267,6 +361,7 @@ export class PaymentLinkService {
         checkout_proxy_label = excluded.checkout_proxy_label,
         update_proxy_label = excluded.update_proxy_label,
         session_kind = excluded.session_kind,
+        request_country = excluded.request_country,
         billing_country = excluded.billing_country,
         currency = excluded.currency,
         amount_due = excluded.amount_due,
@@ -345,22 +440,56 @@ export class PaymentLinkService {
     });
   }
 
+  persistTracked(accountId, taskId, values) {
+    const current = this.row(accountId);
+    if (!current || current.task_id !== taskId) return publicPaymentLink(current);
+    return this.persist(accountId, values);
+  }
+
+  reserveForAccountDeletion(ids) {
+    const keys = [...new Set(ids.map((id) => String(id)))];
+    const reserved = keys.find((key) => this.reservations.has(key));
+    if (reserved) {
+      throw Object.assign(new Error(`账号 #${reserved} 正在提链或执行其他账号操作`), { status: 409 });
+    }
+    for (let offset = 0; offset < keys.length; offset += ACCOUNT_DELETE_SQL_BATCH_SIZE) {
+      const batch = keys.slice(offset, offset + ACCOUNT_DELETE_SQL_BATCH_SIZE);
+      const placeholders = batch.map(() => "?").join(",");
+      const active = this.db.prepare(`
+        SELECT external_account_id FROM registered_account_payment_links
+        WHERE external_account_id IN (${placeholders})
+          AND status IN ('queued', 'running', 'cancel_requested')
+        LIMIT 1
+      `).get(...batch);
+      if (active) {
+        throw Object.assign(new Error(`账号 #${active.external_account_id} 正在提链，请等待任务结束`), { status: 409 });
+      }
+    }
+    keys.forEach((key) => this.reservations.add(key));
+    return () => keys.forEach((key) => this.reservations.delete(key));
+  }
+
   track(accountId, taskId) {
     const key = String(accountId);
     if (this.tracked.has(key)) return this.tracked.get(key);
     const promise = (async () => {
-      const deadline = Date.now() + this.timeoutMs;
+      const queueDeadline = Date.now() + this.queueTimeoutMs;
+      let executionDeadline = 0;
       let failures = 0;
-      while (Date.now() < deadline) {
+      while (executionDeadline ? Date.now() < executionDeadline : Date.now() < queueDeadline) {
         try {
           const snapshot = await this.request(`/api/tasks/${encodeURIComponent(taskId)}`);
           failures = 0;
           const item = this.applySnapshot(accountId, snapshot);
+          if (!item || item.task_id !== taskId) return item;
           if (TERMINAL_STATUSES.has(item?.status)) return item;
+          if (!executionDeadline && item?.status !== "queued") {
+            executionDeadline = Date.now() + this.timeoutMs;
+          }
         } catch (error) {
           failures += 1;
           if (Number(error.status) === 404 || failures >= 5) {
-            return this.persist(accountId, {
+            return this.persistTracked(accountId, taskId, {
               status: "failed",
               stage: "service_error",
               error: Number(error.status) === 404
@@ -377,10 +506,10 @@ export class PaymentLinkService {
       } catch {
         // The local timeout remains authoritative when cancellation cannot be confirmed.
       }
-      return this.persist(accountId, {
+      return this.persistTracked(accountId, taskId, {
         status: "failed",
-        stage: "timeout",
-        error: "提链任务执行超时",
+        stage: executionDeadline ? "timeout" : "queue_timeout",
+        error: executionDeadline ? "提链任务执行超时" : "提链任务排队超时",
         finished_at: nowIso(),
       });
     })().finally(() => this.tracked.delete(key));
@@ -396,7 +525,13 @@ export class PaymentLinkService {
     rows.forEach((row) => this.track(row.external_account_id, row.task_id));
   }
 
-  async start(input = {}) {
+  start(input = {}) {
+    const operation = this.startQueue.then(() => this.startBatch(input));
+    this.startQueue = operation.catch(() => {});
+    return operation;
+  }
+
+  async startBatch(input = {}) {
     const ids = selectedIds(input);
     if (!this.baseUrl) throw Object.assign(new Error("提链服务尚未配置"), { status: 503 });
     const country = normalizePaymentCountry(
@@ -422,11 +557,18 @@ export class PaymentLinkService {
     let started = 0;
 
     for (const accountId of ids) {
+      const reservationKey = String(accountId);
       const existing = this.row(accountId);
-      if (existing && ACTIVE_STATUSES.has(existing.status)) {
-        items.push({ ...publicPaymentLink(existing), accepted: false, error: "这个账号正在提链" });
+      if (this.reservations.has(reservationKey) || (existing && ACTIVE_STATUSES.has(existing.status))) {
+        items.push({
+          ...(publicPaymentLink(existing) || { external_account_id: accountId }),
+          accepted: false,
+          error: "这个账号正在提链",
+        });
         continue;
       }
+      this.reservations.add(reservationKey);
+      try {
       let credentials;
       try {
         credentials = await this.registration.registeredAccountAccessToken(accountId);
@@ -441,6 +583,9 @@ export class PaymentLinkService {
           proxy_label: "",
           checkout_proxy_label: "",
           update_proxy_label: "",
+          request_country: country,
+          billing_country: "",
+          currency,
           error: safeText(error) || "账号 AT 读取失败",
           started_at: nowIso(),
           finished_at: nowIso(),
@@ -485,7 +630,8 @@ export class PaymentLinkService {
           checkout_proxy_label: maskProxy(checkoutProxy),
           update_proxy_label: maskProxy(updateProxy),
           session_kind: "",
-          billing_country: snapshot.billing_country || country,
+          request_country: country,
+          billing_country: snapshot.billing_country || "",
           currency,
           amount_due: null,
           error: "",
@@ -506,11 +652,17 @@ export class PaymentLinkService {
           proxy_label: maskProxy(checkoutProxy),
           checkout_proxy_label: maskProxy(checkoutProxy),
           update_proxy_label: maskProxy(updateProxy),
+          request_country: country,
+          billing_country: "",
+          currency,
           error: safeText(error) || "提链任务提交失败",
           started_at: nowIso(),
           finished_at: nowIso(),
         });
         items.push({ ...item, accepted: false });
+      }
+      } finally {
+        this.reservations.delete(reservationKey);
       }
     }
     setSetting(this.db, "payment_link_checkout_proxy_cursor", String(checkoutCursor % checkoutProxies.length));

@@ -15,8 +15,8 @@ All notable changes to AliasHub are documented in this file.
   tests, Docker image, and Full Compose integration.
 - Added direct PayPal billing-agreement link extraction for registered accounts,
   persistent task progress, independent Checkout and Update proxy pools, proxy
-  rotation and subscription import, plus DE/EUR, TR/USD, and GB/GBP billing
-  profiles.
+  rotation and subscription import, plus DE/EUR, TR/USD, GB/GBP, US/USD, and
+  BR/BRL billing profiles.
 - Added the complete payment-link extractor source, workbench, CLI, Docker image,
   and Full Compose integration so the direct-link flow is reproducible from a
   clean clone.
@@ -26,6 +26,16 @@ All notable changes to AliasHub are documented in this file.
 - Added selectable proxy routes for Access Token refresh, exact Plus activation
   time display and sorting, and deleted-account detection from account state and
   mailbox evidence.
+- Added one-click iCloud and Mail.com pipelines that coordinate mailbox or alias
+  creation, account registration, PayPal link extraction, automatic agreement
+  authorization, retries, cancellation, and per-stage progress.
+- Added administrator-configured OpenAI SMS automation and PayPal agreement
+  authorization through HeroSMS, including live country availability, price
+  limits, bounded concurrency, masked runtime state, and per-account results.
+- Added Mail.com source import, IMAP mailbox access, official-alias creation,
+  recycle reservation, provider-specific source grouping, and guarded deletion.
+- Added persistent multi-page account selection with one-click selection for an
+  entire filtered group.
 
 ### Changed
 
@@ -34,6 +44,11 @@ All notable changes to AliasHub are documented in this file.
 - Full mode now starts AliasHub, the registration worker, Mail Pickup, and the
   payment-link extractor while preserving all runtime state under ignored `.env`
   and `data/` paths.
+- Registration supports up to 20 concurrent tasks, and the core container now
+  includes Chromium for isolated Mail.com official-alias creation.
+- Registered-account deletion now accepts large selections and processes remote
+  lookups, deletion requests, payment-link reservations, and local cleanup in
+  bounded batches; registration-record deletion remains capped at 500 rows.
 
 ### Security
 

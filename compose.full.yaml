@@ -23,6 +23,7 @@ services:
     build:
       context: ./registration-worker
       dockerfile: Dockerfile
+    init: true
     restart: unless-stopped
     shm_size: "1gb"
     env_file:

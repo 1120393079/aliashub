@@ -1124,7 +1124,7 @@ class PhoneCallbackController:
     def __call__(self) -> str:
         provider = self._provider()
         if self.phase == "need_number":
-            if self.provider_key == "herosms" and not self._verify_lock_acquired:
+            if self.provider_key in {"herosms", "herosms_api"} and not self._verify_lock_acquired:
                 _HERO_SMS_VERIFY_LOCK.acquire()
                 self._verify_lock_acquired = True
 
@@ -1181,7 +1181,7 @@ class PhoneCallbackController:
             self.log(f"等待短信验证码... (activation_id={self.activation.activation_id})")
             code = provider.get_code(self.activation.activation_id, timeout=180)
             if code:
-                self.log(f"收到验证码: {code}")
+                self.log("收到验证码，正在提交")
                 if getattr(provider, "auto_report_success_on_code", True):
                     self.report_success()
                 else:

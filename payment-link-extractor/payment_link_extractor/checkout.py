@@ -119,6 +119,18 @@ def merge_checkout_payload(checkout: CheckoutData, payload: dict[str, Any]) -> N
         value = first_value_by_key(payload, key)
         if value not in (None, "", [], {}):
             checkout[key] = value
+    state = checkout.get("checkout_state")
+    if isinstance(state, dict):
+        observed_currency = str(state.get("currency") or "").strip().upper()
+        if observed_currency:
+            checkout["currency"] = observed_currency
+            checkout["currency_observed"] = True
+        address = state.get("billing_address") if isinstance(state.get("billing_address"), dict) else {}
+        observed_country = str(
+            state.get("billing_country") or state.get("country") or address.get("country") or ""
+        ).strip().upper()
+        if observed_country:
+            checkout["billing_country"] = observed_country
 
 
 def create_checkout(
@@ -254,10 +266,17 @@ def update_checkout(
     return payload
 
 
-def require_country_currency(checkout: CheckoutData, config: ExtractionConfig) -> None:
+def require_country_currency(
+    checkout: CheckoutData,
+    config: ExtractionConfig,
+    *,
+    require_observed_currency: bool = False,
+) -> None:
     expected_country, expected_currency, *_ = country_values(config)
     if str(checkout.get("billing_country") or "").upper() != expected_country:
         raise ProtocolError(502, f"checkout billing country is not {expected_country}")
+    if require_observed_currency and checkout.get("currency_observed") is not True:
+        raise ProtocolError(502, "checkout response did not confirm its currency")
     if str(checkout.get("currency") or "").upper() != expected_currency:
         raise ProtocolError(
             502,

@@ -97,6 +97,12 @@ function candidateUsernames(email) {
 export class ICloudImapClient {
   constructor({ db, encryptionKey, imapFactory, parseMessage } = {}) {
     this.db = db;
+    this.imapHost = ICLOUD_IMAP_HOST;
+    this.imapPort = ICLOUD_IMAP_PORT;
+    this.messageProvider = "icloud";
+    this.mailDisplayName = "iCloud";
+    this.webLink = "https://www.icloud.com/mail/";
+    this.authFailureCodes = new Set(["ICLOUD_AUTH_FAILED", "ICLOUD_CREDENTIAL_DECRYPT_FAILED"]);
     this.imapFactory = imapFactory || ((config) => new ImapFlow(config));
     this.parseMessage = parseMessage || ((source) => PostalMime.parse(source, {
       attachmentEncoding: "base64",
@@ -109,6 +115,10 @@ export class ICloudImapClient {
     this.encryptionKey = configuredEncryptionKey
       ? crypto.createHash("sha256").update(configuredEncryptionKey).digest()
       : null;
+  }
+
+  mapError(error) {
+    return publicImapError(error);
   }
 
   requireEncryptionKey() {
@@ -145,8 +155,8 @@ export class ICloudImapClient {
 
   createClient(username, password) {
     const client = this.imapFactory({
-      host: ICLOUD_IMAP_HOST,
-      port: ICLOUD_IMAP_PORT,
+      host: this.imapHost,
+      port: this.imapPort,
       secure: true,
       auth: { user: username, pass: password },
       logger: false,
@@ -157,7 +167,7 @@ export class ICloudImapClient {
       tls: {
         minVersion: "TLSv1.2",
         rejectUnauthorized: true,
-        servername: ICLOUD_IMAP_HOST,
+        servername: this.imapHost,
       },
     });
     // ImapFlow also reports socket failures through EventEmitter. Keep an
@@ -185,13 +195,13 @@ export class ICloudImapClient {
         await client.mailboxOpen("INBOX", { readOnly: true });
         return username;
       } catch (error) {
-        if (!isAuthenticationError(error)) throw publicImapError(error);
+        if (!isAuthenticationError(error)) throw this.mapError(error);
         lastAuthenticationError = error;
       } finally {
         await this.closeClient(client);
       }
     }
-    throw publicImapError(lastAuthenticationError);
+    throw this.mapError(lastAuthenticationError);
   }
 
   async connectAccount({ accountId, email, displayName, appSpecificPassword } = {}) {
@@ -280,7 +290,13 @@ export class ICloudImapClient {
     const from = mailboxList(parsed.from || envelope.from)[0] || { name: "", address: "" };
     const toRecipients = mailboxList(parsed.to || envelope.to);
     const ccRecipients = mailboxList(parsed.cc || envelope.cc);
-    const deliveredRecipients = [parsed.deliveredTo, headerValue(parsed, "x-original-to")]
+    const deliveredRecipients = [
+      parsed.deliveredTo,
+      headerValue(parsed, "delivered-to"),
+      headerValue(parsed, "x-original-to"),
+      headerValue(parsed, "envelope-to"),
+      headerValue(parsed, "x-envelope-to"),
+    ]
       .map(normalizeEmail)
       .filter(Boolean);
     const recipients = [...new Set([
@@ -299,7 +315,7 @@ export class ICloudImapClient {
     const body = rawBody.slice(0, MAIL_BODY_LIMIT);
     const preview = readableBody.replace(/\s+/g, " ").trim().slice(0, 500);
     const code = codeFromText(`${subject}\n${preview}\n${readableBody}`);
-    const graphMessageId = `icloud:${uidValidity}:${uid}`;
+    const graphMessageId = `${this.messageProvider}:${uidValidity}:${uid}`;
     const receivedAt = parsedDate(parsed.date, message.internalDate, envelope.date);
     const isRead = message.flags instanceof Set
       ? message.flags.has("\\Seen")
@@ -321,7 +337,7 @@ export class ICloudImapClient {
         bodyContentType: htmlBody ? "html" : "text",
         bodyTruncated: sourceTruncated || rawBody.length > MAIL_BODY_LIMIT,
         verificationCode: code,
-        webLink: "https://www.icloud.com/mail/",
+        webLink: this.webLink,
         isRead,
         hasAttachments: Boolean(parsed.attachments?.length),
         receivedAt,
@@ -357,9 +373,9 @@ export class ICloudImapClient {
         .filter((uid) => Number.isSafeInteger(uid) && uid > 0))]
         .sort((left, right) => left - right)
         .slice(-MESSAGE_LIMIT);
-      if (!uids.length) return { stage: "completed", message: "iCloud 收件箱没有新邮件", messages: [], items: [] };
+      if (!uids.length) return { stage: "completed", message: `${this.mailDisplayName} 收件箱没有新邮件`, messages: [], items: [] };
 
-      const graphIds = uids.map((uid) => `icloud:${uidValidity}:${uid}`);
+      const graphIds = uids.map((uid) => `${this.messageProvider}:${uidValidity}:${uid}`);
       const known = new Set(this.db.prepare(`
         SELECT graph_message_id FROM mail_messages
         WHERE account_id = ? AND graph_message_id IN (${graphIds.map(() => "?").join(",")})
@@ -367,7 +383,7 @@ export class ICloudImapClient {
       const messages = [];
       const items = [];
       for (const uid of uids) {
-        if (known.has(`icloud:${uidValidity}:${uid}`)) continue;
+        if (known.has(`${this.messageProvider}:${uidValidity}:${uid}`)) continue;
         const message = await client.fetchOne(uid, {
           uid: true,
           flags: true,
@@ -383,13 +399,13 @@ export class ICloudImapClient {
       }
       return {
         stage: "completed",
-        message: `发现 ${messages.length} 封 iCloud 邮件，其中 ${items.length} 条验证码`,
+        message: `发现 ${messages.length} 封 ${this.mailDisplayName} 邮件，其中 ${items.length} 条验证码`,
         messages,
         items,
       };
     } catch (error) {
-      const publicError = error?.status ? error : publicImapError(error);
-      if (publicError.code === "ICLOUD_AUTH_FAILED" || publicError.code === "ICLOUD_CREDENTIAL_DECRYPT_FAILED") {
+      const publicError = error?.status ? error : this.mapError(error);
+      if (this.authFailureCodes.has(publicError.code)) {
         this.db.prepare("UPDATE source_accounts SET status = 'action_required', updated_at = ? WHERE id = ?")
           .run(nowIso(), account.id);
       }

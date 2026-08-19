@@ -13,7 +13,7 @@ function send(message) {
   return new Promise((resolve, reject) => {
     chrome.runtime.sendMessage(message, (response) => {
       if (chrome.runtime.lastError) return reject(chrome.runtime.lastError);
-      if (!response?.ok) return reject(new Error(response?.error || "AliasHub 扩展请求失败"));
+      if (!response?.ok) return reject(new Error(response?.error || "注册工作站扩展请求失败"));
       return resolve(response.data);
     });
   });
@@ -137,7 +137,7 @@ function showAccountGuard(expected, aliases) {
       font: "14px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
     });
     const title = document.createElement("strong");
-    title.textContent = "AliasHub 已停止：微软账号不匹配";
+    title.textContent = "注册工作站已停止：微软账号不匹配";
     title.style.display = "block";
     title.style.color = "#b91c1c";
     title.style.fontSize = "16px";

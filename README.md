@@ -14,6 +14,8 @@ the installation that you control.
 - Read inbox messages, extract verification codes, search mail, and export
   address inventories.
 - Manage Outlook official aliases and generate repeatable `+tag` addresses.
+- Import Mail.com sources, read their mail over IMAP, and create official aliases
+  in an isolated Chromium context without persisting a browser profile.
 - Mark addresses whose latest registration attempt failed, select every failed
   address in the current filtered inventory with one action, and remove the
   selected addresses in a guarded bulk operation.
@@ -34,13 +36,21 @@ the installation that you control.
   saved proxy. Access-token recovery and new-account registration use independent
   worker lanes so one queue does not block the other.
 - Group accounts automatically by detected plan or override groups manually in
-  the account workspace, including bulk group edits and email search.
+  the account workspace, including bulk group edits, email search, persistent
+  multi-page selection, whole-group selection, and bounded large-batch deletion.
 - Classify existing or newly created Checkout sessions as `cs_live` or `oaics`
   through a verified German exit, with cached-link reuse and account cooldowns;
   detect the Japanese Plus one-month trial offer through a verified Japan exit.
 - Generate PayPal billing-agreement links directly from selected registered
   accounts through the bundled extractor, with independent Checkout and Update
-  proxy pools and billing profiles for DE/EUR, TR/USD, and GB/GBP.
+  proxy pools and billing profiles for DE/EUR, TR/USD, GB/GBP, US/USD, and
+  BR/BRL.
+- Run one-click iCloud and Mail.com pipelines that coordinate mailbox or alias
+  creation, registration, PayPal link extraction, automatic agreement
+  authorization, retries, cancellation, and per-stage progress.
+- Automate OpenAI SMS verification and PayPal agreement authorization through an
+  administrator-configured HeroSMS account, with live country availability,
+  price limits, bounded concurrency, and masked credentials.
 - Restore accounts removed from the worker's local account pool from JSON, CSV,
   JSONL, TXT, or email-only input while reconnecting their retained AliasHub
   registration and mailbox resources.
@@ -248,9 +258,9 @@ tree.
 
 Full Compose mode configures the internal service URL and a generated shared
 password automatically. In the AliasHub registration workspace, save separate
-Checkout and Update proxy pools, choose DE/EUR, TR/USD, or GB/GBP, select up to
-50 registered accounts, and run **直接提链**. The standalone workbench and CLI
-remain available for deployments that need them; see
+Checkout and Update proxy pools, choose DE/EUR, TR/USD, GB/GBP, US/USD, or
+BR/BRL, select up to 50 registered accounts, and run **直接提链**. The standalone
+workbench and CLI remain available for deployments that need them; see
 [`payment-link-extractor/README.md`](payment-link-extractor/README.md).
 
 ## Data and secrets

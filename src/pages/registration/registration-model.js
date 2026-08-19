@@ -14,6 +14,14 @@ export const releasableStatuses = new Set(["queued", "pending", "claimed", "runn
 export const accountPageSizes = [5, 10, 20, 50];
 export const accountPageSizeStorageKey = "aliashub.registration.account-page-size";
 
+export function toggleSelectedIds(selectedIds = [], scopeIds = []) {
+  const next = new Set(selectedIds);
+  const scope = [...new Set(scopeIds)];
+  const remove = scope.length > 0 && scope.every((id) => next.has(id));
+  scope.forEach((id) => remove ? next.delete(id) : next.add(id));
+  return [...next];
+}
+
 export function initialAccountPageSize() {
   if (typeof window === "undefined") return 10;
   try {
@@ -94,7 +102,11 @@ export function baseOptionLabel(item) {
     ? "隐藏邮箱"
     : item.strategy === "icloud_custom_domain"
       ? "自定义域名"
-    : item.strategy === "icloud_mail_alias" ? "邮箱别名" : "";
+    : item.strategy === "icloud_mail_alias"
+      ? "邮箱别名"
+      : String(item.strategy || "").startsWith("mailcom")
+        ? "官方别名"
+        : "";
   const occupied = occupiedAliasInfo(item);
   const failureCount = Math.max(0, Number(item.registration_failure_count) || 0);
   const failure = failureCount && !occupied.count

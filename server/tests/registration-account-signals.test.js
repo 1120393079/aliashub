@@ -122,7 +122,7 @@ test("registered accounts require the same remote id and email and expose normal
     graph: {},
     client: {
       async listAccounts(options) {
-        assert.deepEqual(options, { pageSize: 500 });
+        assert.deepEqual(options, { page: 1, pageSize: 500 });
         return { total: items.length, items };
       },
       async refreshAccountPlans() {
@@ -181,6 +181,50 @@ test("registered accounts require the same remote id and email and expose normal
   const serialized = JSON.stringify(result);
   assert.doesNotMatch(serialized, /private-(?:access|session|disabled|refresh)-token/);
   assert.equal(serialized.includes('"credentials"'), false);
+});
+
+test("registered account list includes unique matches from every remote page", async (t) => {
+  const db = testDatabase(t);
+  addCompletedRegistration(db, 1, "first-page@example.com");
+  addCompletedRegistration(db, 501, "second-page@example.com");
+  const firstPage = Array.from({ length: 500 }, (_, index) => ({
+    id: index + 1,
+    platform: "chatgpt",
+    email: index === 0 ? "first-page@example.com" : `unmatched-${index + 1}@example.com`,
+    overview: { password_status: "not_configured" },
+  }));
+  const secondPage = [{
+    ...firstPage[0],
+  }, {
+    id: 501,
+    platform: "chatgpt",
+    email: "second-page@example.com",
+    overview: { password_status: "not_configured" },
+  }];
+  const calls = [];
+  const service = new RegistrationService({
+    db,
+    graph: {},
+    client: {
+      async listAccounts(options) {
+        calls.push(options);
+        return {
+          total: 1,
+          page: options.page,
+          items: options.page === 1 ? firstPage : secondPage,
+        };
+      },
+    },
+  });
+
+  const result = await service.listRegisteredAccounts({ refreshUnchecked: false });
+
+  assert.deepEqual(calls, [
+    { page: 1, pageSize: 500 },
+    { page: 2, pageSize: 500 },
+  ]);
+  assert.equal(result.total, 2);
+  assert.deepEqual(result.items.map((item) => item.id), [1, 501]);
 });
 
 test("registered account list exposes only completed NFapi imports", async (t) => {

@@ -2,10 +2,13 @@ import {
   ICLOUD_CUSTOM_DOMAIN_STRATEGY,
   ICLOUD_HIDE_MY_EMAIL_STRATEGY,
   ICLOUD_MAIL_ALIAS_STRATEGY,
+  MAILCOM_ALIAS_STRATEGY,
   isIcloudPrivateRelay,
   isIcloudImportedStrategy,
+  isMailcomAliasStrategy,
   normalizeIcloudAliasEmail,
   normalizeIcloudCustomDomainEmail,
+  normalizeMailcomEmail,
   normalizeTag,
   splitAddress,
 } from "./address-generator.js";
@@ -29,6 +32,7 @@ export function publicAccount(db, row) {
       SUM(CASE WHEN kind = 'official' AND status = 'active' AND strategy = 'icloud_mail_alias' THEN 1 ELSE 0 END) AS icloud_mail_alias_count,
       SUM(CASE WHEN kind = 'official' AND status = 'active' AND strategy = 'icloud_hide_my_email' THEN 1 ELSE 0 END) AS icloud_hide_my_email_count,
       SUM(CASE WHEN kind = 'official' AND status = 'active' AND strategy = 'icloud_custom_domain' THEN 1 ELSE 0 END) AS icloud_custom_domain_count,
+      SUM(CASE WHEN kind = 'official' AND status = 'active' AND strategy = 'mailcom_alias' THEN 1 ELSE 0 END) AS mailcom_alias_count,
       SUM(CASE WHEN kind = 'split' AND status = 'active' THEN 1 ELSE 0 END) AS split_count,
       COUNT(*) AS address_count
     FROM addresses WHERE account_id = ?
@@ -40,10 +44,12 @@ export function publicAccount(db, row) {
       ? Boolean(db.prepare("SELECT 1 FROM microsoft_tokens WHERE account_id = ?").get(row.id))
       : provider === "icloud"
         ? Boolean(db.prepare("SELECT 1 FROM icloud_credentials WHERE account_id = ?").get(row.id))
+        : provider === "mailcom"
+          ? Boolean(db.prepare("SELECT 1 FROM mailcom_credentials WHERE account_id = ?").get(row.id))
         : provider === "inbox_link"
           ? Boolean(db.prepare("SELECT 1 FROM inbox_link_mailboxes WHERE source_account_id = ? AND status = 'active'").get(row.id))
           : false;
-  const oauthConnected = !["icloud", "inbox_link"].includes(provider) && credentialConnected;
+  const oauthConnected = !["icloud", "mailcom", "inbox_link"].includes(provider) && credentialConnected;
   return {
     ...row,
     provider,
@@ -53,17 +59,129 @@ export function publicAccount(db, row) {
     icloud_mail_aliases: counts.icloud_mail_alias_count || 0,
     icloud_hide_my_emails: counts.icloud_hide_my_email_count || 0,
     icloud_custom_domain_emails: counts.icloud_custom_domain_count || 0,
+    mailcom_aliases: counts.mailcom_alias_count || 0,
     split_count: counts.split_count || 0,
     address_count: counts.address_count || 0,
     oauth_connected: oauthConnected,
     credential_connected: credentialConnected,
     connection_connected: credentialConnected,
-    auth_mode: provider === "icloud" ? "app_password" : provider === "inbox_link" ? "inbox_link" : "oauth",
+    auth_mode: provider === "icloud" ? "app_password" : provider === "mailcom" ? "password" : provider === "inbox_link" ? "inbox_link" : "oauth",
     supports_official_aliases: provider === "microsoft",
     supports_plus_aliases: ["microsoft", "google"].includes(provider),
-    supports_imported_aliases: provider === "icloud",
-    supports_direct_registration: provider === "icloud",
+    supports_imported_aliases: ["icloud", "mailcom"].includes(provider),
+    supports_direct_registration: ["icloud", "mailcom"].includes(provider),
+    supports_mailcom_aliases: provider === "mailcom",
   };
+}
+
+export function importMailcomAliases(db, account, values = [], {
+  replace = false,
+  purpose = "Mail.com 手工导入",
+} = {}) {
+  if (account?.provider !== "mailcom") {
+    throw Object.assign(new Error("这个源头邮箱不是 Mail.com 账号"), { status: 409, code: "MAILCOM_ACCOUNT_REQUIRED" });
+  }
+  const raw = Array.isArray(values) ? values : [];
+  if (raw.length > 100) throw Object.assign(new Error("单次最多提交 100 个 Mail.com 别名"), { status: 400 });
+  const invalid = raw.map((value) => String(value || "").trim())
+    .filter((value) => value && !normalizeMailcomEmail(value));
+  if (invalid.length) {
+    throw Object.assign(new Error(`不是 signup.mail.com 支持的邮箱地址：${invalid[0]}`), { status: 400 });
+  }
+  const aliases = [...new Set(raw.map(normalizeMailcomEmail).filter(Boolean))]
+    .filter((address) => address !== account.email.toLowerCase());
+  if (!aliases.length && !replace) {
+    throw Object.assign(new Error("请至少填写一个 Mail.com 官方别名"), { status: 400 });
+  }
+  const existingRows = db.prepare(`
+    SELECT address, strategy FROM addresses
+    WHERE account_id = ? AND kind = 'official' AND status = 'active'
+  `).all(account.id);
+  const existing = existingRows.filter((item) => isMailcomAliasStrategy(item.strategy))
+    .map((item) => item.address.toLowerCase());
+  const otherOfficial = existingRows.filter((item) => !isMailcomAliasStrategy(item.strategy))
+    .map((item) => item.address.toLowerCase());
+  const finalAliases = replace ? aliases : [...new Set([...existing, ...aliases])];
+  const officialLimit = 10;
+  const addressCount = new Set([account.email.toLowerCase(), ...otherOfficial, ...finalAliases]).size;
+  if (addressCount > officialLimit) {
+    throw Object.assign(new Error(`Mail.com 母号和官方别名合计最多 ${officialLimit} 个地址`), { status: 400, code: "MAILCOM_ALIAS_LIMIT" });
+  }
+  const duplicate = db.prepare(`
+    SELECT source_accounts.email AS source_email
+    FROM addresses
+    JOIN source_accounts ON source_accounts.id = addresses.account_id
+    WHERE addresses.address = ? COLLATE NOCASE AND addresses.account_id != ?
+    LIMIT 1
+  `);
+  const assigned = finalAliases.map((address) => ({ address, row: duplicate.get(address, account.id) }))
+    .find((item) => item.row);
+  if (assigned) {
+    throw Object.assign(
+      new Error(`${assigned.address} 已属于源头邮箱 ${assigned.row.source_email}，不能重复导入`),
+      { status: 409, code: "MAILCOM_ALIAS_ALREADY_ASSIGNED" },
+    );
+  }
+
+  const now = nowIso();
+  const insert = db.prepare(`
+    INSERT INTO addresses (
+      account_id, address, kind, status, strategy, label, purpose, remote_confirmed, created_at, updated_at
+    ) VALUES (?, ?, 'official', 'active', ?, 'Mail.com 官方别名', ?, 1, ?, ?)
+    ON CONFLICT(account_id, address) DO UPDATE SET
+      kind = CASE WHEN addresses.kind = 'primary' THEN 'primary' ELSE 'official' END,
+      status = 'active', strategy = excluded.strategy, label = excluded.label,
+      purpose = excluded.purpose, remote_confirmed = 1, updated_at = excluded.updated_at
+  `);
+  const findAddress = db.prepare(`
+    SELECT id FROM addresses
+    WHERE account_id = ? AND address = ? COLLATE NOCASE
+  `);
+  const relinkRegistrationHistory = db.prepare(`
+    UPDATE registration_jobs
+    SET address_id = ?, base_address_id = ?
+    WHERE account_id = ? AND email = ? COLLATE NOCASE
+  `);
+  let removed = 0;
+  db.transaction(() => {
+    db.prepare("UPDATE source_accounts SET official_limit = 10, updated_at = ? WHERE id = ?")
+      .run(now, account.id);
+    finalAliases.forEach((address) => {
+      insert.run(
+        account.id,
+        address,
+        MAILCOM_ALIAS_STRATEGY,
+        purpose,
+        now,
+        now,
+      );
+      const addressId = findAddress.get(account.id, address)?.id;
+      if (addressId) {
+        relinkRegistrationHistory.run(addressId, addressId, account.id, address);
+      }
+    });
+    if (replace) {
+      const placeholders = finalAliases.map(() => "?").join(",");
+      const statement = finalAliases.length
+        ? `UPDATE addresses
+           SET status = 'disabled', remote_confirmed = 0, updated_at = ?
+           WHERE account_id = ? AND kind = 'official' AND strategy = ?
+             AND status = 'active' AND address NOT IN (${placeholders})`
+        : `UPDATE addresses
+           SET status = 'disabled', remote_confirmed = 0, updated_at = ?
+           WHERE account_id = ? AND kind = 'official' AND strategy = ? AND status = 'active'`;
+      removed = db.prepare(statement).run(now, account.id, MAILCOM_ALIAS_STRATEGY, ...finalAliases).changes;
+    }
+    audit(db, account.id, "alias", replace ? "同步 Mail.com 官方别名" : "导入 Mail.com 官方别名", `本次保存 ${finalAliases.length} 个地址，移除 ${removed} 个本地映射`, {
+      count: finalAliases.length,
+      removed,
+    });
+  })();
+  return db.prepare(`
+    SELECT * FROM addresses
+    WHERE account_id = ? AND kind IN ('primary', 'official') AND status = 'active'
+    ORDER BY kind = 'primary' DESC, created_at
+  `).all(account.id);
 }
 
 export function importIcloudAliases(db, account, values = [], {
@@ -353,42 +471,60 @@ export function deleteSelectedAddresses(db, { ids = [], accountId } = {}) {
     imported_icloud: item.source_provider === "icloud"
       && item.kind === "official"
       && isIcloudImportedStrategy(item.strategy),
+    imported_mailcom: item.source_provider === "mailcom"
+      && item.kind === "official"
+      && isMailcomAliasStrategy(item.strategy),
   }));
-  if (typed.some((item) => item.kind !== "split" && !item.imported_icloud)) {
+  if (typed.some((item) => item.kind !== "split" && !item.imported_icloud && !item.imported_mailcom)) {
     throw Object.assign(new Error("所选地址包含不能从本地删除的源头号或官方别名"), { status: 409 });
   }
   if (!typed.length) return {
     deleted: 0,
     split_deleted: 0,
     imported_icloud_deleted: 0,
+    imported_mailcom_deleted: 0,
+    imported_alias_deleted: 0,
     accountIds: [],
     ids: [],
   };
 
   const summaries = new Map();
   const remove = db.prepare("DELETE FROM addresses WHERE id = ?");
+  const archiveMailcom = db.prepare(`
+    UPDATE addresses
+    SET status = 'disabled', remote_confirmed = 0, updated_at = ?
+    WHERE id = ? AND kind = 'official' AND strategy = ?
+  `);
   db.transaction(() => {
+    const removedAt = nowIso();
     for (const item of typed) {
-      remove.run(item.id);
-      const current = summaries.get(item.account_id) || { split: 0, importedIcloud: 0 };
+      if (item.imported_mailcom) archiveMailcom.run(removedAt, item.id, MAILCOM_ALIAS_STRATEGY);
+      else remove.run(item.id);
+      const current = summaries.get(item.account_id) || { split: 0, importedIcloud: 0, importedMailcom: 0 };
       if (item.imported_icloud) current.importedIcloud += 1;
+      else if (item.imported_mailcom) current.importedMailcom += 1;
       else current.split += 1;
       summaries.set(item.account_id, current);
     }
     for (const [sourceAccountId, summary] of summaries) {
-      const count = summary.split + summary.importedIcloud;
+      const count = summary.split + summary.importedIcloud + summary.importedMailcom;
       audit(db, sourceAccountId, "address", "批量删除本地地址", `共删除 ${count} 个`, {
         count,
         split_count: summary.split,
         imported_icloud_count: summary.importedIcloud,
+        imported_mailcom_count: summary.importedMailcom,
       });
     }
   })();
-  const splitDeleted = typed.filter((item) => !item.imported_icloud).length;
+  const splitDeleted = typed.filter((item) => item.kind === "split").length;
+  const importedIcloudDeleted = typed.filter((item) => item.imported_icloud).length;
+  const importedMailcomDeleted = typed.filter((item) => item.imported_mailcom).length;
   return {
     deleted: typed.length,
     split_deleted: splitDeleted,
-    imported_icloud_deleted: typed.length - splitDeleted,
+    imported_icloud_deleted: importedIcloudDeleted,
+    imported_mailcom_deleted: importedMailcomDeleted,
+    imported_alias_deleted: importedIcloudDeleted + importedMailcomDeleted,
     accountIds: [...summaries.keys()],
     ids: typed.map((item) => item.id),
   };
@@ -433,7 +569,9 @@ export function persistInboxScanResult(db, account, result = {}) {
       .map((value) => String(value || "").toLowerCase())
       .filter(Boolean);
     const matches = recipients.map((value) => addressByValue.get(value)).filter(Boolean);
-    return matches.find((address) => isIcloudImportedStrategy(address.strategy)) || matches[0] || null;
+    return matches.find((address) => (
+      isIcloudImportedStrategy(address.strategy) || isMailcomAliasStrategy(address.strategy)
+    )) || matches[0] || null;
   };
   let addedCodes = 0;
   let addedMessages = 0;
@@ -547,6 +685,8 @@ export class JobRunner {
         ? "正在读取 Gmail 收件箱"
         : account.provider === "icloud"
           ? "正在读取 iCloud Mail 收件箱"
+          : account.provider === "mailcom"
+            ? "正在读取 Mail.com 收件箱"
           : account.provider === "inbox_link" ? "正在读取链接取件邮箱" : "正在读取 Outlook 收件箱",
       started_at: nowIso(),
     });

@@ -29,7 +29,7 @@ async function boot() {
 async function test() {
   try {
     await send({ type: "api", path: "/api/extension/status" });
-    show("已连接 AliasHub");
+    show("已连接注册工作站");
   } catch (error) {
     show(error.message, true);
   }

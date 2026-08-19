@@ -19,7 +19,7 @@ class RegisterTaskRequest(BaseModel):
     email: Optional[str] = None
     password: Optional[str] = None
     count: int = 1
-    concurrency: int = 1
+    concurrency: int = Field(default=1, ge=1, le=20)
     proxy: Optional[str] = None
     executor_type: str = "protocol"
     captcha_solver: str = "auto"
@@ -27,13 +27,15 @@ class RegisterTaskRequest(BaseModel):
 
 
 class PhoneBindTaskRequest(BaseModel):
-    platform: str = "chatgpt"
-    ids: list[int] = Field(default_factory=list)
-    fallback_ids: list[int] = Field(default_factory=list)
-    phone_lines: str
-    browser_mode: str = "camoufox_headed"
-    bit_profile_id: str = ""
-    concurrency: int = 1
+    task_id: str = Field(default="", max_length=69)
+    platform: str = Field(default="chatgpt", max_length=64)
+    ids: list[int] = Field(default_factory=list, max_length=100)
+    fallback_ids: list[int] = Field(default_factory=list, max_length=100)
+    phone_lines: str = Field(min_length=1, max_length=50_000)
+    browser_mode: str = Field(default="camoufox_headed", max_length=64)
+    bit_profile_id: str = Field(default="", max_length=200)
+    concurrency: int = Field(default=1, ge=1, le=3)
+    sms_wait_seconds: int = Field(default=30, ge=30, le=1800)
 
 
 class CodexOAuthTaskRequest(BaseModel):
@@ -156,7 +158,10 @@ def create_register_task(body: RegisterTaskRequest):
 
 @router.post("/phone-bind")
 def create_phone_bind_task(body: PhoneBindTaskRequest):
-    return command_service.create_phone_bind_task(body.model_dump())
+    try:
+        return command_service.create_phone_bind_task(body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @router.post("/codex-oauth")

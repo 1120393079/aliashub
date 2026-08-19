@@ -1,6 +1,8 @@
 services:
   app:
     build: .
+    init: true
+    shm_size: "1gb"
     ports:
       - "127.0.0.1:${PORT:-8000}:8000"   # FastAPI / Web UI
       - "127.0.0.1:6080:6080"   # noVNC (headed 浏览器预览)

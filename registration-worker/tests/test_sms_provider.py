@@ -164,6 +164,8 @@ class TestCreatePhoneCallbacks:
         assert ("cancel", "act_2") not in events
         assert any("等待短信验证码" in item for item in logs)
         assert any("短信验证成功" in item for item in logs)
+        assert any("收到验证码，正在提交" in item for item in logs)
+        assert "123456" not in "\n".join(logs)
 
     def test_deferred_success_provider_reports_on_cleanup_for_legacy_callers(self, monkeypatch):
         events = []
@@ -245,7 +247,8 @@ class TestCreatePhoneCallbacks:
         cleanup()
         assert ("report_success", "act_retry") in events
 
-    def test_herosms_number_fetch_failure_releases_verify_lock(self, monkeypatch):
+    @pytest.mark.parametrize("provider_key", ["herosms", "herosms_api"])
+    def test_herosms_number_fetch_failure_releases_verify_lock(self, monkeypatch, provider_key):
         class FakeProvider:
             def get_number(self, *, service: str, country: str = ""):
                 raise RuntimeError("temporary failure")
@@ -253,7 +256,7 @@ class TestCreatePhoneCallbacks:
         monkeypatch.setattr("core.base_sms.create_sms_provider", lambda provider_key, config: FakeProvider())
 
         callback, cleanup = create_phone_callbacks(
-            "herosms",
+            provider_key,
             {"herosms_api_key": "test"},
             service="chatgpt",
         )
@@ -336,7 +339,7 @@ class TestHeroSmsProvider:
 
         assert activation.activation_id == "act_1"
         assert activation.phone_number == "+15551234"
-        assert calls[0]["action"] == "getNumberV2"
+        assert [call["action"] for call in calls] == ["getPrices", "getNumberV2"]
 
     def test_get_number_falls_back_to_v1_text(self, monkeypatch, tmp_path):
         monkeypatch.setattr(sms_module, "hero_sms_cache_file", lambda: tmp_path / ".herosms_phone_cache.json")
@@ -365,7 +368,7 @@ class TestHeroSmsProvider:
 
         assert activation.activation_id == "act_2"
         assert activation.phone_number == "+15557654321"
-        assert calls == ["getNumberV2", "getNumber"]
+        assert calls == ["getPrices", "getNumberV2", "getNumber"]
 
     def test_get_code_skips_attempted_sms_event(self, monkeypatch, tmp_path):
         monkeypatch.setattr(sms_module, "hero_sms_cache_file", lambda: tmp_path / ".herosms_phone_cache.json")

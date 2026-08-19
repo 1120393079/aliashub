@@ -94,6 +94,24 @@ test("binds links encrypted and creates registration tasks from the saved mailbo
       WHERE source_accounts.provider = 'inbox_link' AND addresses.kind = 'primary'
     `).get().count, 3);
 
+    const originalBinding = db.prepare(`
+      SELECT inbox_key_hash, inbox_key_encrypted FROM inbox_link_mailboxes
+      WHERE email = ? COLLATE NOCASE
+    `).get("fixture-one@icloud.com");
+    const blockedReplacement = await jsonRequest(runtime.app, "/api/inbox-link-mailboxes/import", {
+      method: "POST",
+      body: JSON.stringify({
+        poolText: "fixture-one@icloud.com https://dispose.lol/ib/replacement-key",
+        replaceExisting: false,
+      }),
+    });
+    assert.equal(blockedReplacement.response.status, 409);
+    assert.match(blockedReplacement.body.error, /已绑定其他取件链接/);
+    assert.deepEqual(db.prepare(`
+      SELECT inbox_key_hash, inbox_key_encrypted FROM inbox_link_mailboxes
+      WHERE email = ? COLLATE NOCASE
+    `).get("fixture-one@icloud.com"), originalBinding);
+
     const defaultAccounts = await jsonRequest(runtime.app, "/api/accounts");
     const mailCenterAccounts = await jsonRequest(runtime.app, "/api/accounts?includeInboxLinks=true");
     assert.equal(defaultAccounts.body.items.length, 0);
@@ -109,6 +127,7 @@ test("binds links encrypted and creates registration tasks from the saved mailbo
       body: JSON.stringify({
         mailboxMode: "inbox_link",
         count: 2,
+        concurrency: 5,
         browserMode: "headless",
         proxySelection: "direct",
         autoContinuePostSignup: true,
@@ -126,6 +145,9 @@ test("binds links encrypted and creates registration tasks from the saved mailbo
     assert.equal(client.created.length, 2);
     assert.equal(client.created[0].email, "fixture-one@icloud.com");
     assert.equal(client.created[0].extra.mail_provider, "dispose_inbox_link");
+    assert.equal(client.created[0].extra.registration_batch_concurrency, 2);
+    assert.equal(client.created[1].extra.registration_batch_concurrency, 2);
+    assert.equal(client.created[1].extra.registration_batch_id, client.created[0].extra.registration_batch_id);
     assert.equal(
       client.created[0].extra.dispose_inbox_link_pool_text,
       "fixture-one@icloud.com https://dispose.lol/ib/test-mailbox-key-0001",

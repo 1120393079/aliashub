@@ -519,7 +519,7 @@ function RegisterModal({
                   </div>
                   <div>
                     <label className="text-xs text-[var(--text-muted)] block mb-1">{t('accounts.concurrency')}</label>
-                    <input type="number" min={1} max={5} value={concurrency}
+                    <input type="number" min={1} max={20} value={concurrency}
                       onChange={e => setConcurrency(Number(e.target.value))}
                       className="control-surface control-surface-compact text-center" />
                   </div>

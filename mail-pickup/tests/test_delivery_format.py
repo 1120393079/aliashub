@@ -44,6 +44,92 @@ class PickupDeliveryFormatTests(unittest.TestCase):
             )[0]
             self.assertEqual(repeated["pickup_url"], created["pickup_url"])
 
+    def test_relist_only_restores_archived_sold_mailbox_without_sale_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = PickupStore(Config(
+                host="127.0.0.1",
+                port=4190,
+                database_path=str(root / "pickup.db"),
+                domain="pickup.test",
+                public_base_url="https://pickup.example",
+                inbound_token="inbound-token-for-test-only",
+                token_secret="token-secret-long-enough-for-test",
+                admin_username="admin",
+                admin_password="secret",
+                alias_hub_database_path=str(root / "missing-alias.db"),
+            ))
+            created = store.create_mailboxes(
+                items=[{"email": "archived@example.com"}],
+                allow_unbound=True,
+            )[0]
+            with store.connect() as db:
+                db.execute(
+                    "UPDATE pickup_mailboxes SET status = 'sold', hidden_at = ? WHERE id = ?",
+                    ("2026-08-15T01:00:00Z", created["id"]),
+                )
+
+            unchanged = store.create_mailboxes(
+                items=[{"email": "archived@example.com", "label": "普通 upsert"}],
+                upsert=True,
+                allow_unbound=True,
+            )[0]
+            self.assertEqual(unchanged["status"], "sold")
+            self.assertEqual(unchanged["hidden_at"], "2026-08-15T01:00:00Z")
+            self.assertEqual(unchanged["pickup_url"], created["pickup_url"])
+            self.assertEqual(store.list_mailboxes()["stats"]["total"], 0)
+
+            restored = store.create_mailboxes(
+                items=[{"email": "archived@example.com", "label": "重新上架"}],
+                upsert=True,
+                allow_unbound=True,
+                relist=True,
+            )[0]
+            self.assertEqual(restored["status"], "ready")
+            self.assertIsNone(restored["hidden_at"])
+            self.assertIsNone(restored["sold_at"])
+            self.assertEqual(restored["ldxp_trade_no"], "")
+            self.assertEqual(restored["ldxp_card_digest"], "")
+            self.assertEqual(restored["pickup_url"], created["pickup_url"])
+            self.assertEqual(store.list_mailboxes()["stats"]["ready"], 1)
+
+    def test_relist_rejects_archived_mailbox_with_sale_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = PickupStore(Config(
+                host="127.0.0.1",
+                port=4190,
+                database_path=str(root / "pickup.db"),
+                domain="pickup.test",
+                public_base_url="https://pickup.example",
+                inbound_token="inbound-token-for-test-only",
+                token_secret="token-secret-long-enough-for-test",
+                admin_username="admin",
+                admin_password="secret",
+                alias_hub_database_path=str(root / "missing-alias.db"),
+            ))
+            created = store.create_mailboxes(
+                items=[{"email": "sold@example.com"}],
+                allow_unbound=True,
+            )[0]
+            with store.connect() as db:
+                db.execute(
+                    "UPDATE pickup_mailboxes SET status = 'sold', hidden_at = ?, sold_at = ? WHERE id = ?",
+                    ("2026-08-15T01:00:00Z", "2026-08-14T01:00:00Z", created["id"]),
+                )
+
+            with self.assertRaisesRegex(ValueError, "已有销售记录"):
+                store.create_mailboxes(
+                    items=[{"email": "sold@example.com"}],
+                    upsert=True,
+                    allow_unbound=True,
+                    relist=True,
+                )
+            unchanged = store.get_admin_mailbox(created["id"])
+            self.assertEqual(unchanged["status"], "sold")
+            self.assertEqual(unchanged["hidden_at"], "2026-08-15T01:00:00Z")
+            self.assertEqual(unchanged["sold_at"], "2026-08-14T01:00:00Z")
+
     def test_delivery_includes_available_password_but_not_access_token(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

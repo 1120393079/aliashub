@@ -100,11 +100,11 @@ database:
 
 Verify mailbox OAuth, inbox scanning, address generation, connector pairing,
 backup/restore, Pickup publication/query flows, and upgrades. Test registration
-with newly issued non-production fixtures. Verify DE/EUR, TR/USD, and GB/GBP
-payment-link task creation with dedicated non-production proxy fixtures. Confirm
-core mode remains fully usable without the worker, Pickup service, or extractor,
-and that SUB2 remains disabled until each deployer supplies its own service URL
-and Admin API Key.
+with newly issued non-production fixtures. Verify DE/EUR, TR/USD, GB/GBP,
+US/USD, and BR/BRL payment-link task creation with dedicated non-production
+proxy fixtures. Confirm core mode remains fully usable without the worker,
+Pickup service, or extractor, and that SUB2 remains disabled until each deployer
+supplies its own service URL and Admin API Key.
 
 ## 6. Tag and publish
 

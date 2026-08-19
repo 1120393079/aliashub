@@ -5,7 +5,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    init: true
     restart: unless-stopped
+    shm_size: "1gb"
     user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
     env_file:
       - .env
@@ -16,6 +18,7 @@ services:
       DATA_DIR: /app/data
       DATABASE_PATH: /app/data/outlook-alias-hub.db
       PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-http://127.0.0.1:4180}"
+      MAILCOM_BROWSER_EXECUTABLE: /usr/bin/chromium
     ports:
       - "127.0.0.1:${PORT:-4180}:4180"
     volumes:

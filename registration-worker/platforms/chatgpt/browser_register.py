@@ -870,8 +870,9 @@ PHONE_COUNTRY_CODE_MAP = {
     "84": "Vietnam", "86": "China", "90": "Turkey", "91": "India",
     "92": "Pakistan", "93": "Afghanistan", "94": "Sri Lanka", "95": "Myanmar",
     "98": "Iran", "212": "Morocco", "213": "Algeria", "216": "Tunisia",
-    "218": "Libya", "220": "Gambia", "221": "Senegal", "234": "Nigeria",
-    "254": "Kenya", "255": "Tanzania", "256": "Uganda", "260": "Zambia",
+    "218": "Libya", "220": "Gambia", "221": "Senegal", "231": "Liberia",
+    "234": "Nigeria", "244": "Angola", "254": "Kenya", "255": "Tanzania",
+    "256": "Uganda", "260": "Zambia",
     "263": "Zimbabwe", "351": "Portugal", "353": "Ireland", "354": "Iceland",
     "358": "Finland", "370": "Lithuania", "371": "Latvia", "372": "Estonia",
     "374": "Armenia", "375": "Belarus", "380": "Ukraine", "381": "Serbia",
@@ -897,8 +898,9 @@ PHONE_DIAL_TO_ISO = {
     "84": "VN", "86": "CN", "90": "TR", "91": "IN",
     "92": "PK", "93": "AF", "94": "LK", "95": "MM",
     "98": "IR", "212": "MA", "213": "DZ", "216": "TN",
-    "218": "LY", "220": "GM", "221": "SN", "234": "NG",
-    "254": "KE", "255": "TZ", "256": "UG", "260": "ZM",
+    "218": "LY", "220": "GM", "221": "SN", "231": "LR",
+    "234": "NG", "244": "AO", "254": "KE", "255": "TZ",
+    "256": "UG", "260": "ZM",
     "263": "ZW", "351": "PT", "353": "IE", "354": "IS",
     "358": "FI", "370": "LT", "371": "LV", "372": "EE",
     "374": "AM", "375": "BY", "380": "UA", "381": "RS",
@@ -1818,10 +1820,18 @@ def _phone_page_status(page) -> dict:
                 const rect = el.getBoundingClientRect();
                 return style && style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
               };
-              const text = String(document.body?.innerText || '').replace(/\\s+/g, ' ').trim();
+              const text = String(document.body?.innerText || '').replace(/\s+/g, ' ').trim();
               const addPhoneForm = document.querySelector('form[action*="/add-phone" i]');
               const verificationForm = document.querySelector('form[action*="/phone-verification" i]');
-              const codeInput = verificationForm?.querySelector('input[name="code"], input[autocomplete="one-time-code"], input[inputmode="numeric"]');
+              const codeSelector = 'input[name="code"], input[autocomplete="one-time-code"], input[inputmode="numeric"], input[type="number"]';
+              const exactCodeInput = verificationForm?.querySelector(codeSelector);
+              const visibleCodeInput = Array.from(document.querySelectorAll(codeSelector)).find(visible) || null;
+              const hasPhoneWords = /check\s+(?:your\s+)?phone|verify\s+(?:your\s+)?phone|phone|mobile|sms|text\s*message|手机|手機|短信|簡訊|携帯|電話|ショートメッセージ|문자|휴대폰/i.test(text);
+              const hasPhoneNumber = /\+\s*\d(?:[\d\s().\-•·*]{3,})\d/.test(text);
+              const hasSmsResend = /resend[^\n]{0,20}(?:sms|text)|重新发送短信|重新傳送簡訊|重新傳送短信|再送信|SMS[^\n]{0,12}再送|문자[^\n]{0,12}다시/i.test(text);
+              const phoneOtpByCopy = Boolean(visibleCodeInput && (hasSmsResend || (hasPhoneWords && hasPhoneNumber)));
+              const codeInput = exactCodeInput || (phoneOtpByCopy ? visibleCodeInput : null);
+              const verificationRoot = verificationForm || codeInput?.closest('form') || null;
               const addPhoneError = (() => {
                 if (!addPhoneForm) return '';
                 const selectors = [
@@ -1834,14 +1844,14 @@ def _phone_page_status(page) -> dict:
                 ];
                 for (const selector of selectors) {
                   for (const el of Array.from(addPhoneForm.querySelectorAll(selector))) {
-                    const msg = String(el.textContent || '').replace(/\\s+/g, ' ').trim();
+                    const msg = String(el.textContent || '').replace(/\s+/g, ' ').trim();
                     if (msg) return msg;
                   }
                 }
                 return '';
               })();
               const verifyError = (() => {
-                if (!verificationForm) return '';
+                if (!verificationRoot) return '';
                 const selectors = [
                   '.react-aria-FieldError',
                   '[slot="errorMessage"]',
@@ -1852,8 +1862,8 @@ def _phone_page_status(page) -> dict:
                   '[role="alert"]'
                 ];
                 for (const selector of selectors) {
-                  for (const el of Array.from(verificationForm.querySelectorAll(selector))) {
-                    const msg = String(el.textContent || '').replace(/\\s+/g, ' ').trim();
+                  for (const el of Array.from(verificationRoot.querySelectorAll(selector))) {
+                    const msg = String(el.textContent || '').replace(/\s+/g, ' ').trim();
                     if (msg) return msg;
                   }
                 }
@@ -1862,7 +1872,8 @@ def _phone_page_status(page) -> dict:
               return {
                 url: location.href,
                 addPhoneReady: Boolean(addPhoneForm && visible(addPhoneForm.querySelector('input[type="tel"], input[name="__reservedForPhoneNumberInput_tel"], input[autocomplete="tel"], input[name="phoneNumber"]'))),
-                phoneVerificationReady: Boolean(verificationForm && codeInput && visible(codeInput)),
+                phoneVerificationReady: Boolean(codeInput && visible(codeInput)),
+                phoneVerificationSource: verificationForm ? 'form_action' : (phoneOtpByCopy ? 'phone_copy' : ''),
                 addPhoneError,
                 verifyError,
                 text,
@@ -2075,10 +2086,6 @@ def _submit_add_phone_dom(
                 }
               }
 
-              // ★ 跳过国家选择器：OpenAI 使用 React Aria 自定义组件（非原生 select），
-              // 触碰隐藏的 a11y <select> 会触发下拉浮层弹出遮挡提交按钮。
-              // 默认国家已是美国 (+1)，无需切换。
-
               const phoneInput = form.querySelector('input[type="tel"], input[name="__reservedForPhoneNumberInput_tel"], input[autocomplete="tel"]');
               if (!phoneInput) return { ok: false, reason: 'missing_phone_input', url: location.href };
               phoneInput.focus();
@@ -2099,7 +2106,7 @@ def _submit_add_phone_dom(
               return {
                 ok: true,
                 url: location.href,
-                selectedCountry: select ? select.value : '',
+                selectedCountry: payload.isoCode || '',
                 channel: channelInput ? channelInput.value : (sms ? 'sms' : ''),
                 visibleValue: phoneInput.value || '',
                 hiddenValue: hidden ? hidden.value : '',
@@ -2145,19 +2152,23 @@ def _submit_phone_otp_dom(page, code: str, log) -> dict:
                 el.dispatchEvent(new Event('input', { bubbles: true }));
                 el.dispatchEvent(new Event('change', { bubbles: true }));
               };
-              const form = document.querySelector('form[action*="/phone-verification" i]');
-              if (!form) return { ok: false, reason: 'missing_phone_verification_form', url: location.href };
-              const input = form.querySelector('input[name="code"], input[autocomplete="one-time-code"], input[inputmode="numeric"]');
+              const exactForm = document.querySelector('form[action*="/phone-verification" i]');
+              const inputSelector = 'input[name="code"], input[autocomplete="one-time-code"], input[inputmode="numeric"], input[type="number"]';
+              const input = exactForm?.querySelector(inputSelector)
+                || Array.from(document.querySelectorAll(inputSelector)).find(visible)
+                || null;
               if (!input || !visible(input)) return { ok: false, reason: 'missing_code_input', url: location.href };
+              const form = exactForm || input.closest('form');
+              const root = form || document;
               input.focus();
               setNativeValue(input, code);
               input.dispatchEvent(new Event('blur', { bubbles: true }));
               await sleep(120);
-              const buttons = Array.from(form.querySelectorAll('button[type="submit"], input[type="submit"], button'));
+              const buttons = Array.from(root.querySelectorAll('button[type="submit"], input[type="submit"], button'));
               const submit = buttons.find((button) => {
                 if (!visible(button) || button.disabled || button.getAttribute('aria-disabled') === 'true') return false;
                 const text = String([button.value, button.textContent, button.getAttribute('aria-label')].filter(Boolean).join(' '));
-                return !/resend/i.test(text);
+                return !/resend|重新发送|重新傳送|再送|다시\\s*보내/i.test(text);
               }) || buttons.find((button) => visible(button));
               if (!submit) return { ok: false, reason: 'missing_submit_button', url: location.href };
               submit.click();
@@ -2184,7 +2195,11 @@ def _submit_phone_otp_dom(page, code: str, log) -> dict:
         last_url = current_url or last_url
         if status.get("verifyError"):
             return {"ok": False, "status": 400, "url": current_url, "data": None, "text": str(status.get("verifyError") or "")}
-        if "phone-verification" not in current_url:
+        if (
+            not status.get("phoneVerificationReady")
+            and "phone-verification" not in current_url
+            and "email-verification" not in current_url
+        ):
             return {"ok": True, "status": 200, "url": current_url, "data": None, "text": ""}
         if any(key in current_url for key in ("code=", "consent", "sign-in-with-chatgpt", "workspace", "organization")):
             return {"ok": True, "status": 200, "url": current_url, "data": None, "text": ""}
@@ -2592,6 +2607,13 @@ def _pick_best_about_you_input(entries: list[dict], field: str, exclude_visible_
 
 def _derive_registration_state_from_page(page) -> dict:
     current_url = str(page.url or "")
+
+    # The auth SPA can retain its email URL while rendering the phone OTP form.
+    # Prefer the live DOM so SMS verification never consumes a mailbox OTP.
+    phone_status = _phone_page_status(page)
+    if phone_status.get("addPhoneReady") or phone_status.get("phoneVerificationReady"):
+        return _build_manual_flow_state("add_phone", current_url)
+
     state = _extract_flow_state(None, current_url)
     if state.get("page_type"):
         return state
@@ -4002,6 +4024,7 @@ def _do_codex_oauth(
     *,
     allow_add_phone_retry: bool = True,
     oauth_start=None,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> dict | None:
     """在真实浏览器会话内完成 Codex OAuth，返回完整 token 包。
 
@@ -4011,6 +4034,7 @@ def _do_codex_oauth(
     from .oauth import generate_oauth_url
     from .constants import CODEX_CLIENT_ID, CODEX_REDIRECT_URI, CODEX_SCOPE
 
+    _raise_if_cancelled(cancel_check)
     if oauth_start is None:
         oauth_start = generate_oauth_url(
             redirect_uri=CODEX_REDIRECT_URI,
@@ -4039,6 +4063,7 @@ def _do_codex_oauth(
         log(f"  OAuth bootstrap -> {current_url[:100]}...")
 
         for step in range(20):
+            _raise_if_cancelled(cancel_check)
             state = _derive_oauth_state_from_page(page)
             current_url = str(page.url or "")
             next_url = str(state.get("continue_url") or "").strip()
@@ -4075,6 +4100,20 @@ def _do_codex_oauth(
                 continue
 
             if state["page_type"] in {"login_password", "create_account_password"}:
+                if not password and otp_callback:
+                    refresh_baseline = getattr(otp_callback, "refresh_baseline", None)
+                    if callable(refresh_baseline):
+                        try:
+                            refresh_baseline(strict=True)
+                        except TypeError:
+                            refresh_baseline()
+                    if _click_passwordless_login_if_available(
+                        page,
+                        log,
+                        context="OAuth 密码页",
+                    ):
+                        continue
+                    raise RuntimeError("OAuth 密码页未提供一次性验证码登录入口")
                 log("  OAuth 页面需要密码登录，提交密码...")
                 # OAuth 流程中直接填密码登录，不尝试恢复到注册态
                 password_resp = _submit_oauth_password_direct(page, password, log)
@@ -4137,8 +4176,12 @@ def _do_codex_oauth(
                             return callback_result
                         continue
                     except Exception as exc:
+                        error = f"OpenAI 手机号验证失败: {exc}"
                         log(f"  短信验证失败，停止 OAuth 流程: {exc}")
-                        return None
+                        return {
+                            "error": error,
+                            "phone_verification_failed": True,
+                        }
 
                 if not allow_add_phone_retry:
                     log("  OAuth 检测到 add_phone，等待手动完成手机号验证并跳转 callback...")
@@ -4247,9 +4290,11 @@ def _do_codex_oauth(
             if error_text:
                 raise RuntimeError(f"OAuth 页面错误: {error_text[:300]}")
             time.sleep(0.5)
+    except BrowserTaskCancelled:
+        return None
     except Exception as e:
         log(f"  OAuth 异常: {e}")
-        return None
+        return {"error": f"OpenAI OAuth 失败: {e}"}
 
     cookies_dict = _get_cookies(page)
     result = _complete_oauth_with_session(cookies_dict, oauth_start, proxy, log)
@@ -5631,6 +5676,121 @@ def _is_invalid_phone_otp_response(result: dict) -> bool:
     return "invalid otp code" in text
 
 
+class _PhoneSubmitUiError(RuntimeError):
+    """A browser/DOM failure that is safe to retry with the same number."""
+
+
+def _submit_phone_number_with_ui_retry(
+    page,
+    *,
+    phone_number: str,
+    dial_code: str,
+    local_number: str,
+    country_name: str,
+    log,
+    max_ui_attempts: int = 3,
+) -> dict:
+    attempts = max(1, int(max_ui_attempts or 1))
+    last_error = ""
+    for attempt in range(1, attempts + 1):
+        try:
+            if attempt > 1:
+                log(
+                    f"  手机号 UI 提交自动重试 {attempt}/{attempts}"
+                    f"（同一号码）: {last_error[:200]}"
+                )
+                _goto_with_retry(
+                    page,
+                    f"{OPENAI_AUTH}/add-phone",
+                    wait_until="domcontentloaded",
+                    timeout=30000,
+                    log=log,
+                )
+                time.sleep(1)
+
+            country_selected = _select_phone_country_ui(
+                page,
+                dial_code,
+                country_name,
+                log,
+            )
+            if not country_selected:
+                raise _PhoneSubmitUiError(
+                    f"手机号国家选择失败: {country_name} (+{dial_code})"
+                )
+            _browser_pause(page)
+
+            submit_result = _submit_add_phone_dom(
+                page,
+                phone_number=phone_number,
+                dial_code=dial_code,
+                local_number=local_number,
+                country_name=country_name,
+                log=log,
+            )
+            if not submit_result.get("ok"):
+                dom_reason = str(
+                    submit_result.get("reason") or "DOM 提交未返回成功"
+                )[:240]
+                log(f"  add-phone DOM 提交失败，回退旧 UI 路径: {dom_reason}")
+
+                # evaluate 可能在 click() 后才抛错。先检查是否已经进入
+                # 验证码页，避免把已发送的请求重复提交。
+                submitted_status = _wait_for_phone_verification_ready(page, timeout=3)
+                if submitted_status.get("phoneVerificationReady") or submitted_status.get("addPhoneError"):
+                    return submitted_status
+
+                phone_input_sel = _wait_for_any_selector(
+                    page,
+                    PHONE_INPUT_SELECTORS,
+                    timeout=10,
+                )
+                if not phone_input_sel:
+                    raise _PhoneSubmitUiError(
+                        f"未找到手机号输入框；DOM 原因: {dom_reason}"
+                    )
+                if not _fill_input_like_user(page, phone_input_sel, local_number):
+                    raise _PhoneSubmitUiError(
+                        f"手机号输入框填写失败: {phone_input_sel}；"
+                        f"DOM 原因: {dom_reason}"
+                    )
+                send_sel = _click_first_no_wait(
+                    page,
+                    PHONE_SEND_SELECTORS,
+                    timeout=8,
+                )
+                if send_sel:
+                    log(f"  已点击发送按钮: {send_sel}")
+                elif _submit_form_with_fallback(page, phone_input_sel):
+                    log("  未找到发送按钮，已使用表单 fallback 提交")
+                else:
+                    raise _PhoneSubmitUiError(
+                        f"未找到发送验证码按钮；DOM 原因: {dom_reason}"
+                    )
+
+            phone_status = _wait_for_phone_verification_ready(page, timeout=30)
+            if phone_status.get("phoneVerificationReady") or phone_status.get("addPhoneError"):
+                return phone_status
+            error_text = _extract_auth_error_text(page)
+            if error_text:
+                return {**phone_status, "addPhoneError": error_text}
+            raise _PhoneSubmitUiError(
+                f"手机号提交后未进入验证码页: "
+                f"{str(phone_status.get('url') or page.url)}"
+            )
+        except BrowserTaskCancelled:
+            raise
+        except _PhoneSubmitUiError as exc:
+            last_error = str(exc)
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+
+    raise RuntimeError(
+        f"手机号 UI 提交失败（同一号码已自动尝试 {attempts} 次）: "
+        f"{last_error[:300]}"
+    )
+
+
 def _handle_add_phone_challenge(
     page,
     phone_callback,
@@ -5746,49 +5906,44 @@ def _do_add_phone_attempt(
         phone_callback.set_resend_callback(_request_openai_resend)
 
     # ---- 第1步: 获取手机号 ----
+    initial_phone_status = _phone_page_status(page)
+    already_waiting_for_code = bool(initial_phone_status.get("phoneVerificationReady"))
     log("注册流程已进入 add_phone，开始准备租号并接收短信验证码...")
     phone_number = str(phone_callback() or "").strip()
     if not phone_number:
         raise RuntimeError("未获取到手机号")
-    log(f"检测到 add_phone，提交手机号(UI): {_mask_phone_number(phone_number)}")
+    if already_waiting_for_code:
+        phone_status = initial_phone_status
+        log(
+            "检测到 OpenAI 已进入手机验证码页，号码已提交；"
+            f"直接开始接码: {_mask_phone_number(phone_number)}"
+        )
+    else:
+        log(f"检测到 add_phone，提交手机号(UI): {_mask_phone_number(phone_number)}")
 
-    # 解析国家拨号码和本地号码
-    dial_code, local_number, country_name = _parse_phone_country_and_local(phone_number)
-    log(f"  解析号码: 国家={country_name or '未知'} 拨号码=+{dial_code} 本地号={local_number[:4]}...")
+        # 解析国家拨号码和本地号码
+        dial_code, local_number, country_name = _parse_phone_country_and_local(phone_number)
+        log(f"  解析号码: 国家={country_name or '未知'} 拨号码=+{dial_code} 本地号={local_number[:4]}...")
 
-    # 确保在 add-phone 页面
-    current_url = str(page.url or "")
-    if "add-phone" not in current_url:
-        _goto_with_retry(page, f"{OPENAI_AUTH}/add-phone", wait_until="domcontentloaded", timeout=30000, log=log)
-    time.sleep(1)
+        # 确保在 add-phone 页面
+        current_url = str(page.url or "")
+        if "add-phone" not in current_url:
+            _goto_with_retry(page, f"{OPENAI_AUTH}/add-phone", wait_until="domcontentloaded", timeout=30000, log=log)
+        time.sleep(1)
 
-    submit_result = _submit_add_phone_dom(
-        page,
-        phone_number=phone_number,
-        dial_code=dial_code,
-        local_number=local_number,
-        country_name=country_name,
-        log=log,
-    )
-    if not submit_result.get("ok"):
-        log(f"  add-phone DOM 提交失败，回退旧 UI 路径: {submit_result.get('reason') or submit_result}")
-        country_selected = _select_phone_country_ui(page, dial_code, country_name, log)
-        _browser_pause(page)
-        phone_input_sel = _wait_for_any_selector(page, PHONE_INPUT_SELECTORS, timeout=10)
-        if not phone_input_sel:
-            raise RuntimeError("未找到手机号输入框")
-        fill_value = local_number if country_selected else phone_number
-        if not _fill_input_like_user(page, phone_input_sel, fill_value):
-            raise RuntimeError(f"手机号输入框填写失败: {phone_input_sel}")
-        send_sel = _click_first_no_wait(page, PHONE_SEND_SELECTORS, timeout=8)
-        if send_sel:
-            log(f"  已点击发送按钮: {send_sel}")
-        elif _submit_form_with_fallback(page, phone_input_sel):
-            log("  未找到发送按钮，已使用表单 fallback 提交")
-        else:
-            raise RuntimeError("未找到发送验证码按钮")
+        if not dial_code or not country_name:
+            raise RuntimeError(f"无法识别手机号国家码: {_mask_phone_number(phone_number)}")
 
-    phone_status = _wait_for_phone_verification_ready(page, timeout=30)
+        # OpenAI 的 add-phone 表单默认是 +1。必须先同步 React Aria
+        # 国家选择器，再填写本地号码；可恢复的 UI 错误仅用同一号码重试。
+        phone_status = _submit_phone_number_with_ui_retry(
+            page,
+            phone_number=phone_number,
+            dial_code=dial_code,
+            local_number=local_number,
+            country_name=country_name,
+            log=log,
+        )
     if phone_status.get("addPhoneError"):
         if hasattr(phone_callback, "mark_send_failed"):
             phone_callback.mark_send_failed(str(phone_status.get("addPhoneError") or ""))
@@ -8496,6 +8651,7 @@ class ChatGPTBrowserRegister:
                 result = _do_codex_oauth(
                     page, {}, email, password,
                     self.otp_callback, self.phone_callback, self.proxy, self.log,
+                    cancel_check=self.cancel_check,
                 )
                 if not self.backend_config.is_bitbrowser:
                     exit_ip = _verify_browser_exit_for_flow(

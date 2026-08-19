@@ -4,21 +4,30 @@ import { timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import "dotenv/config";
 import express from "express";
-import { deleteSelectedAddresses, deleteSplitAddresses, generateSplits, importIcloudAliases, JobRunner, parseJson, publicAccount, syncOfficialAddresses } from "./account-service.js";
+import { deleteSelectedAddresses, deleteSplitAddresses, generateSplits, importIcloudAliases, importMailcomAliases, JobRunner, parseJson, publicAccount, syncOfficialAddresses } from "./account-service.js";
 import { createAuth } from "./auth.js";
-import { isIcloudImportedStrategy, microsoftDomains, normalizeIcloudAliasEmail, normalizeMicrosoftEmail } from "./address-generator.js";
+import { MAILCOM_ALIAS_STRATEGY, isIcloudImportedStrategy, isMailcomAliasStrategy, mailcomDomains, microsoftDomains, normalizeIcloudAliasEmail, normalizeMailcomEmail, normalizeMicrosoftEmail } from "./address-generator.js";
 import { audit, createDatabase, createSourceAccount, getSettings, nowIso, setSetting } from "./db.js";
 import { ExtensionService } from "./extension-service.js";
 import { registerEzCaptchaAdapter } from "./ez-captcha-adapter.js";
 import { GoogleGmailClient } from "./google-gmail.js";
 import { ICloudImapClient, icloudImapConfiguration } from "./icloud-imap.js";
+import { IcloudPrivacyClient } from "./icloud-privacy-client.js";
 import { InboxLinkMailboxService } from "./inbox-link-pool.js";
+import { IcRegistrationPipelineService } from "./ic-registration-pipeline-service.js";
+import { importMailcomAccounts } from "./mailcom-import.js";
+import { MailcomAliasAutomationService } from "./mailcom-alias-service.js";
+import { MailcomAliasPlaywrightAdapter } from "./mailcom-alias-playwright.js";
+import { MailComImapClient, mailcomImapConfiguration } from "./mailcom-imap.js";
+import { MailcomRegistrationPipelineService } from "./mailcom-registration-pipeline-service.js";
 import { MicrosoftGraphClient } from "./microsoft-graph.js";
 import { NfapiService, PUBLIC_AGENT_IDENTITY_ERROR_CODES } from "./nfapi-service.js";
 import { NfapiCredentialStore, NfapiCredentialSync } from "./nfapi-credential-sync.js";
+import { OpenAiSmsService } from "./openai-sms-service.js";
 import { MicrosoftRegistrationRunnerService } from "./microsoft-registration-runner-service.js";
 import { MicrosoftRegistrationService } from "./microsoft-registration-service.js";
 import { PickupService } from "./pickup-service.js";
+import { PaymentAgreementService } from "./payment-agreement-service.js";
 import { PaymentLinkService } from "./payment-link-service.js";
 import { RegistrationClient } from "./registration-client.js";
 import { RegistrationService } from "./registration-service.js";
@@ -29,6 +38,64 @@ const projectRoot = path.resolve(__dirname, "..");
 function positive(value, fallback = 20, maximum = 5_000) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? Math.max(1, Math.min(maximum, Math.floor(parsed))) : fallback;
+}
+
+function safeMailcomPartialError(error) {
+  const partial = error?.partial;
+  if (!partial || typeof partial !== "object") return {};
+  const integer = (value) => {
+    const number = Number(value);
+    return Number.isSafeInteger(number) && number >= 0 ? number : 0;
+  };
+  const account = error.account && typeof error.account === "object" ? {
+    id: Number(error.account.id),
+    provider: String(error.account.provider || ""),
+    email: String(error.account.email || ""),
+    display_name: String(error.account.display_name || ""),
+    status: String(error.account.status || ""),
+    official_limit: integer(error.account.official_limit),
+    official_used: integer(error.account.official_used),
+    official_remaining: integer(error.account.official_remaining),
+    official_aliases: integer(error.account.official_aliases),
+    mailcom_aliases: integer(error.account.mailcom_aliases),
+    address_count: integer(error.account.address_count),
+    credential_connected: Boolean(error.account.credential_connected),
+    supports_direct_registration: Boolean(error.account.supports_direct_registration),
+    supports_mailcom_aliases: Boolean(error.account.supports_mailcom_aliases),
+  } : undefined;
+  const items = Array.isArray(error.items) ? error.items.map((item) => ({
+    id: Number(item.id),
+    account_id: Number(item.account_id),
+    parent_address_id: item.parent_address_id == null ? null : Number(item.parent_address_id),
+    address: String(item.address || ""),
+    kind: String(item.kind || ""),
+    status: String(item.status || ""),
+    strategy: String(item.strategy || ""),
+    label: String(item.label || ""),
+    purpose: String(item.purpose || ""),
+    remote_confirmed: Number(item.remote_confirmed) === 1 ? 1 : 0,
+    created_at: String(item.created_at || ""),
+    updated_at: String(item.updated_at || ""),
+  })) : undefined;
+  return {
+    partial: {
+      created: integer(partial.created),
+      total: integer(partial.total),
+      existing: integer(partial.existing),
+    },
+    ...(account ? { account } : {}),
+    ...(items ? { items } : {}),
+  };
+}
+
+function sendProxyResult(res, result) {
+  Object.entries(result?.headers || {}).forEach(([name, value]) => {
+    if (value !== undefined && value !== null) res.setHeader(name, value);
+  });
+  const status = Number(result?.status) || 502;
+  const body = Buffer.isBuffer(result?.body) ? result.body : Buffer.from(result?.body || "");
+  if (status === 204 || status === 304) return res.status(status).end();
+  return res.status(status).send(body);
 }
 
 function publicJob(row) {
@@ -72,8 +139,159 @@ function requireMicrosoftAccount(account) {
   return account;
 }
 
+function isLocallyImportedAlias(item) {
+  return item?.kind === "official" && (
+    (item.source_provider === "icloud" && isIcloudImportedStrategy(item.strategy))
+    || (item.source_provider === "mailcom" && isMailcomAliasStrategy(item.strategy))
+  );
+}
+
+function isArchivedMailcomAliasSql(addressTable = "addresses", accountTable = "source_accounts") {
+  return `(
+    ${accountTable}.provider = 'mailcom'
+    AND ${addressTable}.kind = 'official'
+    AND ${addressTable}.strategy = 'mailcom_alias'
+    AND ${addressTable}.status = 'disabled'
+    AND ${addressTable}.remote_confirmed = 0
+  )`;
+}
+
+function hasActiveAddressRegistration(db, item) {
+  if (!item) return false;
+  return Boolean(db.prepare(`
+    SELECT 1 FROM registration_jobs
+    WHERE (
+      (
+        registration_jobs.account_id = ?
+        AND (
+          registration_jobs.address_id = ?
+          OR registration_jobs.base_address_id = ?
+        )
+      )
+      OR registration_jobs.email = ? COLLATE NOCASE
+    )
+      AND lower(registration_jobs.status) IN ('queued', 'pending', 'claimed', 'running', 'paused', 'cancel_requested')
+    LIMIT 1
+  `).get(item.account_id, item.id, item.id, item.address));
+}
+
+function hasActiveMailcomPipelineAddress(db, item) {
+  if (!item || item.source_provider !== "mailcom") return false;
+  return Boolean(db.prepare(`
+    SELECT 1
+    FROM mailcom_registration_pipeline_items AS items
+    JOIN mailcom_registration_pipelines AS pipelines ON pipelines.id = items.pipeline_id
+    WHERE pipelines.status IN ('queued', 'running', 'cancel_requested')
+      AND items.status IN ('queued', 'running', 'retry_wait', 'cancel_requested')
+      AND items.account_id = ?
+      AND (
+        items.current_address_id = ?
+        OR items.current_email = ? COLLATE NOCASE
+        OR items.initial_email = ? COLLATE NOCASE
+      )
+    LIMIT 1
+  `).get(item.account_id, item.id, item.address, item.address));
+}
+
+function activeMailcomPipelineReference(db, items, { accountId = null } = {}) {
+  const mailcomItems = (items || []).filter((item) => item?.source_provider === "mailcom");
+  const normalizedAccountId = Number(accountId);
+  const accountWide = Number.isSafeInteger(normalizedAccountId) && normalizedAccountId > 0;
+  if (!accountWide && !mailcomItems.length) return null;
+  const addressIds = new Set(mailcomItems.map((item) => Number(item.id)).filter(Number.isSafeInteger));
+  const emails = new Set(mailcomItems
+    .map((item) => String(item.address || "").trim().toLowerCase())
+    .filter(Boolean));
+  const references = db.prepare(`
+    SELECT pipelines.id AS pipeline_id, pipelines.status AS pipeline_status,
+      items.id AS item_id, items.account_id, items.source_email,
+      items.initial_address_id, items.initial_email,
+      items.current_address_id, items.current_email, items.replacement_email,
+      attempts.address_id AS attempt_address_id, attempts.email AS attempt_email,
+      attempts.replacement_address_id AS attempt_replacement_address_id,
+      attempts.replacement_email AS attempt_replacement_email
+    FROM mailcom_registration_pipeline_items AS items
+    JOIN mailcom_registration_pipelines AS pipelines ON pipelines.id = items.pipeline_id
+    LEFT JOIN mailcom_registration_pipeline_attempts AS attempts
+      ON attempts.id = items.current_attempt_id AND attempts.item_id = items.id
+    WHERE pipelines.status IN ('queued', 'running', 'cancel_requested')
+  `).all();
+  const matchesId = (value) => value != null && addressIds.has(Number(value));
+  const matchesEmail = (value) => emails.has(String(value || "").trim().toLowerCase());
+  return references.find((reference) => (
+    (accountWide && Number(reference.account_id) === normalizedAccountId)
+    || matchesId(reference.initial_address_id)
+    || matchesId(reference.current_address_id)
+    || matchesId(reference.attempt_address_id)
+    || matchesId(reference.attempt_replacement_address_id)
+    || matchesEmail(reference.source_email)
+    || matchesEmail(reference.initial_email)
+    || matchesEmail(reference.current_email)
+    || matchesEmail(reference.replacement_email)
+    || matchesEmail(reference.attempt_email)
+    || matchesEmail(reference.attempt_replacement_email)
+  )) || null;
+}
+
+function assertNoActiveMailcomPipelineReference(db, items, {
+  accountId = null,
+  message = "这个 Mail.com 邮箱正被无限注册提链流水线使用，请先取消并等待流水线结束",
+} = {}) {
+  if (!activeMailcomPipelineReference(db, items, { accountId })) return;
+  throw Object.assign(new Error(message), {
+    status: 409,
+    code: "MAILCOM_PIPELINE_DELETE_CONFLICT",
+  });
+}
+
+async function assertAddressRemovalAllowed(db, pickup, items, {
+  activeMessage = "所选地址中有邮箱正在注册，请等待任务结束后再删除",
+  inventoryMessage = "所选邮箱包含取件站售卖库存，请先从取件站下架",
+  mailcomPipelineMessage = "这个 Mail.com 邮箱正被无限注册提链流水线使用，请先取消并等待流水线结束",
+  mailcomAccountId = null,
+  checkActive = true,
+  checkInventoryForAll = false,
+  refreshItems = null,
+} = {}) {
+  assertNoActiveMailcomPipelineReference(db, items, {
+    accountId: mailcomAccountId,
+    message: mailcomPipelineMessage,
+  });
+  if (checkActive && items.some((item) => (
+    hasActiveAddressRegistration(db, item) || hasActiveMailcomPipelineAddress(db, item)
+  ))) {
+    throw Object.assign(new Error(activeMessage), { status: 409, code: "MAILCOM_PIPELINE_ADDRESS_BUSY" });
+  }
+  let checkedItems = items;
+  let inventoryCandidates = checkInventoryForAll ? checkedItems : checkedItems.filter(isLocallyImportedAlias);
+  if (!inventoryCandidates.length || !pickup.registrationProtectionEnabled()) return;
+  const inventory = await pickup.listStatuses();
+  if (typeof refreshItems === "function") {
+    checkedItems = refreshItems();
+    inventoryCandidates = checkInventoryForAll ? checkedItems : checkedItems.filter(isLocallyImportedAlias);
+  }
+  assertNoActiveMailcomPipelineReference(db, checkedItems, {
+    accountId: mailcomAccountId,
+    message: mailcomPipelineMessage,
+  });
+  const listed = new Set((inventory.items || [])
+    .filter((item) => ["ready", "sold"].includes(String(item.status || "").toLowerCase()))
+    .map((item) => String(item.email || "").toLowerCase()));
+  if (inventoryCandidates.some((item) => listed.has(String(item.address || "").toLowerCase()))) {
+    throw Object.assign(new Error(inventoryMessage), { status: 409 });
+  }
+  if (checkActive && checkedItems.some((item) => (
+    hasActiveAddressRegistration(db, item) || hasActiveMailcomPipelineAddress(db, item)
+  ))) {
+    throw Object.assign(new Error(activeMessage), { status: 409, code: "MAILCOM_PIPELINE_ADDRESS_BUSY" });
+  }
+}
+
 function addressQuery(db, { accountId, kind, strategy, q, page = 1, limit = 50 } = {}) {
-  const conditions = ["source_accounts.provider <> 'inbox_link'"];
+  const conditions = [
+    "source_accounts.provider <> 'inbox_link'",
+    `NOT ${isArchivedMailcomAliasSql()}`,
+  ];
   const params = [];
   if (accountId) { conditions.push("addresses.account_id = ?"); params.push(Number(accountId)); }
   if (kind && kind !== "all") { conditions.push("addresses.kind = ?"); params.push(kind); }
@@ -148,10 +366,15 @@ function addressQuery(db, { accountId, kind, strategy, q, page = 1, limit = 50 }
 function failedRegistrationAddressIds(db, { accountId, kind, strategy, q } = {}) {
   const conditions = [
     "source_accounts.provider <> 'inbox_link'",
+    `NOT ${isArchivedMailcomAliasSql()}`,
     `(addresses.kind = 'split' OR (
       source_accounts.provider = 'icloud'
       AND addresses.kind = 'official'
       AND addresses.strategy IN ('icloud_mail_alias', 'icloud_hide_my_email', 'icloud_custom_domain')
+    ) OR (
+      source_accounts.provider = 'mailcom'
+      AND addresses.kind = 'official'
+      AND addresses.strategy = 'mailcom_alias'
     ))`,
     `COALESCE((
       SELECT lower(latest_registration.status)
@@ -427,6 +650,31 @@ export function createApp(options = {}) {
     imapFactory: options.icloudImapFactory,
     parseMessage: options.icloudParseMessage,
   });
+  const mailcom = options.mailcom || new MailComImapClient({
+    db,
+    encryptionKey: options.dataEncryptionKey || process.env.DATA_ENCRYPTION_KEY,
+    imapFactory: options.mailcomImapFactory,
+    parseMessage: options.mailcomParseMessage,
+  });
+  const mailcomAliases = options.mailcomAliases || new MailcomAliasAutomationService({
+    db,
+    mailcom,
+    adapter: options.mailcomAliasAdapter || new MailcomAliasPlaywrightAdapter({
+      browserExecutable: options.mailcomBrowserExecutable,
+      headless: options.mailcomAliasHeadless,
+      loginTimeoutMs: options.mailcomAliasLoginTimeoutMs,
+      requestTimeoutMs: options.mailcomAliasRequestTimeoutMs,
+      cleanupTimeoutMs: options.mailcomAliasCleanupTimeoutMs,
+      browserSemaphore: options.mailcomAliasBrowserSemaphore,
+      maxConcurrentBrowsers: options.mailcomAliasMaxBrowsers,
+      browserWaitTimeoutMs: options.mailcomAliasBrowserWaitTimeoutMs,
+    }),
+    randomBytesFn: options.mailcomAliasRandomBytesFn,
+    maxValidationAttempts: options.mailcomAliasMaxValidationAttempts,
+    confirmationAttempts: options.mailcomAliasConfirmationAttempts,
+    confirmationIntervalMs: options.mailcomAliasConfirmationIntervalMs,
+    sleepFn: options.mailcomAliasSleepFn,
+  });
   const inboxLinkMailboxes = options.inboxLinkMailboxes || new InboxLinkMailboxService({
     db,
     encryptionKey: options.dataEncryptionKey ?? process.env.DATA_ENCRYPTION_KEY,
@@ -438,6 +686,7 @@ export function createApp(options = {}) {
       if (account.provider === "google") return gmail.scanInbox(account);
       if (account.provider === "microsoft") return graph.scanInbox(account);
       if (account.provider === "icloud") return icloud.scanInbox(account);
+      if (account.provider === "mailcom") return mailcom.scanInbox(account);
       if (account.provider === "inbox_link") return inboxLinkMailboxes.scanInbox(account);
       throw Object.assign(new Error(`不支持的邮箱提供商：${account.provider}`), {
         status: 409,
@@ -448,6 +697,16 @@ export function createApp(options = {}) {
   const extension = options.extension || new ExtensionService(db);
   const jobs = new JobRunner(db, inbox);
   const publicBaseUrl = options.publicBaseUrl || process.env.PUBLIC_BASE_URL || `http://localhost:${process.env.PORT || 4180}`;
+  const icloudPrivacyInternalKey = String(
+    options.icloudPrivacyInternalKey || process.env.ICLOUD_PRIVACY_INTERNAL_KEY || "",
+  ).trim();
+  const icloudPrivacy = options.icloudPrivacy || options.icloudPrivacyClient || new IcloudPrivacyClient({
+    baseUrl: options.icloudPrivacyBaseUrl || process.env.ICLOUD_PRIVACY_SERVICE_URL,
+    internalKey: icloudPrivacyInternalKey,
+    fetchFn: options.icloudPrivacyFetchFn || options.fetchFn,
+    requestTimeoutMs: options.icloudPrivacyRequestTimeoutMs,
+    createTimeoutMs: options.icloudPrivacyCreateTimeoutMs,
+  });
   const registrationClient = options.registrationClient || new RegistrationClient({
     baseUrl: process.env.REGISTRATION_SERVICE_URL,
     token: process.env.REGISTRATION_SERVICE_TOKEN,
@@ -466,6 +725,11 @@ export function createApp(options = {}) {
     checkoutProxyResolver: options.checkoutProxyResolver,
     trialProbe: options.trialProbe,
     trialProxyResolver: options.trialProxyResolver,
+    gbTrialProbe: options.gbTrialProbe,
+    gbTrialProxyResolver: options.gbTrialProxyResolver,
+    usTrialProbe: options.usTrialProbe,
+    usTrialProxyResolver: options.usTrialProxyResolver,
+    usDirectCountryProbe: options.usDirectCountryProbe,
     momoProbe: options.momoProbe,
     momoProxyResolver: options.momoProxyResolver,
   });
@@ -473,20 +737,70 @@ export function createApp(options = {}) {
     db,
     registration,
     baseUrl: options.pickupBaseUrl || process.env.PICKUP_SERVICE_URL,
-    publicUrl: options.pickupPublicUrl || process.env.PICKUP_PUBLIC_URL,
+    publicUrl: options.pickupPublicUrl || process.env.PICKUP_PUBLIC_URL || process.env.PICKUP_PUBLIC_BASE_URL,
     username: options.pickupUsername || process.env.PICKUP_ADMIN_USERNAME || process.env.ADMIN_USERNAME,
     password: options.pickupPassword || process.env.PICKUP_ADMIN_PASSWORD || process.env.ADMIN_PASSWORD,
     fetchFn: options.pickupFetchFn || options.fetchFn,
   });
   registration.pickup = pickup;
+  mailcomAliases.setPickup?.(pickup);
   const paymentLinks = options.paymentLinks || new PaymentLinkService({
     db,
     registration,
     baseUrl: options.paymentLinkBaseUrl ?? process.env.PAYMENT_LINK_SERVICE_URL,
-    password: options.paymentLinkPassword ?? (process.env.PAYMENT_LINK_SERVICE_PASSWORD || process.env.ADMIN_PASSWORD),
+    password: options.paymentLinkPassword ?? process.env.PAYMENT_LINK_SERVICE_PASSWORD,
     fetchFn: options.paymentLinkFetchFn || options.fetchFn,
     pollIntervalMs: options.paymentLinkPollIntervalMs,
     timeoutMs: options.paymentLinkTimeoutMs,
+    queueTimeoutMs: options.paymentLinkQueueTimeoutMs,
+  });
+  registration.paymentLinks = paymentLinks;
+  const paymentAgreements = options.paymentAgreements || new PaymentAgreementService({
+    db,
+    encryptionKey: options.dataEncryptionKey || process.env.DATA_ENCRYPTION_KEY,
+    baseUrl: options.paymentAgreementBaseUrl || process.env.PAYMENT_AGREEMENT_SERVICE_URL,
+    heroSmsEndpoint: options.heroSmsEndpoint || process.env.HEROSMS_ENDPOINT,
+    fetchFn: options.paymentAgreementFetchFn || options.fetchFn,
+    pollIntervalMs: options.paymentAgreementPollIntervalMs,
+    requestTimeoutMs: options.paymentAgreementRequestTimeoutMs,
+  });
+  const mailcomRegistrationPipelines = options.mailcomRegistrationPipelines
+    || new MailcomRegistrationPipelineService({
+      db,
+      registration,
+      paymentLinks,
+      paymentAgreements,
+      mailcomAliases,
+      pollIntervalMs: options.mailcomRegistrationPipelinePollIntervalMs,
+      retryBaseMs: options.mailcomRegistrationPipelineRetryBaseMs,
+      retryMaximumMs: options.mailcomRegistrationPipelineRetryMaximumMs,
+      sleepFn: options.mailcomRegistrationPipelineSleepFn,
+    });
+  const icRegistrationPipelines = options.icRegistrationPipelines || new IcRegistrationPipelineService({
+    db,
+    registration,
+    paymentLinks,
+    paymentAgreements,
+    icloudPrivacy,
+    pollIntervalMs: options.icRegistrationPipelinePollIntervalMs,
+  });
+  const openAiSms = options.openAiSms || new OpenAiSmsService({
+    db,
+    registration,
+    client: registrationClient,
+    paymentAgreements,
+    publicBaseUrl,
+    sleepFn: options.openAiSmsSleepFn,
+    nowFn: options.openAiSmsNowFn,
+    remotePollIntervalMs: options.openAiSmsRemotePollIntervalMs,
+    remoteFailureLimit: options.openAiSmsRemoteFailureLimit,
+    relayRateLimit: options.openAiSmsRelayRateLimit,
+    relayRateWindowMs: options.openAiSmsRelayRateWindowMs,
+    countryFetchFn: options.openAiSmsCountryFetchFn || options.fetchFn,
+    countryRankUrl: options.openAiSmsCountryRankUrl,
+    countryCacheTtlMs: options.openAiSmsCountryCacheTtlMs,
+    countryStaleTtlMs: options.openAiSmsCountryStaleTtlMs,
+    countryRequestTimeoutMs: options.openAiSmsCountryRequestTimeoutMs,
   });
   const nfapi = options.nfapi || new NfapiService({
     db,
@@ -542,10 +856,6 @@ export function createApp(options = {}) {
     secure: publicBaseUrl.startsWith("https://"),
   });
   const app = express();
-  const icloudPrivacyInternalKey = String(
-    options.icloudPrivacyInternalKey || process.env.ICLOUD_PRIVACY_INTERNAL_KEY || "",
-  ).trim();
-
   db.prepare("UPDATE automation_jobs SET status = 'queued', message = '服务重启后恢复任务', updated_at = ? WHERE status = 'running' AND type = 'inbox_scan'").run(nowIso());
   db.prepare(`
     UPDATE automation_jobs SET status = 'waiting_user', message = '等待官网连接器连接微软别名页面',
@@ -688,7 +998,26 @@ export function createApp(options = {}) {
     try { res.json(await registration.externalEmails(req.query)); } catch (error) { next(error); }
   });
 
+  app.get("/api/registration/openai-sms/relay/:token", async (req, res, next) => {
+    try {
+      res.setHeader("Cache-Control", "no-store");
+      res.json(await openAiSms.relay(req.params.token, { requestResend: req.query.resend === "1" }));
+    } catch (error) { next(error); }
+  });
+
   app.use("/api", auth.requireAdmin);
+
+  app.get(/^\/paypal-pay$/, auth.requireAdmin, (_req, res) => {
+    res.redirect(307, "/alias-hub/paypal-pay/");
+  });
+  app.all("/paypal-pay/*", auth.requireAdmin, async (req, res, next) => {
+    try {
+      const result = await paymentAgreements.proxyWorkbench(req);
+      return sendProxyResult(res, result);
+    } catch (error) {
+      return next(error);
+    }
+  });
 
   app.get("/api/microsoft-registration/config", (_req, res) => {
     res.json(microsoftRegistration.configuration(publicBaseUrl));
@@ -841,6 +1170,81 @@ export function createApp(options = {}) {
   app.post("/api/registration/payment-links/tasks", async (req, res, next) => {
     try { res.status(202).json(await paymentLinks.start(req.body || {})); } catch (error) { next(error); }
   });
+  app.get("/api/registration/payment-agreements/runtime", (_req, res, next) => {
+    try { res.json(paymentAgreements.runtime()); } catch (error) { next(error); }
+  });
+  app.put("/api/registration/payment-agreements/runtime", (req, res, next) => {
+    try { res.json(paymentAgreements.updateRuntime(req.body || {})); } catch (error) { next(error); }
+  });
+  app.get("/api/registration/payment-agreements/settings", (_req, res, next) => {
+    try { res.json(paymentAgreements.settings()); } catch (error) { next(error); }
+  });
+  app.put("/api/registration/payment-agreements/settings", (req, res, next) => {
+    try { res.json(paymentAgreements.updateSettings(req.body || {})); } catch (error) { next(error); }
+  });
+  app.post("/api/registration/payment-agreements/test", async (_req, res, next) => {
+    try { res.json(await paymentAgreements.heroBalance()); } catch (error) { next(error); }
+  });
+  app.get("/api/registration/ic-pipelines", (req, res, next) => {
+    try { res.json(icRegistrationPipelines.list(req.query || {})); } catch (error) { next(error); }
+  });
+  app.post("/api/registration/ic-pipelines", async (req, res, next) => {
+    try { res.status(202).json(await icRegistrationPipelines.start(req.body || {})); } catch (error) { next(error); }
+  });
+  app.get("/api/registration/ic-pipelines/mailbox-status", async (_req, res, next) => {
+    try { res.json(await icRegistrationPipelines.mailboxStatus()); } catch (error) { next(error); }
+  });
+  app.get("/api/registration/ic-pipelines/:id", (req, res, next) => {
+    try { res.json(icRegistrationPipelines.get(req.params.id)); } catch (error) { next(error); }
+  });
+  app.post("/api/registration/ic-pipelines/:id/cancel", async (req, res, next) => {
+    try { res.json(await icRegistrationPipelines.cancel(req.params.id)); } catch (error) { next(error); }
+  });
+  app.get("/api/registration/mailcom-pipelines/status", async (_req, res, next) => {
+    try { res.json(await mailcomRegistrationPipelines.status()); } catch (error) { next(error); }
+  });
+  app.get("/api/registration/mailcom-pipelines", (req, res, next) => {
+    try { res.json(mailcomRegistrationPipelines.list(req.query || {})); } catch (error) { next(error); }
+  });
+  app.post("/api/registration/mailcom-pipelines", async (req, res, next) => {
+    try { res.status(202).json(await mailcomRegistrationPipelines.start(req.body || {})); } catch (error) { next(error); }
+  });
+  app.get("/api/registration/mailcom-pipelines/:id/successful-accounts", (req, res, next) => {
+    try {
+      res.setHeader("Cache-Control", "no-store");
+      res.json(mailcomRegistrationPipelines.successfulAccounts(req.params.id, req.query || {}));
+    } catch (error) { next(error); }
+  });
+  app.get("/api/registration/mailcom-pipelines/:id", (req, res, next) => {
+    try { res.json(mailcomRegistrationPipelines.get(req.params.id)); } catch (error) { next(error); }
+  });
+  app.post("/api/registration/mailcom-pipelines/:id/cancel", async (req, res, next) => {
+    try { res.json(await mailcomRegistrationPipelines.cancel(req.params.id)); } catch (error) { next(error); }
+  });
+  app.get("/api/registration/openai-sms/settings", (_req, res, next) => {
+    try { res.json(openAiSms.settings()); } catch (error) { next(error); }
+  });
+  app.put("/api/registration/openai-sms/settings", (req, res, next) => {
+    try { res.json(openAiSms.updateSettings(req.body || {})); } catch (error) { next(error); }
+  });
+  app.get("/api/registration/openai-sms/countries", async (req, res, next) => {
+    try { res.json(await openAiSms.topCountries({ force: req.query.refresh === "1" })); } catch (error) { next(error); }
+  });
+  app.get("/api/registration/openai-sms/tasks", (req, res, next) => {
+    try { res.json(openAiSms.list(req.query || {})); } catch (error) { next(error); }
+  });
+  app.post("/api/registration/openai-sms/tasks", async (req, res, next) => {
+    try { res.status(202).json(await openAiSms.start(req.body || {})); } catch (error) { next(error); }
+  });
+  app.get("/api/registration/openai-sms/tasks/:id", async (req, res, next) => {
+    try { res.json(await openAiSms.getTask(req.params.id)); } catch (error) { next(error); }
+  });
+  app.post("/api/registration/openai-sms/tasks/:id/cancel", async (req, res, next) => {
+    try { res.json(await openAiSms.cancel(req.params.id)); } catch (error) { next(error); }
+  });
+  app.get("/api/registration/openai-sms/tasks/:id/events", async (req, res, next) => {
+    try { res.json(await openAiSms.events(req.params.id, req.query || {})); } catch (error) { next(error); }
+  });
   app.put("/api/registration/proxies", (req, res, next) => {
     try { res.json(registration.saveProxyPool(req.body?.proxies)); } catch (error) { next(error); }
   });
@@ -908,6 +1312,12 @@ export function createApp(options = {}) {
   });
   app.post("/api/registration/accounts/check-jp-trial", async (req, res, next) => {
     try { res.json(await registration.checkRegisteredAccountTrials(req.body || {})); } catch (error) { next(error); }
+  });
+  app.post("/api/registration/accounts/check-gb-trial", async (req, res, next) => {
+    try { res.json(await registration.checkRegisteredAccountGbTrials(req.body || {})); } catch (error) { next(error); }
+  });
+  app.post("/api/registration/accounts/check-us-trial", async (req, res, next) => {
+    try { res.json(await registration.checkRegisteredAccountUsTrials(req.body || {})); } catch (error) { next(error); }
   });
   app.post("/api/registration/accounts/check-momo", async (req, res, next) => {
     try { res.json(await registration.checkRegisteredAccountMomoEligibility(req.body || {})); } catch (error) { next(error); }
@@ -1027,6 +1437,47 @@ export function createApp(options = {}) {
     } catch (error) { next(error); }
   });
 
+  app.post("/api/mailcom/connect", async (req, res, next) => {
+    try {
+      if (["host", "port", "server", "secure"].some((key) => Object.hasOwn(req.body || {}, key))) {
+        throw Object.assign(new Error("Mail.com IMAP 服务地址由系统固定配置，不能自定义"), { status: 400 });
+      }
+      const reconnecting = Boolean(req.body?.accountId);
+      const result = await mailcom.connectAccount({
+        accountId: req.body?.accountId,
+        email: req.body?.email,
+        displayName: req.body?.displayName,
+        password: req.body?.password,
+      });
+      const recovery = mailcomRegistrationPipelines.scheduleSavedAuthorizationRecovery?.(
+        result?.account?.id,
+        { force: true },
+      ) || { scheduled: 0 };
+      res.status(reconnecting ? 200 : 201).json({
+        ...result,
+        authorization_recovery_scheduled: recovery.scheduled,
+      });
+    } catch (error) { next(error); }
+  });
+
+  app.post("/api/mailcom/import", async (req, res, next) => {
+    try {
+      const result = await importMailcomAccounts(mailcom, req.body || {});
+      const accountIds = (result.items || [])
+        .filter((item) => item.status === "connected")
+        .map((item) => item.account?.id)
+        .filter(Boolean);
+      const recovery = mailcomRegistrationPipelines.scheduleSavedAuthorizationRecovery?.(
+        accountIds,
+        { force: true },
+      ) || { scheduled: 0 };
+      res.status(201).json({
+        ...result,
+        authorization_recovery_scheduled: recovery.scheduled,
+      });
+    } catch (error) { next(error); }
+  });
+
   app.get("/api/overview", (_req, res) => {
     const accounts = db.prepare(`
       SELECT COUNT(*) AS total,
@@ -1087,10 +1538,12 @@ export function createApp(options = {}) {
     res.json({
       items,
       supportedDomains: microsoftDomains,
+      mailcomDomains,
       providers: {
         microsoft: { authMode: "oauth", supportsOfficialAliases: true, supportsPlusAliases: true, supportsImportedAliases: false, supportsDirectRegistration: false },
         google: { authMode: "oauth", supportsOfficialAliases: false, supportsPlusAliases: true, supportsImportedAliases: false, supportsDirectRegistration: false },
         icloud: { authMode: "app_password", supportsOfficialAliases: false, supportsPlusAliases: false, supportsImportedAliases: true, supportsDirectRegistration: true },
+        mailcom: { authMode: "password", supportsOfficialAliases: false, supportsPlusAliases: false, supportsImportedAliases: true, supportsDirectRegistration: true, supportsMailcomAliases: true, aliasLimit: 10 },
         inbox_link: { authMode: "inbox_link", supportsOfficialAliases: false, supportsPlusAliases: false, supportsImportedAliases: false, supportsDirectRegistration: false },
       },
     });
@@ -1116,7 +1569,14 @@ export function createApp(options = {}) {
     try {
       const row = db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(Number(req.params.id));
       if (!row) throw Object.assign(new Error("源头邮箱不存在"), { status: 404 });
-      const bases = db.prepare("SELECT * FROM addresses WHERE account_id = ? AND kind IN ('primary', 'official') ORDER BY kind = 'primary' DESC, created_at").all(row.id);
+      const bases = db.prepare("SELECT * FROM addresses WHERE account_id = ? AND kind IN ('primary', 'official') ORDER BY kind = 'primary' DESC, created_at")
+        .all(row.id)
+        .filter((item) => !(
+          row.provider === "mailcom"
+          && isMailcomAliasStrategy(item.strategy)
+          && item.status === "disabled"
+          && !item.remote_confirmed
+        ));
       const latestJobs = db.prepare("SELECT * FROM automation_jobs WHERE account_id = ? ORDER BY created_at DESC LIMIT 10").all(row.id).map(publicJob);
       res.json({ account: publicAccount(db, row), baseAddresses: bases, jobs: latestJobs });
     } catch (error) { next(error); }
@@ -1135,6 +1595,24 @@ export function createApp(options = {}) {
     try {
       const row = db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(Number(req.params.id));
       if (!row) throw Object.assign(new Error("源头邮箱不存在"), { status: 404 });
+      if (row.provider === "mailcom") {
+        const accountAddresses = () => db.prepare(`
+            SELECT addresses.*, source_accounts.provider AS source_provider
+            FROM addresses
+            JOIN source_accounts ON source_accounts.id = addresses.account_id
+            WHERE addresses.account_id = ?
+          `).all(row.id);
+        await assertAddressRemovalAllowed(db, pickup, accountAddresses(), {
+          activeMessage: "这个 Mail.com 母号仍有邮箱正在注册，请等待任务结束后再移除",
+          inventoryMessage: "这个 Mail.com 母号包含取件站售卖库存，请先从取件站下架",
+          checkInventoryForAll: true,
+          refreshItems: accountAddresses,
+        });
+        mailcomRegistrationPipelines.abandonRecoveries({
+          accountId: row.id,
+          reason: `Mail.com 母号 ${row.email} 已从系统移除，不再恢复别名轮换`,
+        });
+      }
       db.prepare("DELETE FROM source_accounts WHERE id = ?").run(row.id);
       res.status(204).end();
     } catch (error) { next(error); }
@@ -1198,6 +1676,54 @@ export function createApp(options = {}) {
     } catch (error) { next(error); }
   });
 
+  app.post("/api/accounts/:id/mailcom-aliases/import", async (req, res, next) => {
+    try {
+      const account = db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(Number(req.params.id));
+      if (!account) throw Object.assign(new Error("源头邮箱不存在"), { status: 404 });
+      if (account.provider !== "mailcom") {
+        throw Object.assign(new Error("这个源头邮箱不是 Mail.com 账号"), { status: 409, code: "MAILCOM_ACCOUNT_REQUIRED" });
+      }
+      const input = Array.isArray(req.body?.aliases) ? req.body.aliases : [];
+      if (req.body?.replace === true) {
+        const requested = new Set(input.map(normalizeMailcomEmail).filter(Boolean));
+        const invalid = input.some((value) => String(value || "").trim() && !normalizeMailcomEmail(value));
+        if (!invalid) {
+          const removalCandidates = () => db.prepare(`
+              SELECT addresses.*, source_accounts.provider AS source_provider
+              FROM addresses
+              JOIN source_accounts ON source_accounts.id = addresses.account_id
+              WHERE addresses.account_id = ? AND addresses.kind = 'official'
+                AND addresses.strategy = ? AND addresses.status = 'active'
+            `).all(account.id, MAILCOM_ALIAS_STRATEGY)
+              .filter((item) => !requested.has(String(item.address || "").toLowerCase()));
+          await assertAddressRemovalAllowed(db, pickup, removalCandidates(), {
+            activeMessage: "待移除的 Mail.com 别名中有邮箱正在注册，请等待任务结束后再同步",
+            inventoryMessage: "待移除的 Mail.com 别名包含取件站售卖库存，请先从取件站下架",
+            refreshItems: removalCandidates,
+          });
+          removalCandidates().forEach((item) => mailcomRegistrationPipelines.abandonRecoveries({
+            email: item.address,
+            reason: `Mail.com 别名 ${item.address} 已从系统移除，不再恢复轮换`,
+          }));
+        }
+      }
+      const items = importMailcomAliases(db, account, input, {
+        replace: req.body?.replace === true,
+        purpose: String(req.body?.purpose || "Mail.com 手工导入"),
+      });
+      res.json({
+        items,
+        account: publicAccount(db, db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(account.id)),
+      });
+    } catch (error) { next(error); }
+  });
+
+  app.post("/api/accounts/:id/mailcom-aliases/auto-create", async (req, res, next) => {
+    try {
+      res.json(await mailcomAliases.autoCreate(req.params.id, { domain: req.body?.domain }));
+    } catch (error) { next(error); }
+  });
+
   app.post("/api/accounts/:id/official-fill", (req, res, next) => {
     try {
       const account = db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(Number(req.params.id));
@@ -1241,7 +1767,12 @@ export function createApp(options = {}) {
   const queueInboxScan = (accountId) => {
     const account = db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(Number(accountId));
     if (!account) throw Object.assign(new Error("源头邮箱不存在"), { status: 404 });
-    if (account.status !== "connected") throw Object.assign(new Error("请先完成这个源头邮箱的连接验证"), { status: 409 });
+    const aliasAutomationOnly = account.provider === "mailcom"
+      && account.status === "action_required"
+      && String(account.limit_reason || "").startsWith("Mail.com 网页授权需要处理：");
+    if (account.status !== "connected" && !aliasAutomationOnly) {
+      throw Object.assign(new Error("请先完成这个源头邮箱的连接验证"), { status: 409 });
+    }
     const existing = db.prepare("SELECT * FROM automation_jobs WHERE account_id = ? AND type = 'inbox_scan' AND status IN ('queued', 'running') ORDER BY created_at DESC LIMIT 1").get(account.id);
     if (existing) return { existing: publicJob(existing), job: null };
     return { existing: null, job: jobs.createJob(account.id, "inbox_scan", {}, 0) };
@@ -1335,29 +1866,7 @@ export function createApp(options = {}) {
         JOIN source_accounts ON source_accounts.id = addresses.account_id
         WHERE addresses.id IN (${ids.map(() => "?").join(",")}) ${accountCondition}
       `).all(...params);
-      const activeRegistration = db.prepare(`
-        SELECT 1 FROM registration_jobs
-        WHERE (
-          registration_jobs.address_id = ?
-          OR (registration_jobs.base_address_id = ? AND registration_jobs.email = ? COLLATE NOCASE)
-        )
-          AND lower(registration_jobs.status) IN ('queued', 'pending', 'claimed', 'running', 'paused', 'cancel_requested')
-        LIMIT 1
-      `);
-      if (items.some((item) => activeRegistration.get(item.id, item.id, item.address))) {
-        throw Object.assign(new Error("所选地址中有邮箱正在注册，请等待任务结束后再删除"), { status: 409 });
-      }
-      const importedIcloud = items.filter((item) => item.source_provider === "icloud"
-        && item.kind === "official" && isIcloudImportedStrategy(item.strategy));
-      if (importedIcloud.length && pickup.registrationProtectionEnabled()) {
-        const inventory = await pickup.listStatuses();
-        const listed = new Set((inventory.items || [])
-          .filter((item) => ["ready", "sold"].includes(String(item.status || "").toLowerCase()))
-          .map((item) => String(item.email || "").toLowerCase()));
-        if (importedIcloud.some((item) => listed.has(String(item.address || "").toLowerCase()))) {
-          throw Object.assign(new Error("所选邮箱包含取件站售卖库存，请先从取件站下架"), { status: 409 });
-        }
-      }
+      await assertAddressRemovalAllowed(db, pickup, items);
       return res.json(deleteSelectedAddresses(db, { ids, accountId }));
     } catch (error) { next(error); }
   });
@@ -1370,25 +1879,35 @@ export function createApp(options = {}) {
         WHERE addresses.id = ?
       `).get(Number(req.params.id));
       if (!item) return res.status(204).end();
-      const importedIcloudAddress = item.source_provider === "icloud"
-        && item.kind === "official"
-        && isIcloudImportedStrategy(item.strategy);
-      if (item.kind !== "split" && !importedIcloudAddress) {
+      const importedAliasAddress = isLocallyImportedAlias(item);
+      if (item.kind !== "split" && !importedAliasAddress) {
         throw Object.assign(new Error("源头号和官方别名需要在对应邮箱官网删除"), { status: 409 });
       }
-      if (importedIcloudAddress && pickup.registrationProtectionEnabled()) {
-        const inventory = await pickup.listStatuses();
-        const listed = (inventory.items || []).find((entry) => String(entry.email || "").toLowerCase() === String(item.address || "").toLowerCase());
-        if (listed && ["ready", "sold"].includes(listed.status)) {
-          throw Object.assign(new Error("这个邮箱已进入售卖库存，请先从取件站下架"), { status: 409 });
-        }
+      await assertAddressRemovalAllowed(db, pickup, [item], {
+        activeMessage: "这个邮箱正在注册，请等待任务结束后再删除",
+        inventoryMessage: "这个邮箱已进入售卖库存，请先从取件站下架",
+        checkActive: item.source_provider === "mailcom",
+      });
+      if (item.source_provider === "mailcom" && importedAliasAddress) {
+        mailcomRegistrationPipelines.abandonRecoveries({
+          email: item.address,
+          reason: `Mail.com 别名 ${item.address} 已从系统移除，不再恢复轮换`,
+        });
+        db.prepare(`
+          UPDATE addresses
+          SET status = 'disabled', remote_confirmed = 0, updated_at = ?
+          WHERE id = ?
+        `).run(nowIso(), item.id);
+      } else {
+        db.prepare("DELETE FROM addresses WHERE id = ?").run(item.id);
       }
-      db.prepare("DELETE FROM addresses WHERE id = ?").run(item.id);
       audit(
         db,
         item.account_id,
-        importedIcloudAddress ? "alias" : "split",
-        importedIcloudAddress ? "移除本地 iCloud 地址映射" : "删除分裂地址",
+        importedAliasAddress ? "alias" : "split",
+        importedAliasAddress
+          ? `移除本地 ${item.source_provider === "mailcom" ? "Mail.com" : "iCloud"} 地址映射`
+          : "删除分裂地址",
         item.address,
         {},
       );
@@ -1737,6 +2256,9 @@ export function createApp(options = {}) {
     const settings = getSettings(db);
     delete settings.google_oauth_client_secret_encrypted;
     delete settings.nfapi_admin_api_key_encrypted;
+    delete settings.payment_agreement_herosms_api_key_encrypted;
+    delete settings.payment_agreement_country;
+    delete settings.payment_agreement_proxy_pool;
     delete settings.nfapi_import_defaults;
     delete settings.microsoft_registration_webhook_token_hash;
     res.json({
@@ -1746,9 +2268,11 @@ export function createApp(options = {}) {
       public_base_url: publicBaseUrl,
       auth_enabled: auth.enabled,
       supported_domains: microsoftDomains,
+      mailcom_domains: mailcomDomains,
       microsoft_oauth_mode: "authorization_code_pkce",
       microsoft_oauth_client: "Mailspring · Microsoft Graph Mail.Read",
       icloud_imap: icloudImapConfiguration,
+      mailcom_imap: mailcomImapConfiguration,
       extension_download: "/api/extension/download",
     });
   });
@@ -1773,11 +2297,16 @@ export function createApp(options = {}) {
   app.use((error, _req, res, _next) => {
     const status = Number(error.status) || (String(error.message).includes("UNIQUE constraint") ? 409 : 500);
     if (status >= 500) console.error(error);
-    const body = { error: status >= 500 ? "服务器处理请求失败" : error.message };
-    if (PUBLIC_AGENT_IDENTITY_ERROR_CODES.has(error?.code)) body.code = error.code;
+    const publicMailcomError = String(error?.code || "").startsWith("MAILCOM_");
+    const publicIcPipelineError = String(error?.code || "").startsWith("IC_PIPELINE_");
+    const body = { error: status >= 500 && !publicMailcomError && !publicIcPipelineError ? "服务器处理请求失败" : error.message };
+    if (PUBLIC_AGENT_IDENTITY_ERROR_CODES.has(error?.code) || publicMailcomError || publicIcPipelineError) {
+      body.code = error.code;
+    }
+    if (publicMailcomError && error?.partial) Object.assign(body, safeMailcomPartialError(error));
     res.status(status).json(body);
   });
-  return { app, db, graph, gmail, icloud, inbox, inboxLinkMailboxes, extension, jobs, registration, pickup, paymentLinks, nfapi, nfapiCredentialSync, microsoftRegistration, microsoftRegistrationRunner };
+  return { app, db, graph, gmail, icloud, icloudPrivacy, mailcom, mailcomAliases, inbox, inboxLinkMailboxes, extension, jobs, registration, pickup, paymentLinks, paymentAgreements, icRegistrationPipelines, mailcomRegistrationPipelines, openAiSms, nfapi, nfapiCredentialSync, microsoftRegistration, microsoftRegistrationRunner };
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
@@ -1787,13 +2316,43 @@ if (isMain) {
   const port = Number(process.env.PORT) || 4180;
   const host = process.env.HOST || "127.0.0.1";
   const server = runtime.app.listen(port, host, () => console.log(`AliasHub listening on http://${host}:${port}`));
-  const shutdown = async () => {
-    server.close();
-    await runtime.microsoftRegistrationRunner.stopForShutdown();
-    await runtime.nfapiCredentialSync?.close?.();
-    runtime.db.close();
-    process.exit(0);
+  let shutdownPromise = null;
+  const shutdown = () => {
+    if (shutdownPromise) return shutdownPromise;
+    shutdownPromise = (async () => {
+      await new Promise((resolve) => {
+        let settled = false;
+        let timer = null;
+        const finish = (error) => {
+          if (settled) return;
+          settled = true;
+          if (timer) clearTimeout(timer);
+          if (error) console.error("AliasHub HTTP shutdown failed:", error);
+          resolve();
+        };
+        timer = setTimeout(() => {
+          server.closeAllConnections?.();
+          finish(new Error("HTTP drain timed out"));
+        }, 45_000);
+        timer.unref?.();
+        server.close(finish);
+      });
+      await runtime.microsoftRegistrationRunner.stopForShutdown();
+      await runtime.icRegistrationPipelines?.close?.();
+      await runtime.mailcomRegistrationPipelines?.close?.();
+      await runtime.openAiSms.close();
+      await runtime.paymentAgreements.close();
+      await runtime.nfapiCredentialSync?.close?.();
+      runtime.db.close();
+    })().then(
+      () => process.exit(0),
+      (error) => {
+        console.error("AliasHub shutdown failed:", error);
+        process.exit(1);
+      },
+    );
+    return shutdownPromise;
   };
-  process.on("SIGTERM", shutdown);
-  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", () => { shutdown(); });
+  process.on("SIGINT", () => { shutdown(); });
 }

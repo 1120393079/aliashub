@@ -5,12 +5,23 @@ import base64
 import json
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from application.account_exports import AccountExportsService
-from application.phone_binding import PhoneBindingService, SmsApiPhoneCallback, parse_phone_bind_lines
+from application.phone_binding import (
+    PhoneBindEntry,
+    PhoneBindingService,
+    SmsApiPhoneCallback,
+    _fetch_phone_sms_code,
+    _platform_account_from_record,
+    default_phone_binder,
+    parse_phone_bind_lines,
+)
 from core.base_platform import Account
-from core.db import save_account
-from domain.accounts import AccountCreateCommand, AccountExportSelection
+from core.db import AccountOverviewModel, engine, save_account
+from domain.accounts import AccountCreateCommand, AccountExportSelection, AccountRecord
 from infrastructure.accounts_repository import AccountsRepository
+from sqlmodel import Session
 
 
 def _make_jwt(payload: dict) -> str:
@@ -83,6 +94,62 @@ def test_list_accounts_after_create(client):
     data = resp.json()
     assert data["total"] == 1
     assert data["items"][0]["email"] == "test@example.com"
+
+
+def test_list_accounts_paginates_before_hydrating_graphs(client, monkeypatch):
+    account_ids = [
+        _create_account(client, email=f"page-{index}@example.com").json()["id"]
+        for index in range(5)
+    ]
+    loaded_ids: list[int] = []
+    original_load_records = AccountsRepository._load_records
+
+    def record_loaded_ids(session, models):
+        loaded_ids.extend(int(model.id) for model in models)
+        return original_load_records(session, models)
+
+    monkeypatch.setattr(
+        AccountsRepository,
+        "_load_records",
+        staticmethod(record_loaded_ids),
+    )
+
+    response = client.get("/api/accounts", params={"page": 2, "page_size": 2})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 5
+    assert [item["id"] for item in payload["items"]] == [account_ids[2], account_ids[1]]
+    assert loaded_ids == [account_ids[2], account_ids[1]]
+
+
+def test_list_accounts_status_filter_keeps_total_order_and_pagination(client):
+    account_ids = [
+        _create_account(client, email=f"status-{index}@example.com").json()["id"]
+        for index in range(5)
+    ]
+    status_fields = [
+        "display_status",
+        "lifecycle_status",
+        "plan_state",
+        "validity_status",
+    ]
+    with Session(engine) as session:
+        for account_id, field in zip(account_ids[:4], status_fields):
+            overview = session.get(AccountOverviewModel, account_id)
+            setattr(overview, field, "target-status")
+            session.add(overview)
+        session.commit()
+
+    response = client.get(
+        "/api/accounts",
+        params={"status": "target-status", "page": 2, "page_size": 2},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 4
+    assert [item["id"] for item in payload["items"]] == [account_ids[1], account_ids[0]]
 
 
 def test_get_account_by_id(client):
@@ -474,19 +541,44 @@ def test_sms_api_phone_callback_returns_phone_then_unique_codes(monkeypatch):
     )[0]
     calls: list[set[str]] = []
 
-    def fake_fetch(phone_entry, *, excluded_pins=None):
-        calls.append(set(excluded_pins or set()))
+    def fake_fetch(phone_entry, *, excluded_pins=None, cancel_check=None, wait_seconds=30):
+        calls.append((set(excluded_pins or set()), cancel_check, wait_seconds))
         return "123456" if not excluded_pins else "654321"
 
     import application.phone_binding as phone_binding_module
 
     monkeypatch.setattr(phone_binding_module, "_fetch_phone_sms_code", fake_fetch)
-    callback = SmsApiPhoneCallback(entry)
+    cancel_check = lambda: False
+    callback = SmsApiPhoneCallback(entry, cancel_check=cancel_check, wait_seconds=900)
 
     assert callback() == "+12025550104"
     assert callback() == "123456"
     assert callback() == "654321"
-    assert calls == [set(), {"123456"}]
+    assert calls == [
+        (set(), cancel_check, 900),
+        ({"123456"}, cancel_check, 900),
+    ]
+
+
+def test_phone_sms_callback_requests_resend_only_after_a_rejected_code(monkeypatch):
+    captured_urls = []
+
+    def fake_fetch(*, url, **_kwargs):
+        captured_urls.append(url)
+        return "654321"
+
+    monkeypatch.setattr("platforms.chatgpt.payment._fetch_ctf_relay_code", fake_fetch)
+    entry = PhoneBindEntry(
+        "+12025550104",
+        "https://relay.example.invalid/openai/token?source=test",
+    )
+
+    assert _fetch_phone_sms_code(entry, excluded_pins=set()) == "654321"
+    assert _fetch_phone_sms_code(entry, excluded_pins={"123456"}) == "654321"
+    assert captured_urls == [
+        "https://relay.example.invalid/openai/token?source=test",
+        "https://relay.example.invalid/openai/token?source=test&resend=1",
+    ]
 
 
 def test_phone_binding_marks_selected_accounts_and_reports_phone_usage():
@@ -532,6 +624,169 @@ def test_phone_binding_marks_selected_accounts_and_reports_phone_usage():
     assert updated is not None
     assert updated.overview["phone_binding"]["status"] == "bound"
     assert updated.overview["phone_binding"]["phone"] == "+12025550104"
+    assert updated.overview["phone_binding"]["sms_source"] == "relay"
+    assert "sms_api" not in updated.overview["phone_binding"]
+    assert "key=abc" not in str(result)
+
+
+def test_phone_bind_parser_does_not_echo_relay_token_on_invalid_input():
+    relay_token = "super-secret-relay-token"
+
+    with pytest.raises(ValueError) as exc_info:
+        parse_phone_bind_lines(f"not-a-phone----https://relay.invalid/sms?token={relay_token}")
+
+    assert relay_token not in str(exc_info.value)
+
+
+def test_phone_binding_stops_before_later_accounts_after_cancel():
+    repository = AccountsRepository()
+    accounts = [
+        repository.create(
+            AccountCreateCommand(
+                platform="chatgpt",
+                email=f"cancel-bind-{index}@test.com",
+                password="TestPass123!",
+            )
+        )
+        for index in range(3)
+    ]
+    state = {"cancelled": False}
+    calls: list[int] = []
+
+    def fake_binder(account, phone_entry, *, cancel_check=None):
+        calls.append(account.id)
+        state["cancelled"] = True
+        return {"ok": True}
+
+    result = PhoneBindingService(repository=repository, binder=fake_binder).bind(
+        ids=[item.id for item in accounts],
+        phone_lines="2025550104----https://relay.example.invalid/sms?token=secret",
+        concurrency=1,
+        cancel_check=lambda: state["cancelled"],
+    )
+
+    assert calls == [accounts[0].id]
+    assert result["cancelled"] is True
+    assert result["total"] == 1
+    assert result["skipped_count"] == 2
+    assert result["success_count"] == 1
+    assert repository.get(accounts[0].id).overview["phone_binding"]["status"] == "bound"
+
+
+def test_platform_account_adapter_preserves_mailbox_graph_for_passwordless_login():
+    record = AccountRecord(
+        id=7,
+        platform="chatgpt",
+        email="passwordless@test.com",
+        password="",
+        overview={"plan": "free"},
+        credentials=[{"scope": "platform", "key": "refresh_token", "value": "rt_test"}],
+        provider_accounts=[{"provider_name": "dispose_inbox_link", "id": "mail-account"}],
+        provider_resources=[{"provider_name": "dispose_inbox_link", "resource_type": "mailbox"}],
+    )
+
+    adapted = _platform_account_from_record(record)
+
+    assert adapted.password == ""
+    assert adapted.extra["overview"] == {"plan": "free"}
+    assert adapted.extra["account_overview"] == {"plan": "free"}
+    assert adapted.extra["credentials"] == record.credentials
+    assert adapted.extra["refresh_token"] == "rt_test"
+    assert adapted.extra["provider_accounts"] == record.provider_accounts
+    assert adapted.extra["provider_resources"] == record.provider_resources
+
+
+def test_default_phone_binder_passes_mailbox_otp_callback_for_passwordless_account(monkeypatch):
+    repository = AccountsRepository()
+    account = repository.create(
+        AccountCreateCommand(
+            platform="chatgpt",
+            email="passwordless-bind@test.com",
+            password="",
+            provider_resources=[
+                {
+                    "provider_name": "dispose_inbox_link",
+                    "resource_type": "mailbox",
+                    "handle": "passwordless-bind@test.com",
+                }
+            ],
+        )
+    )
+    seen = {}
+
+    def otp_callback():
+        return "123456"
+
+    import application.phone_binding as phone_binding_module
+    import platforms.chatgpt.browser_register as browser_register_module
+
+    monkeypatch.setattr(
+        phone_binding_module,
+        "_build_mailbox_otp_callback",
+        lambda account, **kwargs: (otp_callback, ""),
+    )
+
+    class FakeBrowserRegister:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+        def _retry_oauth_fresh_browser(self, email, password):
+            seen["phone_callback"].report_success()
+            return {"access_token": "at_test", "account_id": "acct_test"}
+
+    monkeypatch.setattr(browser_register_module, "ChatGPTBrowserRegister", FakeBrowserRegister)
+    cancel_check = lambda: False
+
+    result = default_phone_binder(
+        account,
+        PhoneBindEntry("+12025550104", "https://relay.invalid/sms"),
+        cancel_check=cancel_check,
+    )
+
+    assert result["ok"] is True
+    assert seen["otp_callback"] is otp_callback
+    assert seen["cancel_check"] is cancel_check
+
+
+def test_default_phone_binder_requires_completed_phone_callback_and_always_cleans_up(monkeypatch):
+    repository = AccountsRepository()
+    account = repository.create(
+        AccountCreateCommand(
+            platform="chatgpt",
+            email="incomplete-bind@test.com",
+            password="TestPass123!",
+        )
+    )
+    state = {"cleaned": False}
+
+    import application.phone_binding as phone_binding_module
+    import platforms.chatgpt.browser_register as browser_register_module
+
+    class TrackingCallback:
+        def __init__(self, entry, **kwargs):
+            self.completed = False
+
+        def cleanup(self):
+            state["cleaned"] = True
+
+    class FakeBrowserRegister:
+        def __init__(self, **kwargs):
+            pass
+
+        def _retry_oauth_fresh_browser(self, email, password):
+            return {"access_token": "at_without_phone", "account_id": "acct_test"}
+
+    monkeypatch.setattr(phone_binding_module, "SmsApiPhoneCallback", TrackingCallback)
+    monkeypatch.setattr(browser_register_module, "ChatGPTBrowserRegister", FakeBrowserRegister)
+
+    result = default_phone_binder(
+        account,
+        PhoneBindEntry("+12025550104", "https://relay.invalid/sms"),
+    )
+
+    assert result["ok"] is False
+    assert "was not completed" in result["error"]
+    assert state["cleaned"] is True
 
 
 def test_phone_binding_persists_auth_tokens_returned_by_binder():

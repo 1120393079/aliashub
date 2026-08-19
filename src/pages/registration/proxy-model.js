@@ -1,4 +1,43 @@
-export function normalizeProxyDraft(text) {
+const PAYMENT_VENDOR_HOST = /(?:^|\.)(?:iprocket\.(?:io|pro)|iproyal\.(?:net|com)|1024proxy\.io)$/i;
+
+function splitPaymentProxy(value, separator) {
+  const parts = String(value).split(separator);
+  return parts.length >= 4
+    ? [parts[0], parts[1], parts[2], parts.slice(3).join(separator)]
+    : parts;
+}
+
+function paymentProxyFormat(value) {
+  const source = String(value || "").trim();
+  const encoded = source.match(/^(?:socks|http):\/\/([A-Za-z0-9+/_=-]+)$/i)?.[1];
+  if (encoded) {
+    try {
+      const decoded = atob(encoded.replace(/-/g, "+").replace(/_/g, "/"));
+      if ((decoded.match(/[A-Za-z0-9.-]+/g) || []).some((host) => PAYMENT_VENDOR_HOST.test(host))) {
+        return true;
+      }
+    } catch { return false; }
+  }
+  if (!source.includes("://") && !source.includes("@")) {
+    const separator = [":", "|", ",", ";"].find((item) => source.split(item).length >= 4);
+    if (separator) {
+      const parts = splitPaymentProxy(source, separator);
+      const candidates = [[parts[0], parts[1]], [parts[1], parts[0]], [parts[2], parts[1]], [parts[2], parts[3]]];
+      if (parts.length === 4 && parts.every(Boolean) && candidates.some(([host, port]) => (
+        PAYMENT_VENDOR_HOST.test(host) && /^\d+$/.test(port) && Number(port) >= 1 && Number(port) <= 65535
+      ))) return true;
+    }
+  }
+  try {
+    const parsed = new URL(source);
+    const authority = source.slice(source.indexOf("://") + 3);
+    return new Set(["socks:", "socks5:", "socks5h:"]).has(parsed.protocol)
+      && Boolean(parsed.hostname && parsed.port && parsed.username && parsed.password)
+      && authority.search(/[/?#]/) < 0;
+  } catch { return false; }
+}
+
+export function normalizeProxyDraft(text, { payment = false } = {}) {
   const proxies = [];
   const errors = [];
   const duplicateLines = [];
@@ -12,6 +51,16 @@ export function normalizeProxyDraft(text) {
     const reject = (reason) => errors.push({ line, reason });
     if (/[\u0000-\u001f\u007f-\u009f]/.test(source) || /\s|\\/.test(source)) {
       reject("地址中不能包含空格、换行或反斜杠");
+      return;
+    }
+
+    if (payment && paymentProxyFormat(source)) {
+      if (seen.has(source)) duplicateLines.push({ line, originalLine: seen.get(source) });
+      else {
+        seen.set(source, line);
+        proxies.push(source);
+        sourceLines.push(line);
+      }
       return;
     }
 

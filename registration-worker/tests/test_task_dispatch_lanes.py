@@ -1,10 +1,23 @@
+import threading
+
+import pytest
+from application import tasks as tasks_module
+from sqlmodel import Session
+
 from application.tasks import (
     TASK_STATUS_PENDING,
+    _take_phone_bind_secret,
     claim_next_runnable_task,
+    create_phone_bind_task,
     create_platform_action_task,
     create_register_task,
+    execute_task,
     get_task,
+    request_cancel,
 )
+from core.db import TaskModel, engine
+from services import task_runtime as runtime_module
+from services.task_runtime import TaskRuntime, TaskWorkerState
 
 
 def _refresh_at_task(account_id: int):
@@ -45,6 +58,145 @@ def test_registration_lane_keeps_its_own_parallel_limit():
     assert get_task(registration["task_id"])["status"] == TASK_STATUS_PENDING
 
 
+def test_registration_batch_uses_requested_parallel_limit_up_to_twenty():
+    tasks = [
+        create_register_task(
+            {
+                "platform": "chatgpt",
+                "email": f"batch-{index}@example.test",
+                "count": 1,
+                "extra": {
+                    "registration_batch_id": "batch-a",
+                    "registration_batch_concurrency": 2,
+                },
+            }
+        )
+        for index in range(3)
+    ]
+    lane = "chatgpt:registration:batch-a"
+
+    first = claim_next_runnable_task(max_parallel_per_platform=1)
+    second = claim_next_runnable_task(
+        running_platform_counts={lane: 1},
+        max_parallel_per_platform=1,
+    )
+    blocked = claim_next_runnable_task(
+        running_platform_counts={lane: 2},
+        max_parallel_per_platform=1,
+    )
+
+    assert first["id"] == tasks[0]["task_id"]
+    assert second["id"] == tasks[1]["task_id"]
+    assert first["runtime_lane"] == lane
+    assert second["runtime_lane"] == lane
+    assert blocked is None
+    assert get_task(tasks[2]["task_id"])["status"] == TASK_STATUS_PENDING
+
+
+def test_registration_batch_limit_is_clamped_and_requires_valid_batch_id():
+    valid = create_register_task(
+        {
+            "platform": "chatgpt",
+            "count": 1,
+            "extra": {
+                "registration_batch_id": "batch-twenty",
+                "registration_batch_concurrency": 99,
+            },
+        }
+    )
+    invalid = create_register_task(
+        {
+            "platform": "chatgpt",
+            "count": 1,
+            "extra": {
+                "registration_batch_id": "bad:batch",
+                "registration_batch_concurrency": 20,
+            },
+        }
+    )
+
+    assert claim_next_runnable_task(
+        running_platform_counts={
+            "chatgpt:registration:batch-twenty": 20,
+            "chatgpt:registration": 1,
+        },
+    ) is None
+    assert get_task(valid["task_id"])["status"] == TASK_STATUS_PENDING
+
+    claimed = claim_next_runnable_task(
+        running_platform_counts={
+            "chatgpt:registration:batch-twenty": 19,
+            "chatgpt:registration": 1,
+        },
+    )
+    assert claimed["id"] == valid["task_id"]
+
+    assert claim_next_runnable_task(
+        running_platform_counts={"chatgpt:registration": 1},
+    ) is None
+    assert get_task(invalid["task_id"])["status"] == TASK_STATUS_PENDING
+
+
+def test_task_runtime_has_twenty_global_slots():
+    assert TaskRuntime().max_parallel_tasks == 20
+
+
+def test_force_release_keeps_live_worker_counted_until_thread_exits(monkeypatch):
+    release_thread = threading.Event()
+    thread = threading.Thread(target=release_thread.wait)
+    thread.start()
+    runtime = TaskRuntime()
+    runtime._workers["task-live"] = TaskWorkerState(thread=thread, runtime_lane="chatgpt:registration")
+    monkeypatch.setattr(
+        runtime_module,
+        "force_release_task",
+        lambda task_id: {"task_id": task_id, "status": "cancelled"},
+    )
+
+    try:
+        result = runtime.release_task("task-live")
+        assert result["status"] == "cancelled"
+        assert "task-live" in runtime._workers
+    finally:
+        release_thread.set()
+        thread.join(timeout=1)
+        runtime._reap_workers()
+
+    assert "task-live" not in runtime._workers
+
+
+def test_registration_execution_semaphore_has_exactly_twenty_slots():
+    acquired = 0
+    try:
+        results = [
+            tasks_module._registration_execution_slots.acquire(blocking=False)
+            for _ in range(21)
+        ]
+        acquired = sum(results)
+        assert results == ([True] * 20) + [False]
+    finally:
+        for _ in range(acquired):
+            tasks_module._registration_execution_slots.release()
+
+
+def test_register_api_accepts_twenty_workers_and_rejects_twenty_one(client, monkeypatch):
+    import api.task_commands as task_commands_api
+
+    class FakeCommandService:
+        def create_register_task(self, payload):
+            return payload
+
+    monkeypatch.setattr(task_commands_api, "command_service", FakeCommandService())
+    payload = {"platform": "chatgpt", "count": 20, "concurrency": 20}
+
+    accepted = client.post("/api/tasks/register", json=payload)
+    rejected = client.post("/api/tasks/register", json={**payload, "concurrency": 21})
+
+    assert accepted.status_code == 200
+    assert accepted.json()["concurrency"] == 20
+    assert rejected.status_code == 422
+
+
 def test_at_recovery_still_respects_same_account_lock():
     recovery = _refresh_at_task(185)
 
@@ -68,3 +220,212 @@ def test_at_recovery_lane_can_use_its_dedicated_parallel_limit():
 
     assert claimed["id"] == recovery["task_id"]
     assert claimed["runtime_lane"] == "chatgpt:at_recovery"
+
+
+def _phone_bind_task(account_id: int):
+    return create_phone_bind_task(
+        {
+            "platform": "chatgpt",
+            "ids": [account_id],
+            "fallback_ids": [],
+            "phone_lines": "+12025550104----https://relay.example.invalid/sms",
+        }
+    )
+
+
+def test_phone_bind_uses_dedicated_three_worker_lane_and_account_lock():
+    task = _phone_bind_task(201)
+
+    claimed = claim_next_runnable_task(
+        running_platform_counts={"chatgpt:phone_bind": 2, "chatgpt": 1},
+        max_parallel_per_platform=1,
+    )
+
+    assert claimed["id"] == task["task_id"]
+    assert claimed["runtime_lane"] == "chatgpt:phone_bind"
+    assert claimed["account_keys"] == ["account:201"]
+
+
+def test_phone_bind_lane_stops_at_three_running_tasks():
+    task = _phone_bind_task(202)
+
+    claimed = claim_next_runnable_task(
+        running_platform_counts={"chatgpt:phone_bind": 3},
+        max_parallel_per_platform=1,
+    )
+
+    assert claimed is None
+    assert get_task(task["task_id"])["status"] == TASK_STATUS_PENDING
+
+
+def test_phone_bind_creation_rejects_nonterminal_duplicate_account():
+    first = _phone_bind_task(203)
+
+    with pytest.raises(ValueError, match="203"):
+        _phone_bind_task(203)
+
+    with Session(engine) as session:
+        model = session.get(TaskModel, first["task_id"])
+        model.status = "succeeded"
+        session.add(model)
+        session.commit()
+
+    replacement = _phone_bind_task(203)
+    assert replacement["status"] == TASK_STATUS_PENDING
+
+
+def test_phone_bind_api_maps_duplicate_to_conflict(client, monkeypatch):
+    import api.task_commands as task_commands_api
+
+    class FakeCommandService:
+        def create_phone_bind_task(self, payload):
+            raise ValueError("账号已有进行中的手机绑定任务: 204")
+
+    monkeypatch.setattr(task_commands_api, "command_service", FakeCommandService())
+
+    response = client.post(
+        "/api/tasks/phone-bind",
+        json={
+            "ids": [204],
+            "phone_lines": "+12025550104----https://relay.example.invalid/sms",
+        },
+    )
+
+    assert response.status_code == 409
+    assert "204" in response.json()["detail"]
+
+
+def test_phone_bind_api_validates_sms_wait_seconds(client):
+    response = client.post(
+        "/api/tasks/phone-bind",
+        json={
+            "ids": [205],
+            "phone_lines": "+12025550104----https://relay.example.invalid/sms",
+            "sms_wait_seconds": 29,
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_phone_bind_persists_only_a_transient_secret_reference():
+    relay_url = "https://relay.example.invalid/openai/secret-token-value"
+    task = create_phone_bind_task({
+        "task_id": "ahpb_0123456789abcdefghijklmnopqrstuv",
+        "platform": "chatgpt",
+        "ids": [206],
+        "fallback_ids": [],
+        "phone_lines": f"+12025550104----{relay_url}",
+        "browser_mode": "camoufox_headed",
+        "concurrency": 1,
+        "sms_wait_seconds": 90,
+    })
+
+    with Session(engine) as session:
+        payload = session.get(TaskModel, task["task_id"]).get_payload()
+
+    assert "phone_lines" not in payload
+    assert payload["phone_lines_ref"]
+    assert relay_url not in str(payload)
+    assert _take_phone_bind_secret(payload["phone_lines_ref"]) == f"+12025550104----{relay_url}"
+
+
+def test_phone_bind_external_task_id_is_idempotent_and_fingerprint_checked():
+    payload = {
+        "task_id": "ahpb_1123456789abcdefghijklmnopqrstuv",
+        "platform": "chatgpt",
+        "ids": [207],
+        "fallback_ids": [],
+        "phone_lines": "+12025550104----https://relay.example.invalid/first-secret",
+        "browser_mode": "camoufox_headed",
+        "bit_profile_id": "",
+        "concurrency": 1,
+        "sms_wait_seconds": 90,
+    }
+    first = create_phone_bind_task(payload)
+    replay = create_phone_bind_task(payload)
+
+    assert replay["task_id"] == first["task_id"]
+    with Session(engine) as session:
+        assert session.get(TaskModel, first["task_id"]) is not None
+
+    with pytest.raises(ValueError, match="different request"):
+        create_phone_bind_task({**payload, "bit_profile_id": "different-profile"})
+
+    request_cancel(first["task_id"])
+
+
+def test_phone_bind_executor_consumes_secret_without_persisting_it(monkeypatch):
+    relay_url = "https://relay.example.invalid/openai/executor-secret"
+    captured = {}
+
+    def fake_bind(_self, **kwargs):
+        captured.update(kwargs)
+        return {
+            "total": 1,
+            "success_count": 1,
+            "failure_count": 0,
+            "results": [{
+                "account_id": 208,
+                "email": "bind@example.test",
+                "phone": "+12025550104",
+                "ok": True,
+                "error": "",
+            }],
+            "phones": [],
+        }
+
+    monkeypatch.setattr("application.tasks.PhoneBindingService.bind", fake_bind)
+    task = create_phone_bind_task({
+        "task_id": "ahpb_2123456789abcdefghijklmnopqrstuv",
+        "platform": "chatgpt",
+        "ids": [208],
+        "fallback_ids": [],
+        "phone_lines": f"+12025550104----{relay_url}",
+        "browser_mode": "camoufox_headed",
+        "concurrency": 1,
+        "sms_wait_seconds": 90,
+    })
+    with Session(engine) as session:
+        secret_ref = session.get(TaskModel, task["task_id"]).get_payload()["phone_lines_ref"]
+
+    execute_task(task["task_id"])
+
+    assert captured["phone_lines"] == f"+12025550104----{relay_url}"
+    assert get_task(task["task_id"])["status"] == "succeeded"
+    assert _take_phone_bind_secret(secret_ref) == ""
+    with Session(engine) as session:
+        model = session.get(TaskModel, task["task_id"])
+        assert relay_url not in model.payload_json
+        assert relay_url not in model.result_json
+
+
+def test_phone_bind_cancel_and_missing_secret_fail_closed_without_echoing_url():
+    relay_url = "https://relay.example.invalid/openai/missing-secret"
+    cancelled = create_phone_bind_task({
+        "task_id": "ahpb_3123456789abcdefghijklmnopqrstuv",
+        "platform": "chatgpt",
+        "ids": [209],
+        "phone_lines": f"+12025550104----{relay_url}",
+    })
+    with Session(engine) as session:
+        cancelled_ref = session.get(TaskModel, cancelled["task_id"]).get_payload()["phone_lines_ref"]
+    request_cancel(cancelled["task_id"])
+    assert _take_phone_bind_secret(cancelled_ref) == ""
+
+    missing = create_phone_bind_task({
+        "task_id": "ahpb_4123456789abcdefghijklmnopqrstuv",
+        "platform": "chatgpt",
+        "ids": [210],
+        "phone_lines": f"+12025550104----{relay_url}",
+    })
+    with Session(engine) as session:
+        missing_ref = session.get(TaskModel, missing["task_id"]).get_payload()["phone_lines_ref"]
+    assert _take_phone_bind_secret(missing_ref)
+
+    execute_task(missing["task_id"])
+
+    result = get_task(missing["task_id"])
+    assert result["status"] == "failed"
+    assert "临时接码凭据已失效" in result["error"]
+    assert relay_url not in str(result)

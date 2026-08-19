@@ -1,9 +1,10 @@
 export class RegistrationClient {
-  constructor({ baseUrl, token, fetchFn = globalThis.fetch, accountTimeoutMs = 15_000 } = {}) {
+  constructor({ baseUrl, token, fetchFn = globalThis.fetch, accountTimeoutMs = 15_000, taskTimeoutMs = 30_000 } = {}) {
     this.baseUrl = String(baseUrl || "").replace(/\/$/, "");
     this.token = String(token || "");
     this.fetchFn = fetchFn;
     this.accountTimeoutMs = Math.max(1, Math.min(120_000, Number(accountTimeoutMs) || 15_000));
+    this.taskTimeoutMs = Math.max(1, Math.min(120_000, Number(taskTimeoutMs) || 30_000));
   }
 
   get configured() {
@@ -52,6 +53,10 @@ export class RegistrationClient {
 
   createTask(payload) {
     return this.request("/api/tasks/register", { method: "POST", body: payload });
+  }
+
+  createPhoneBindTask(payload) {
+    return this.request("/api/tasks/phone-bind", { method: "POST", body: payload, timeoutMs: this.taskTimeoutMs });
   }
 
   getRegistrationQueueControl() {
@@ -104,11 +109,13 @@ export class RegistrationClient {
   }
 
   getTask(taskId) {
-    return this.request(`/api/tasks/${encodeURIComponent(taskId)}`);
+    return this.request(`/api/tasks/${encodeURIComponent(taskId)}`, { timeoutMs: this.taskTimeoutMs });
   }
 
   getTaskEvents(taskId, since = 0) {
-    return this.request(`/api/tasks/${encodeURIComponent(taskId)}/events?since=${Number(since) || 0}&limit=300`);
+    return this.request(`/api/tasks/${encodeURIComponent(taskId)}/events?since=${Number(since) || 0}&limit=300`, {
+      timeoutMs: this.taskTimeoutMs,
+    });
   }
 
   getActionTask(taskId) {
@@ -120,7 +127,10 @@ export class RegistrationClient {
   }
 
   cancelTask(taskId) {
-    return this.request(`/api/tasks/${encodeURIComponent(taskId)}/cancel`, { method: "POST" });
+    return this.request(`/api/tasks/${encodeURIComponent(taskId)}/cancel`, {
+      method: "POST",
+      timeoutMs: this.taskTimeoutMs,
+    });
   }
 
   pauseTask(taskId) {

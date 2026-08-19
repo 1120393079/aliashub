@@ -1,14 +1,40 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
-import { AlertCircle, Check, ChevronLeft, ChevronRight, Cloud, Link2, LoaderCircle, X } from "lucide-react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { AlertCircle, Check, ChevronLeft, ChevronRight, Cloud, Link2, LoaderCircle, Mail, X } from "lucide-react";
 
 const ToastContext = createContext(() => {});
 
 export function ToastProvider({ children }) {
   const [toasts, setToasts] = useState([]);
+  const activeToastIds = useRef(new Map());
+  const toastKeys = useRef(new Map());
+  const toastTimers = useRef(new Map());
+  const dismiss = useCallback((id) => {
+    const key = toastKeys.current.get(id);
+    if (key && activeToastIds.current.get(key) === id) activeToastIds.current.delete(key);
+    toastKeys.current.delete(id);
+    const timer = toastTimers.current.get(id);
+    if (timer) window.clearTimeout(timer);
+    toastTimers.current.delete(id);
+    setToasts((current) => current.filter((item) => item.id !== id));
+  }, []);
   const notify = useCallback((message, type = "success") => {
+    const normalizedMessage = String(message || "");
+    const normalizedType = String(type || "success");
+    const key = `${normalizedType}\u0000${normalizedMessage}`;
+    const activeId = activeToastIds.current.get(key);
+    if (activeId) return activeId;
     const id = Date.now() + Math.random();
-    setToasts((current) => [...current, { id, message, type }]);
-    window.setTimeout(() => setToasts((current) => current.filter((item) => item.id !== id)), 3200);
+    activeToastIds.current.set(key, id);
+    toastKeys.current.set(id, key);
+    setToasts((current) => [...current, { id, message: normalizedMessage, type: normalizedType }]);
+    toastTimers.current.set(id, window.setTimeout(() => dismiss(id), 3200));
+    return id;
+  }, [dismiss]);
+  useEffect(() => () => {
+    toastTimers.current.forEach((timer) => window.clearTimeout(timer));
+    toastTimers.current.clear();
+    toastKeys.current.clear();
+    activeToastIds.current.clear();
   }, []);
   return (
     <ToastContext.Provider value={notify}>
@@ -18,7 +44,7 @@ export function ToastProvider({ children }) {
           <div className={`toast toast-${toast.type}`} key={toast.id}>
             {toast.type === "error" ? <AlertCircle size={17} /> : <Check size={17} />}
             <span>{toast.message}</span>
-            <button className="bare-button" aria-label="关闭提示" onClick={() => setToasts((items) => items.filter((item) => item.id !== toast.id))}><X size={15} /></button>
+            <button className="bare-button" aria-label="关闭提示" onClick={() => dismiss(toast.id)}><X size={15} /></button>
           </div>
         ))}
       </div>
@@ -42,6 +68,10 @@ export function ICloudMark({ size = 34 }) {
   return <span className="provider-mark icloud-mark" style={{ "--mark-size": `${size}px` }} aria-hidden="true"><Cloud size={Math.max(12, Number(size) * 0.62)} /></span>;
 }
 
+export function MailComMark({ size = 34 }) {
+  return <span className="provider-mark mailcom-mark" style={{ "--mark-size": `${size}px` }} aria-hidden="true"><Mail size={Math.max(12, Number(size) * 0.56)} /><i /></span>;
+}
+
 export function InboxLinkMark({ size = 34 }) {
   return <span className="provider-mark inbox-link-mark" style={{ "--mark-size": `${size}px` }} aria-hidden="true"><Link2 size={Math.max(12, Number(size) * 0.58)} /></span>;
 }
@@ -49,6 +79,7 @@ export function InboxLinkMark({ size = 34 }) {
 export function ProviderMark({ provider, size = 34 }) {
   if (provider === "google") return <GoogleMark size={size} />;
   if (provider === "icloud") return <ICloudMark size={size} />;
+  if (provider === "mailcom") return <MailComMark size={size} />;
   if (provider === "inbox_link") return <InboxLinkMark size={size} />;
   return <MicrosoftMark size={size} />;
 }

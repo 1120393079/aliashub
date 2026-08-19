@@ -50,6 +50,18 @@ Core mode deliberately leaves `REGISTRATION_SERVICE_URL` and
 mailbox, alias, address, verification-code, and connector features remain
 available.
 
+The AliasHub image installs Debian Chromium and its setuid sandbox for the
+Mail.com official-alias workflow. Compose pins
+`MAILCOM_BROWSER_EXECUTABLE=/usr/bin/chromium`, runs AliasHub as the configured
+non-root UID/GID, enables an init process to reap browser children, and assigns
+a 1 GiB `/dev/shm`. A native installation that uses Google Chrome instead must
+set `MAILCOM_BROWSER_EXECUTABLE=/usr/bin/google-chrome` in `.env`.
+
+Chromium is intentionally part of the core runtime image so Mail.com alias
+creation works without mounting a host browser. This adds roughly 100--150 MB
+of compressed download and several hundred MB to the unpacked image; deployments
+that do not use this feature still pay that image-size cost.
+
 ## Full suite Docker Compose
 
 The repository includes the complete registration worker, browser runtime, Mail

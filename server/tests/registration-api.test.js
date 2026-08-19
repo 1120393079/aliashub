@@ -6,6 +6,8 @@ import test from "node:test";
 import Database from "better-sqlite3";
 import { createDatabase, createSourceAccount, getSetting, nowIso, setSetting } from "../db.js";
 import { createApp } from "../index.js";
+import { DIRECT_TRIAL_ROUTE } from "../jp-trial-eligibility-probe.js";
+import { RegistrationService } from "../registration-service.js";
 import { jsonRequest } from "./http-harness.js";
 
 class FakeRegistrationClient {
@@ -19,6 +21,7 @@ class FakeRegistrationClient {
     this.proxyInspectionError = null;
     this.proxyInspectionHandler = null;
     this.createError = null;
+    this.accountCreateError = null;
     this.accountActions = [];
     this.actionTasks = new Map();
   }
@@ -123,6 +126,11 @@ class FakeRegistrationClient {
   }
 
   async createAccount(payload) {
+    if (this.accountCreateError) {
+      throw typeof this.accountCreateError === "function"
+        ? this.accountCreateError(payload)
+        : this.accountCreateError;
+    }
     const account = {
       id: 2_000 + this.importedAccounts.length,
       ...payload,
@@ -241,6 +249,166 @@ test("registration job migration preserves legacy occupied alias history", () =>
   }
 });
 
+test("RegistrationService createJobs preserves exact addressIds and rejects invalid selections", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "aliashub-registration-address-ids-test-"));
+  const db = createDatabase({ filename: path.join(directory, "test.db"), seedDemo: false });
+  const client = new FakeRegistrationClient();
+  const registration = new RegistrationService({
+    db,
+    graph: {},
+    client,
+    publicBaseUrl: "https://alias.test/alias-hub",
+    pickup: { registrationProtectionEnabled: () => false },
+  });
+
+  try {
+    const account = createSourceAccount(db, { email: "exact-owner@icloud.com", provider: "icloud" });
+    const otherAccount = createSourceAccount(db, { email: "other-owner@icloud.com", provider: "icloud" });
+    db.prepare("UPDATE source_accounts SET status = 'connected', updated_at = ? WHERE id IN (?, ?)")
+      .run(nowIso(), account.id, otherAccount.id);
+    const insertAddress = db.prepare(`
+      INSERT INTO addresses (
+        account_id, address, kind, status, strategy, label, purpose, remote_confirmed, created_at, updated_at
+      ) VALUES (?, ?, 'official', ?, 'icloud_hide_my_email', '精确注册地址测试', 'ChatGPT 注册', 1, ?, ?)
+    `);
+    const addAddress = (ownerId, email, status = "active") => Number(insertAddress.run(
+      ownerId,
+      email,
+      status,
+      nowIso(),
+      nowIso(),
+    ).lastInsertRowid);
+    const firstId = addAddress(account.id, "exact-first@icloud.com");
+    const secondId = addAddress(account.id, "exact-second@icloud.com");
+    const thirdId = addAddress(account.id, "exact-third@icloud.com");
+    const foreignId = addAddress(otherAccount.id, "exact-foreign@icloud.com");
+    const disabledId = addAddress(account.id, "exact-disabled@icloud.com", "disabled");
+    const requestedIds = [thirdId, firstId, secondId];
+
+    const jobs = await registration.createJobs({
+      accountId: account.id,
+      addressIds: requestedIds,
+      count: requestedIds.length,
+      concurrency: 20,
+      browserMode: "headless",
+      proxySelection: "direct",
+    });
+
+    assert.deepEqual(jobs.map((item) => item.address_id), requestedIds);
+    assert.deepEqual(jobs.map((item) => item.email), [
+      "exact-third@icloud.com",
+      "exact-first@icloud.com",
+      "exact-second@icloud.com",
+    ]);
+    assert.deepEqual(client.created.map((item) => item.email), jobs.map((item) => item.email));
+    assert.ok(client.created.every((item) => item.extra.registration_batch_concurrency === 3));
+
+    const createdBeforeRejections = client.created.length;
+    await assert.rejects(
+      registration.createJobs({
+        accountId: account.id,
+        addressIds: [firstId],
+        count: 1,
+        concurrency: 21,
+      }),
+      (error) => error?.status === 400 && /1 到 20/.test(error.message),
+    );
+    await assert.rejects(
+      registration.createJobs({ accountId: account.id, addressIds: [firstId, firstId], count: 2 }),
+      (error) => error?.status === 400 && /无效或重复/.test(error.message),
+    );
+    await assert.rejects(
+      registration.createJobs({ accountId: account.id, addressIds: [foreignId], count: 1 }),
+      (error) => error?.status === 409 && /不可用/.test(error.message),
+    );
+    await assert.rejects(
+      registration.createJobs({ accountId: account.id, addressIds: [disabledId], count: 1 }),
+      (error) => error?.status === 409 && /不可用/.test(error.message),
+    );
+    assert.equal(client.created.length, createdBeforeRejections);
+  } finally {
+    db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("registered account deletion accepts more than 500 accounts", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "aliashub-registration-bulk-delete-test-"));
+  const db = createDatabase({ filename: path.join(directory, "test.db"), seedDemo: false });
+  const deletedIds = new Set();
+
+  try {
+    const source = createSourceAccount(db, { email: "bulk-delete-owner@outlook.com" });
+    const base = db.prepare("SELECT * FROM addresses WHERE account_id = ? AND kind = 'primary'").get(source.id);
+    const timestamp = nowIso();
+    const accounts = new Map();
+    const accountIds = Array.from({ length: 802 }, (_, index) => 50_000 + index);
+    const jobIds = [];
+    const insertJob = db.prepare(`
+      INSERT INTO registration_jobs (
+        account_id, address_id, base_address_id, email, external_account_id, status, stage,
+        browser_mode, proxy_label, progress_current, progress_total, message,
+        created_at, updated_at, finished_at
+      ) VALUES (?, ?, ?, ?, ?, 'completed', 'completed', 'headless', '直连', 1, 1,
+        '批量删除测试', ?, ?, ?)
+    `);
+    const insertMetadata = db.prepare(`
+      INSERT INTO registered_account_metadata (
+        external_account_id, email, custom_name, group_name, created_at, updated_at
+      ) VALUES (?, ?, '', '批量删除测试', ?, ?)
+    `);
+    db.transaction(() => {
+      accountIds.forEach((id, index) => {
+        const email = `bulk-delete-${index + 1}@example.com`;
+        accounts.set(id, { id, email, platform: "chatgpt" });
+        jobIds.push(Number(insertJob.run(
+          source.id,
+          base.id,
+          base.id,
+          email,
+          String(id),
+          timestamp,
+          timestamp,
+          timestamp,
+        ).lastInsertRowid));
+        insertMetadata.run(String(id), email, timestamp, timestamp);
+      });
+    })();
+
+    const registration = new RegistrationService({
+      db,
+      graph: {},
+      client: {
+        async getAccount(id) {
+          return accounts.get(Number(id)) || null;
+        },
+        async deleteAccount(id) {
+          deletedIds.add(Number(id));
+          return { ok: true };
+        },
+      },
+      pickup: { registrationProtectionEnabled: () => false },
+    });
+
+    assert.throws(
+      () => registration.deleteJobs({ ids: jobIds.slice(0, 501) }),
+      (error) => error?.status === 400 && /单次最多删除 500 个注册记录/.test(error.message),
+    );
+
+    const result = await registration.deleteRegisteredAccounts({ ids: accountIds });
+    assert.equal(result.requested, 802);
+    assert.equal(result.deleted, 802);
+    assert.deepEqual(result.deleted_ids, accountIds);
+    assert.deepEqual(result.failed, []);
+    assert.equal(deletedIds.size, 802);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM registered_account_metadata").get().count, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM registration_jobs").get().count, 802);
+  } finally {
+    db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("registration integration generates isolated addresses and exposes mailbox messages", async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "aliashub-registration-api-test-"));
   const db = createDatabase({ filename: path.join(directory, "test.db"), seedDemo: false });
@@ -257,10 +425,15 @@ test("registration integration generates isolated addresses and exposes mailbox 
       return scanResult;
     },
   };
+  const inboxLinkFetchUrls = [];
   const checkoutProbeCalls = [];
   const checkoutProxy = "http://de-user:de-password@de-proxy.example:8080";
   const trialProbeCalls = [];
   const trialProxy = "http://jp-user:jp-password@jp-proxy.example:8080";
+  const gbTrialProbeCalls = [];
+  const gbTrialProxy = "http://gb-user:gb-password@gb-proxy.example:8080";
+  const usTrialProbeCalls = [];
+  const usTrialProxy = "http://us-user:us-password@us-proxy.example:8080";
   const momoProbeCalls = [];
   const momoProxy = "http://vn-user:vn-password@vn-proxy.example:8080";
   const runtime = createApp({
@@ -268,6 +441,14 @@ test("registration integration generates isolated addresses and exposes mailbox 
     graph,
     registrationClient: client,
     publicBaseUrl: "https://alias.test/alias-hub",
+    dataEncryptionKey: "registration-api-test-encryption-key",
+    inboxLinkFetchFn: async (input) => {
+      inboxLinkFetchUrls.push(String(input));
+      return new Response(JSON.stringify({ messages: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
     checkoutProxyResolver: async () => checkoutProxy,
     checkoutProbe: async ({ accessToken, proxy }) => {
       checkoutProbeCalls.push({ accessToken, proxy });
@@ -284,6 +465,30 @@ test("registration integration generates isolated addresses and exposes mailbox 
         amountDue: eligible ? 0 : 1_500,
         currency: "JPY",
         evidence: "checkout.jp.plus.final_amount_due.v1",
+      };
+    },
+    gbTrialProxyResolver: async () => gbTrialProxy,
+    gbTrialProbe: async ({ accessToken, proxy }) => {
+      gbTrialProbeCalls.push({ accessToken, proxy });
+      const accountNumber = Number(String(accessToken).match(/(\d+)$/)?.[1]);
+      const eligible = accountNumber % 2 === 1;
+      return {
+        eligible,
+        amountDue: eligible ? 0 : 2_000,
+        currency: "GBP",
+        evidence: "checkout.gb.plus.final_amount_due.v1",
+      };
+    },
+    usTrialProxyResolver: async () => usTrialProxy,
+    usTrialProbe: async ({ accessToken, proxy }) => {
+      usTrialProbeCalls.push({ accessToken, proxy });
+      const accountNumber = Number(String(accessToken).match(/(\d+)$/)?.[1]);
+      const eligible = accountNumber % 2 === 1;
+      return {
+        eligible,
+        amountDue: eligible ? 0 : 2_000,
+        currency: "USD",
+        evidence: "checkout.us.plus.final_amount_due.v1",
       };
     },
     momoProxyResolver: async () => momoProxy,
@@ -629,6 +834,7 @@ test("registration integration generates isolated addresses and exposes mailbox 
           accountId: account.id,
           baseAddressId: base.id,
           count: 2,
+          concurrency: 5,
           browserMode: "headed",
           proxySelection: "auto",
         }),
@@ -661,11 +867,33 @@ test("registration integration generates isolated addresses and exposes mailbox 
       assert.equal(client.created[0].extra.allow_chatgpt_registration_proxy, true);
       assert.equal(client.created[0].extra.set_password_after_registration, false);
       assert.equal(client.created[0].extra.auto_continue_post_signup, true);
+      assert.equal(client.created[0].extra.registration_batch_concurrency, 2);
+      assert.equal(client.created[1].extra.registration_batch_concurrency, 2);
+      assert.match(client.created[0].extra.registration_batch_id, /^[0-9a-f-]{36}$/);
+      assert.equal(client.created[1].extra.registration_batch_id, client.created[0].extra.registration_batch_id);
       assert.equal(response.body.items[0].proxy_label, "http://***@gate-us.kookeey.info:1000");
       const serializedJobs = JSON.stringify(response.body);
       assert.doesNotMatch(serializedJobs, /kookeey-user|base-secret|50663419/i);
       materializedPasswords.forEach((password) => assert.equal(serializedJobs.includes(password), false));
       assert.ok(response.body.items[0].fingerprint_id);
+    });
+
+    await t.test("validates registration concurrency before creating jobs", async () => {
+      const createdBeforeInvalid = client.created.length;
+      for (const concurrency of [0, 21, 1.5, "invalid"]) {
+        const response = await jsonRequest(runtime.app, "/api/registration/jobs", {
+          method: "POST",
+          body: JSON.stringify({
+            accountId: account.id,
+            baseAddressId: base.id,
+            count: 1,
+            concurrency,
+          }),
+        });
+        assert.equal(response.response.status, 400);
+        assert.equal(response.body.error, "注册并发数必须是 1 到 20 的整数");
+      }
+      assert.equal(client.created.length, createdBeforeInvalid);
     });
 
     await t.test("does not persist or return a materialized proxy echoed by task submission", async () => {
@@ -836,6 +1064,7 @@ test("registration integration generates isolated addresses and exposes mailbox 
       assert.equal(client.created.at(-1).password, "ExactPassword#42");
       assert.equal(client.created.at(-1).extra.set_password_after_registration, true);
       assert.equal(client.created.at(-1).extra.auto_continue_post_signup, false);
+      assert.equal(client.created.at(-1).extra.registration_batch_concurrency, 1);
       assert.equal(client.created.at(-1).executor_type, "headless");
       assert.equal(enabled.body.items[0].browser_mode, "headless");
       configuredPasswordEmail = enabled.body.items[0].email;
@@ -1394,6 +1623,407 @@ test("registration integration generates isolated addresses and exposes mailbox 
         body: JSON.stringify({ ids: [999] }),
       });
       assert.equal(unrelated.response.status, 409);
+    });
+
+    await t.test("detects and persists GB zero-price eligibility independently from JP without exposing credentials", async () => {
+      const before = await jsonRequest(runtime.app, "/api/registration/accounts");
+      const ids = before.body.items.slice(0, 2).map((item) => Number(item.id));
+      const previousProbeCalls = gbTrialProbeCalls.length;
+      const response = await jsonRequest(runtime.app, "/api/registration/accounts/check-gb-trial", {
+        method: "POST",
+        body: JSON.stringify({ ids: [ids[0], String(ids[1]), ids[0]] }),
+      });
+
+      assert.equal(response.response.status, 200);
+      assert.equal(response.body.requested, 2);
+      assert.equal(response.body.checked, 2);
+      assert.equal(response.body.eligible, 1);
+      assert.equal(response.body.ineligible, 1);
+      assert.equal(response.body.failed, 0);
+      assert.deepEqual(gbTrialProbeCalls.slice(previousProbeCalls), [
+        { accessToken: "session-access-token-1", proxy: gbTrialProxy },
+        { accessToken: "session-access-token-2", proxy: gbTrialProxy },
+      ]);
+      assert.doesNotMatch(JSON.stringify(response.body), /session-access-token|gb-password|gb-proxy\.example/i);
+      const stored = db.prepare(`
+        SELECT external_account_id, status, eligible, evidence, error
+        FROM registered_account_gb_trial_checks
+        WHERE external_account_id IN (?, ?)
+        ORDER BY external_account_id
+      `).all(...ids.map(String));
+      assert.equal(stored.length, 2);
+      assert.deepEqual(stored.map((item) => item.status), ["eligible", "ineligible"]);
+      assert.deepEqual(stored.map((item) => item.eligible), [1, 0]);
+      assert.ok(stored.every((item) => item.evidence === "checkout.gb.plus.final_amount_due.v1" && item.error === ""));
+      const jpStored = db.prepare(`
+        SELECT status, evidence FROM registered_account_trial_checks
+        WHERE external_account_id IN (?, ?)
+        ORDER BY external_account_id
+      `).all(...ids.map(String));
+      assert.deepEqual(jpStored.map((item) => item.status), ["eligible", "ineligible"]);
+      assert.ok(jpStored.every((item) => item.evidence === "checkout.jp.plus.final_amount_due.v1"));
+      for (const item of response.body.accounts.items.filter((account) => ids.includes(Number(account.id)))) {
+        const eligible = Number(item.id) === ids[0];
+        assert.equal(item.gb_trial_status, eligible ? "eligible" : "ineligible");
+        assert.equal(item.gb_trial_eligible, eligible);
+        assert.ok(Date.parse(item.gb_trial_checked_at));
+        assert.equal(item.trial_status, eligible ? "eligible" : "ineligible");
+      }
+    });
+
+    await t.test("detects and persists US zero-price eligibility independently from JP and GB without exposing credentials", async () => {
+      const before = await jsonRequest(runtime.app, "/api/registration/accounts");
+      const ids = before.body.items.slice(0, 2).map((item) => Number(item.id));
+      const previousProbeCalls = usTrialProbeCalls.length;
+      const response = await jsonRequest(runtime.app, "/api/registration/accounts/check-us-trial", {
+        method: "POST",
+        body: JSON.stringify({ ids: [ids[0], String(ids[1]), ids[0]] }),
+      });
+
+      assert.equal(response.response.status, 200);
+      assert.equal(response.body.requested, 2);
+      assert.equal(response.body.checked, 2);
+      assert.equal(response.body.eligible, 1);
+      assert.equal(response.body.ineligible, 1);
+      assert.equal(response.body.failed, 0);
+      assert.deepEqual(usTrialProbeCalls.slice(previousProbeCalls), [
+        { accessToken: "session-access-token-1", proxy: usTrialProxy },
+        { accessToken: "session-access-token-2", proxy: usTrialProxy },
+      ]);
+      assert.doesNotMatch(JSON.stringify(response.body), /session-access-token|us-password|us-proxy\.example/i);
+      const stored = db.prepare(`
+        SELECT external_account_id, status, eligible, evidence, error
+        FROM registered_account_us_trial_checks
+        WHERE external_account_id IN (?, ?)
+        ORDER BY external_account_id
+      `).all(...ids.map(String));
+      assert.equal(stored.length, 2);
+      assert.deepEqual(stored.map((item) => item.status), ["eligible", "ineligible"]);
+      assert.deepEqual(stored.map((item) => item.eligible), [1, 0]);
+      assert.ok(stored.every((item) => item.evidence === "checkout.us.plus.final_amount_due.v1" && item.error === ""));
+      for (const item of response.body.accounts.items.filter((accountItem) => ids.includes(Number(accountItem.id)))) {
+        const eligible = Number(item.id) === ids[0];
+        assert.equal(item.us_trial_status, eligible ? "eligible" : "ineligible");
+        assert.equal(item.us_trial_eligible, eligible);
+        assert.ok(Date.parse(item.us_trial_checked_at));
+        assert.equal(item.trial_status, eligible ? "eligible" : "ineligible");
+        assert.equal(item.gb_trial_status, eligible ? "eligible" : "ineligible");
+      }
+    });
+
+    await t.test("rejects invalid US probe results and exposes the persisted failure state", async () => {
+      const before = await jsonRequest(runtime.app, "/api/registration/accounts");
+      const targetId = Number(before.body.items[0].id);
+      const previousProbe = runtime.registration.usTrialProbe;
+      try {
+        db.prepare("DELETE FROM registered_account_us_trial_checks WHERE external_account_id = ?").run(String(targetId));
+        runtime.registration.usTrialProbe = async () => ({
+          eligible: true,
+          amountDue: 0,
+          currency: "GBP",
+          evidence: "checkout.us.plus.final_amount_due.v1",
+        });
+        const response = await jsonRequest(runtime.app, "/api/registration/accounts/check-us-trial", {
+          method: "POST",
+          body: JSON.stringify({ ids: [targetId] }),
+        });
+        assert.equal(response.response.status, 200);
+        assert.equal(response.body.failed, 1);
+        assert.equal(response.body.items[0].us_trial_status, "failed");
+        const accountItem = response.body.accounts.items.find((item) => Number(item.id) === targetId);
+        assert.equal(accountItem.us_trial_status, "failed");
+        assert.equal(accountItem.us_trial_eligible, null);
+        assert.equal(accountItem.us_trial_evidence, "");
+        assert.match(accountItem.us_trial_error, /探针返回了无效结果/);
+      } finally {
+        runtime.registration.usTrialProbe = previousProbe;
+      }
+    });
+
+    await t.test("falls back to the verified US server direct connection when the proxy pool has no US exit", async () => {
+      const before = await jsonRequest(runtime.app, "/api/registration/accounts");
+      const targetId = Number(before.body.items[0].id);
+      const previousResolver = runtime.registration.usTrialProxyResolver;
+      const previousDirectProbe = runtime.registration.usDirectCountryProbe;
+      const previousProxyPool = getSetting(db, "registration_proxy_pool", "[]");
+      const previousInspectionHandler = client.proxyInspectionHandler;
+      const previousProbeCalls = usTrialProbeCalls.length;
+      db.prepare("DELETE FROM registered_account_us_trial_checks WHERE external_account_id = ?").run(String(targetId));
+      try {
+        runtime.registration.usTrialProxyResolver = null;
+        runtime.registration.usDirectCountryProbe = async () => ({ countryCode: "US" });
+        runtime.registration.usTrialProxyCache = { proxy: "", expiresAt: 0 };
+        setSetting(db, "registration_proxy_pool", JSON.stringify(["http://de-proxy.example:8080"]));
+        client.proxyInspectionHandler = () => ({
+          samples: [{ ip: "203.0.113.26", country_code: "DE" }],
+        });
+
+        const response = await jsonRequest(runtime.app, "/api/registration/accounts/check-us-trial", {
+          method: "POST",
+          body: JSON.stringify({ ids: [targetId] }),
+        });
+
+        assert.equal(response.response.status, 200);
+        assert.equal(response.body.checked, 1);
+        assert.equal(usTrialProbeCalls.length, previousProbeCalls + 1);
+        assert.deepEqual(usTrialProbeCalls.at(-1), {
+          accessToken: "session-access-token-1",
+          proxy: DIRECT_TRIAL_ROUTE,
+        });
+        assert.equal(db.prepare(`
+          SELECT COUNT(*) AS count FROM registered_account_us_trial_checks
+          WHERE external_account_id = ?
+        `).get(String(targetId)).count, 1);
+      } finally {
+        runtime.registration.usTrialProxyResolver = previousResolver;
+        runtime.registration.usDirectCountryProbe = previousDirectProbe;
+        runtime.registration.usTrialProxyCache = { proxy: "", expiresAt: 0 };
+        client.proxyInspectionHandler = previousInspectionHandler;
+        setSetting(db, "registration_proxy_pool", previousProxyPool);
+      }
+    });
+
+    await t.test("refuses the US trial fallback when the server direct exit is not US", async () => {
+      const before = await jsonRequest(runtime.app, "/api/registration/accounts");
+      const targetId = Number(before.body.items[0].id);
+      const previousResolver = runtime.registration.usTrialProxyResolver;
+      const previousDirectProbe = runtime.registration.usDirectCountryProbe;
+      const previousProxyPool = getSetting(db, "registration_proxy_pool", "[]");
+      const previousInspectionHandler = client.proxyInspectionHandler;
+      const previousProbeCalls = usTrialProbeCalls.length;
+      db.prepare("DELETE FROM registered_account_us_trial_checks WHERE external_account_id = ?").run(String(targetId));
+      try {
+        runtime.registration.usTrialProxyResolver = null;
+        runtime.registration.usDirectCountryProbe = async () => ({ countryCode: "DE" });
+        runtime.registration.usTrialProxyCache = { proxy: "", expiresAt: 0 };
+        setSetting(db, "registration_proxy_pool", JSON.stringify(["http://de-proxy.example:8080"]));
+        client.proxyInspectionHandler = () => ({
+          samples: [{ ip: "203.0.113.26", country_code: "DE" }],
+        });
+
+        const response = await jsonRequest(runtime.app, "/api/registration/accounts/check-us-trial", {
+          method: "POST",
+          body: JSON.stringify({ ids: [targetId] }),
+        });
+
+        assert.equal(response.response.status, 409);
+        assert.match(response.body.error, /服务器直连出口不是 US.*DE/);
+        assert.equal(usTrialProbeCalls.length, previousProbeCalls);
+        assert.equal(db.prepare(`
+          SELECT COUNT(*) AS count FROM registered_account_us_trial_checks
+          WHERE external_account_id = ?
+        `).get(String(targetId)).count, 0);
+      } finally {
+        runtime.registration.usTrialProxyResolver = previousResolver;
+        runtime.registration.usDirectCountryProbe = previousDirectProbe;
+        runtime.registration.usTrialProxyCache = { proxy: "", expiresAt: 0 };
+        client.proxyInspectionHandler = previousInspectionHandler;
+        setSetting(db, "registration_proxy_pool", previousProxyPool);
+      }
+    });
+
+    await t.test("stops a US trial batch after a rate-limited preflight without persisting transient failures", async () => {
+      const before = await jsonRequest(runtime.app, "/api/registration/accounts");
+      const ids = before.body.items.slice(0, 2).map((item) => Number(item.id));
+      const previousProbe = runtime.registration.usTrialProbe;
+      let rateLimitedCalls = 0;
+      db.prepare(`
+        DELETE FROM registered_account_us_trial_checks
+        WHERE external_account_id IN (?, ?)
+      `).run(...ids.map(String));
+      try {
+        runtime.registration.usTrialProbe = async () => {
+          rateLimitedCalls += 1;
+          throw Object.assign(new Error("账号资格检测失败 HTTP 429"), { status: 429 });
+        };
+        const response = await jsonRequest(runtime.app, "/api/registration/accounts/check-us-trial", {
+          method: "POST",
+          body: JSON.stringify({ ids }),
+        });
+
+        assert.equal(response.response.status, 200);
+        assert.equal(response.body.requested, 2);
+        assert.equal(response.body.checked, 0);
+        assert.equal(response.body.failed, 0);
+        assert.equal(response.body.rate_limited, 1);
+        assert.equal(response.body.skipped, 1);
+        assert.equal(rateLimitedCalls, 1);
+        assert.equal(db.prepare(`
+          SELECT COUNT(*) AS count FROM registered_account_us_trial_checks
+          WHERE external_account_id IN (?, ?)
+        `).get(...ids.map(String)).count, 0);
+      } finally {
+        runtime.registration.usTrialProbe = previousProbe;
+      }
+    });
+
+    await t.test("keeps concurrent JP and GB checks for the same account independent", async () => {
+      const before = await jsonRequest(runtime.app, "/api/registration/accounts");
+      const targetId = Number(before.body.items[0].id);
+      const previousJpCalls = trialProbeCalls.length;
+      const previousGbCalls = gbTrialProbeCalls.length;
+      const [jpResult, gbResult] = await Promise.all([
+        runtime.registration.checkRegisteredAccountTrials({ ids: [targetId] }),
+        runtime.registration.checkRegisteredAccountGbTrials({ ids: [targetId] }),
+      ]);
+
+      assert.equal(trialProbeCalls.length, previousJpCalls + 1);
+      assert.equal(gbTrialProbeCalls.length, previousGbCalls + 1);
+      assert.equal(jpResult.items[0].trial_status, "eligible");
+      assert.equal(gbResult.items[0].gb_trial_status, "eligible");
+      assert.equal(db.prepare(`
+        SELECT COUNT(*) AS count FROM registered_account_trial_checks WHERE external_account_id = ?
+      `).get(String(targetId)).count, 1);
+      assert.equal(db.prepare(`
+        SELECT COUNT(*) AS count FROM registered_account_gb_trial_checks WHERE external_account_id = ?
+      `).get(String(targetId)).count, 1);
+    });
+
+    await t.test("deduplicates concurrent GB trial checks for the same account", async () => {
+      const before = await jsonRequest(runtime.app, "/api/registration/accounts");
+      const targetId = Number(before.body.items[0].id);
+      const previousProbe = runtime.registration.gbTrialProbe;
+      let probeCalls = 0;
+      let releaseProbe;
+      let markStarted;
+      const gate = new Promise((resolve) => { releaseProbe = resolve; });
+      const started = new Promise((resolve) => { markStarted = resolve; });
+      try {
+        runtime.registration.gbTrialProbe = async () => {
+          probeCalls += 1;
+          markStarted();
+          await gate;
+          return {
+            eligible: true,
+            amountDue: 0,
+            currency: "GBP",
+            evidence: "checkout.gb.plus.final_amount_due.v1",
+          };
+        };
+        const first = runtime.registration.checkRegisteredAccountGbTrials({ ids: [targetId] });
+        await started;
+        const second = runtime.registration.checkRegisteredAccountGbTrials({ ids: [targetId] });
+        await new Promise((resolve) => setImmediate(resolve));
+        releaseProbe();
+        const [firstResult, secondResult] = await Promise.all([first, second]);
+        assert.equal(probeCalls, 1);
+        assert.equal(firstResult.items[0].gb_trial_status, "eligible");
+        assert.equal(secondResult.items[0].gb_trial_status, "eligible");
+      } finally {
+        releaseProbe?.();
+        runtime.registration.gbTrialProbe = previousProbe;
+      }
+    });
+
+    await t.test("rejects invalid GB probe results and exposes the persisted failure state", async () => {
+      const before = await jsonRequest(runtime.app, "/api/registration/accounts");
+      const targetId = Number(before.body.items[0].id);
+      const previousProbe = runtime.registration.gbTrialProbe;
+      const fixtures = [
+        { eligible: true, amountDue: Number.POSITIVE_INFINITY, currency: "GBP", evidence: "checkout.gb.plus.final_amount_due.v1" },
+        { eligible: true, amountDue: 2_000, currency: "GBP", evidence: "checkout.gb.plus.final_amount_due.v1" },
+        { eligible: true, amountDue: 0, currency: "USD", evidence: "checkout.gb.plus.final_amount_due.v1" },
+        { eligible: true, amountDue: 0, currency: "GBP", evidence: "checkout.gb.plus.other.v1" },
+      ];
+      try {
+        for (const result of fixtures) {
+          db.prepare("DELETE FROM registered_account_gb_trial_checks WHERE external_account_id = ?").run(String(targetId));
+          runtime.registration.gbTrialProbe = async () => result;
+          const response = await jsonRequest(runtime.app, "/api/registration/accounts/check-gb-trial", {
+            method: "POST",
+            body: JSON.stringify({ ids: [targetId] }),
+          });
+          assert.equal(response.response.status, 200);
+          assert.equal(response.body.failed, 1);
+          assert.equal(response.body.items[0].gb_trial_status, "failed");
+          const account = response.body.accounts.items.find((item) => Number(item.id) === targetId);
+          assert.equal(account.gb_trial_status, "failed");
+          assert.equal(account.gb_trial_eligible, null);
+          assert.equal(account.gb_trial_evidence, "");
+          assert.match(account.gb_trial_error, /探针返回了无效结果/);
+          const stored = db.prepare(`
+            SELECT status, eligible, evidence, error FROM registered_account_gb_trial_checks
+            WHERE external_account_id = ?
+          `).get(String(targetId));
+          assert.equal(stored.status, "failed");
+          assert.equal(stored.eligible, null);
+          assert.equal(stored.evidence, "");
+          assert.match(stored.error, /探针返回了无效结果/);
+        }
+      } finally {
+        runtime.registration.gbTrialProbe = previousProbe;
+      }
+    });
+
+    await t.test("refuses GB trial detection before writing results when the proxy pool has no GB exit", async () => {
+      const before = await jsonRequest(runtime.app, "/api/registration/accounts");
+      const targetId = Number(before.body.items[0].id);
+      const previousResolver = runtime.registration.gbTrialProxyResolver;
+      const previousProxyPool = getSetting(db, "registration_proxy_pool", "[]");
+      const previousInspectionHandler = client.proxyInspectionHandler;
+      const previousProbeCalls = gbTrialProbeCalls.length;
+      db.prepare("DELETE FROM registered_account_gb_trial_checks WHERE external_account_id = ?").run(String(targetId));
+      try {
+        runtime.registration.gbTrialProxyResolver = null;
+        runtime.registration.gbTrialProxyCache = { proxy: "", expiresAt: 0 };
+        setSetting(db, "registration_proxy_pool", JSON.stringify(["http://de-proxy.example:8080"]));
+        client.proxyInspectionHandler = () => ({
+          samples: [{ ip: "203.0.113.25", country_code: "DE" }],
+        });
+
+        const response = await jsonRequest(runtime.app, "/api/registration/accounts/check-gb-trial", {
+          method: "POST",
+          body: JSON.stringify({ ids: [targetId] }),
+        });
+
+        assert.equal(response.response.status, 409);
+        assert.match(response.body.error, /没有检测到 GB 出口/);
+        assert.equal(gbTrialProbeCalls.length, previousProbeCalls);
+        assert.equal(db.prepare(`
+          SELECT COUNT(*) AS count FROM registered_account_gb_trial_checks
+          WHERE external_account_id = ?
+        `).get(String(targetId)).count, 0);
+      } finally {
+        runtime.registration.gbTrialProxyResolver = previousResolver;
+        runtime.registration.gbTrialProxyCache = { proxy: "", expiresAt: 0 };
+        client.proxyInspectionHandler = previousInspectionHandler;
+        setSetting(db, "registration_proxy_pool", previousProxyPool);
+      }
+    });
+
+    await t.test("stops a GB trial batch after a rate-limited preflight without persisting transient failures", async () => {
+      const before = await jsonRequest(runtime.app, "/api/registration/accounts");
+      const ids = before.body.items.slice(0, 2).map((item) => Number(item.id));
+      const previousProbe = runtime.registration.gbTrialProbe;
+      let rateLimitedCalls = 0;
+      db.prepare(`
+        DELETE FROM registered_account_gb_trial_checks
+        WHERE external_account_id IN (?, ?)
+      `).run(...ids.map(String));
+      try {
+        runtime.registration.gbTrialProbe = async () => {
+          rateLimitedCalls += 1;
+          throw Object.assign(new Error("账号资格检测失败 HTTP 429"), { status: 429 });
+        };
+        const response = await jsonRequest(runtime.app, "/api/registration/accounts/check-gb-trial", {
+          method: "POST",
+          body: JSON.stringify({ ids }),
+        });
+
+        assert.equal(response.response.status, 200);
+        assert.equal(response.body.requested, 2);
+        assert.equal(response.body.checked, 0);
+        assert.equal(response.body.failed, 0);
+        assert.equal(response.body.rate_limited, 1);
+        assert.equal(response.body.skipped, 1);
+        assert.equal(rateLimitedCalls, 1);
+        assert.equal(db.prepare(`
+          SELECT COUNT(*) AS count FROM registered_account_gb_trial_checks
+          WHERE external_account_id IN (?, ?)
+        `).get(...ids.map(String)).count, 0);
+      } finally {
+        runtime.registration.gbTrialProbe = previousProbe;
+      }
     });
 
     await t.test("refuses JP trial detection before writing results when the proxy pool has no JP exit", async () => {
@@ -2288,6 +2918,28 @@ test("registration integration generates isolated addresses and exposes mailbox 
       const before = await jsonRequest(runtime.app, "/api/registration/accounts");
       const targets = before.body.items.slice(0, 2);
       deletedLocalAccountFixtures = targets.map((item) => ({ id: item.id, email: item.email, password: item.password || "" }));
+      targets.forEach((item, index) => runtime.registration.persistRegisteredAccountGbTrialCheck({
+        id: item.id,
+        email: item.email,
+        eligible: index === 0,
+        evidence: "checkout.gb.plus.final_amount_due.v1",
+        status: index === 0 ? "eligible" : "ineligible",
+      }));
+      targets.forEach((item, index) => runtime.registration.persistRegisteredAccountUsTrialCheck({
+        id: item.id,
+        email: item.email,
+        eligible: index === 0,
+        evidence: "checkout.us.plus.final_amount_due.v1",
+        status: index === 0 ? "eligible" : "ineligible",
+      }));
+      assert.equal(db.prepare(`
+        SELECT COUNT(*) AS count FROM registered_account_gb_trial_checks
+        WHERE external_account_id IN (?, ?)
+      `).get(...targets.map((item) => String(item.id))).count, 2);
+      assert.equal(db.prepare(`
+        SELECT COUNT(*) AS count FROM registered_account_us_trial_checks
+        WHERE external_account_id IN (?, ?)
+      `).get(...targets.map((item) => String(item.id))).count, 2);
       const jobCount = db.prepare("SELECT COUNT(*) AS count FROM registration_jobs").get().count;
       const addressCount = db.prepare("SELECT COUNT(*) AS count FROM addresses").get().count;
 
@@ -2309,6 +2961,14 @@ test("registration integration generates isolated addresses and exposes mailbox 
           .get(String(targets[0].id), String(targets[1].id)).count,
         0,
       );
+      assert.equal(db.prepare(`
+        SELECT COUNT(*) AS count FROM registered_account_gb_trial_checks
+        WHERE external_account_id IN (?, ?)
+      `).get(...targets.map((item) => String(item.id))).count, 0);
+      assert.equal(db.prepare(`
+        SELECT COUNT(*) AS count FROM registered_account_us_trial_checks
+        WHERE external_account_id IN (?, ?)
+      `).get(...targets.map((item) => String(item.id))).count, 0);
       assert.equal(db.prepare("SELECT COUNT(*) AS count FROM registration_jobs").get().count, jobCount);
       assert.equal(db.prepare("SELECT COUNT(*) AS count FROM addresses").get().count, addressCount);
 
@@ -2323,6 +2983,20 @@ test("registration integration generates isolated addresses and exposes mailbox 
     });
 
     await t.test("imports deleted local accounts and relinks their completed registration history", async () => {
+      deletedLocalAccountFixtures.forEach((item, index) => runtime.registration.persistRegisteredAccountGbTrialCheck({
+        id: item.id,
+        email: item.email,
+        eligible: index === 0,
+        evidence: "checkout.gb.plus.final_amount_due.v1",
+        status: index === 0 ? "eligible" : "ineligible",
+      }));
+      deletedLocalAccountFixtures.forEach((item, index) => runtime.registration.persistRegisteredAccountUsTrialCheck({
+        id: item.id,
+        email: item.email,
+        eligible: index === 0,
+        evidence: "checkout.us.plus.final_amount_due.v1",
+        status: index === 0 ? "eligible" : "ineligible",
+      }));
       const content = JSON.stringify(deletedLocalAccountFixtures.map((item, index) => ({
         id: item.id,
         email: item.email,
@@ -2349,6 +3023,32 @@ test("registration integration generates isolated addresses and exposes mailbox 
         restored.body.items.map((item) => item.previous_account_id),
         deletedLocalAccountFixtures.map((item) => Number(item.id)),
       );
+      assert.equal(db.prepare(`
+        SELECT COUNT(*) AS count FROM registered_account_gb_trial_checks
+        WHERE external_account_id IN (?, ?)
+      `).get(...deletedLocalAccountFixtures.map((item) => String(item.id))).count, 0);
+      assert.equal(db.prepare(`
+        SELECT COUNT(*) AS count FROM registered_account_us_trial_checks
+        WHERE external_account_id IN (?, ?)
+      `).get(...deletedLocalAccountFixtures.map((item) => String(item.id))).count, 0);
+      for (const item of restored.body.items) {
+        const gbTrial = db.prepare(`
+          SELECT external_account_id, email, status, evidence
+          FROM registered_account_gb_trial_checks WHERE email = ? COLLATE NOCASE
+        `).get(item.email);
+        assert.equal(gbTrial.external_account_id, String(item.id));
+        assert.equal(gbTrial.email, item.email);
+        assert.ok(["eligible", "ineligible"].includes(gbTrial.status));
+        assert.equal(gbTrial.evidence, "checkout.gb.plus.final_amount_due.v1");
+        const usTrial = db.prepare(`
+          SELECT external_account_id, email, status, evidence
+          FROM registered_account_us_trial_checks WHERE email = ? COLLATE NOCASE
+        `).get(item.email);
+        assert.equal(usTrial.external_account_id, String(item.id));
+        assert.equal(usTrial.email, item.email);
+        assert.ok(["eligible", "ineligible"].includes(usTrial.status));
+        assert.equal(usTrial.evidence, "checkout.us.plus.final_amount_due.v1");
+      }
 
       const accounts = await jsonRequest(runtime.app, "/api/registration/accounts");
       for (const item of restored.body.items) {
@@ -2374,6 +3074,186 @@ test("registration integration generates isolated addresses and exposes mailbox 
       });
       assert.equal(unrelated.response.status, 409);
       assert.match(unrelated.body.error, /没有可关联的已完成注册记录/);
+    });
+
+    await t.test("imports external accounts with encrypted inbox links and rolls back partial failures", async () => {
+      const email = "external-owner@example.com";
+      const inboxLink = "https://dispose.lol/ib/ExternalCaseSensitiveKey";
+      const imported = await jsonRequest(runtime.app, "/api/registration/accounts/import-local", {
+        method: "POST",
+        body: JSON.stringify({ content: `${email}----${inboxLink}` }),
+      });
+      assert.equal(imported.response.status, 201);
+      assert.equal(imported.body.imported, 1);
+      assert.equal(imported.body.restored, 0);
+      assert.equal(imported.body.external_imported, 1);
+      assert.equal(imported.body.items[0].import_source, "external");
+      assert.equal(imported.body.items[0].previous_account_id, 0);
+
+      const remote = client.importedAccounts.find((item) => item.email === email);
+      assert.ok(remote);
+      assert.equal(remote.password, "");
+      assert.ok(remote.provider_accounts.some((item) => (
+        item.provider_name === "outlook_email_api" && item.login_identifier === email
+      )));
+      assert.ok(remote.provider_resources.some((item) => (
+        item.provider_name === "outlook_email_api" && item.handle === email
+      )));
+      assert.doesNotMatch(JSON.stringify(remote), /ExternalCaseSensitiveKey/);
+
+      const job = db.prepare("SELECT * FROM registration_jobs WHERE id = ?")
+        .get(imported.body.items[0].registration_job_id);
+      assert.equal(job.email, email);
+      assert.equal(job.external_account_id, String(imported.body.items[0].id));
+      assert.equal(job.status, "completed");
+      assert.equal(job.stage, "external_import");
+      assert.equal(job.proxy_label, "直连");
+      assert.ok(job.account_id && job.address_id && job.base_address_id);
+
+      const mailbox = db.prepare(`
+        SELECT inbox_link_mailboxes.*, source_accounts.provider, source_accounts.status AS source_status,
+          addresses.address, addresses.kind
+        FROM inbox_link_mailboxes
+        JOIN source_accounts ON source_accounts.id = inbox_link_mailboxes.source_account_id
+        JOIN addresses ON addresses.id = ?
+        WHERE inbox_link_mailboxes.email = ? COLLATE NOCASE
+      `).get(job.address_id, email);
+      assert.equal(mailbox.provider, "inbox_link");
+      assert.equal(mailbox.source_status, "connected");
+      assert.equal(mailbox.address, email);
+      assert.equal(mailbox.kind, "primary");
+      assert.match(mailbox.inbox_key_encrypted, /^v1\./);
+      assert.doesNotMatch(mailbox.inbox_key_encrypted, /ExternalCaseSensitiveKey/);
+
+      const accounts = await jsonRequest(runtime.app, "/api/registration/accounts");
+      assert.equal(accounts.body.items.some((item) => (
+        Number(item.id) === Number(imported.body.items[0].id) && item.email === email
+      )), true);
+
+      const duplicate = await jsonRequest(runtime.app, "/api/registration/accounts/import-local", {
+        method: "POST",
+        body: JSON.stringify({ content: `${email}----${inboxLink}` }),
+      });
+      assert.equal(duplicate.response.status, 409);
+      assert.match(duplicate.body.error, /已在本地账号池/);
+
+      const conflictingEmail = "conflicting-owner@example.com";
+      const remoteCountBeforeConflict = client.importedAccounts.length;
+      const conflict = await jsonRequest(runtime.app, "/api/registration/accounts/import-local", {
+        method: "POST",
+        body: JSON.stringify({ content: `${conflictingEmail}----${inboxLink}` }),
+      });
+      assert.equal(conflict.response.status, 409);
+      assert.match(conflict.body.error, /取件链接已绑定到其他邮箱/);
+      assert.equal(client.importedAccounts.length, remoteCountBeforeConflict);
+      assert.equal(client.importedAccounts.some((item) => item.email === conflictingEmail), false);
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM registration_jobs WHERE email = ? COLLATE NOCASE")
+        .get(conflictingEmail).count, 0);
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM inbox_link_mailboxes WHERE email = ? COLLATE NOCASE")
+        .get(conflictingEmail).count, 0);
+
+      const restoredLinkEmail = "restored-with-link@example.com";
+      const mappedAt = nowIso();
+      const legacyAddress = db.prepare(`
+        INSERT INTO addresses (
+          account_id, parent_address_id, address, kind, status, strategy, created_at, updated_at
+        ) VALUES (?, ?, ?, 'split', 'active', 'manual', ?, ?)
+      `).run(account.id, base.id, restoredLinkEmail, mappedAt, mappedAt);
+      const legacyJob = db.prepare(`
+        INSERT INTO registration_jobs (
+          account_id, address_id, base_address_id, email, external_account_id, status, stage,
+          browser_mode, proxy_label, progress_current, progress_total, message,
+          created_at, updated_at, finished_at
+        ) VALUES (?, ?, ?, ?, '1888', 'completed', 'completed', 'headless', '直连', 1, 1,
+          '历史注册完成', ?, ?, ?)
+      `).run(
+        account.id,
+        Number(legacyAddress.lastInsertRowid),
+        base.id,
+        restoredLinkEmail,
+        mappedAt,
+        mappedAt,
+        mappedAt,
+      );
+      const restoredWithLink = await jsonRequest(runtime.app, "/api/registration/accounts/import-local", {
+        method: "POST",
+        body: JSON.stringify({
+          content: `${restoredLinkEmail}----https://dispose.lol/ib/RestoredLinkKey`,
+        }),
+      });
+      assert.equal(restoredWithLink.response.status, 201);
+      assert.equal(restoredWithLink.body.restored, 1);
+      assert.equal(restoredWithLink.body.external_imported, 0);
+      assert.equal(restoredWithLink.body.items[0].registration_job_id, Number(legacyJob.lastInsertRowid));
+      const remappedJob = db.prepare(`
+        SELECT registration_jobs.*, source_accounts.provider, addresses.address AS mapped_address
+        FROM registration_jobs
+        JOIN source_accounts ON source_accounts.id = registration_jobs.account_id
+        JOIN addresses ON addresses.id = registration_jobs.address_id
+        WHERE registration_jobs.id = ?
+      `).get(Number(legacyJob.lastInsertRowid));
+      assert.equal(remappedJob.provider, "inbox_link");
+      assert.equal(remappedJob.mapped_address, restoredLinkEmail);
+      assert.notEqual(remappedJob.address_id, Number(legacyAddress.lastInsertRowid));
+      assert.equal(remappedJob.address_id, remappedJob.base_address_id);
+      const fetchCountBeforeMailboxRead = inboxLinkFetchUrls.length;
+      const restoredMailbox = await jsonRequest(
+        runtime.app,
+        `/api/registration/accounts/${restoredWithLink.body.items[0].id}/emails`,
+      );
+      assert.equal(restoredMailbox.response.status, 200);
+      assert.equal(restoredMailbox.body.email, restoredLinkEmail);
+      assert.equal(inboxLinkFetchUrls.slice(fetchCountBeforeMailboxRead)
+        .some((url) => url.includes("RestoredLinkKey")), true);
+
+      const failedEmail = "remote-failure@example.com";
+      client.accountCreateError = Object.assign(new Error("remote create failed"), { status: 502 });
+      const failed = await jsonRequest(runtime.app, "/api/registration/accounts/import-local", {
+        method: "POST",
+        body: JSON.stringify({
+          content: `${failedEmail}----https://dispose.lol/ib/RemoteFailureKey`,
+        }),
+      });
+      client.accountCreateError = null;
+      assert.equal(failed.response.status, 502);
+      assert.equal(failed.body.error, "服务器处理请求失败");
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM registration_jobs WHERE email = ? COLLATE NOCASE")
+        .get(failedEmail).count, 0);
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM inbox_link_mailboxes WHERE email = ? COLLATE NOCASE")
+        .get(failedEmail).count, 0);
+
+      const concurrentEmail = "concurrent-external@example.com";
+      const concurrentLink = "https://dispose.lol/ib/ConcurrentExternalKey";
+      const originalCreateAccount = client.createAccount.bind(client);
+      let signalCreateStarted;
+      let releaseCreate;
+      const createStarted = new Promise((resolve) => { signalCreateStarted = resolve; });
+      const createGate = new Promise((resolve) => { releaseCreate = resolve; });
+      client.createAccount = async (payload) => {
+        if (payload.email === concurrentEmail) {
+          signalCreateStarted();
+          await createGate;
+        }
+        return originalCreateAccount(payload);
+      };
+      const firstImportPromise = jsonRequest(runtime.app, "/api/registration/accounts/import-local", {
+        method: "POST",
+        body: JSON.stringify({ content: `${concurrentEmail}----${concurrentLink}` }),
+      });
+      await createStarted;
+      const busyImport = await jsonRequest(runtime.app, "/api/registration/accounts/import-local", {
+        method: "POST",
+        body: JSON.stringify({ content: `${concurrentEmail}----${concurrentLink}` }),
+      });
+      releaseCreate();
+      const firstImport = await firstImportPromise;
+      client.createAccount = originalCreateAccount;
+      assert.equal(firstImport.response.status, 201);
+      assert.equal(busyImport.response.status, 409);
+      assert.match(busyImport.body.error, /正在导入/);
+      assert.equal(client.importedAccounts.filter((item) => item.email === concurrentEmail).length, 1);
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM registration_jobs WHERE email = ? COLLATE NOCASE")
+        .get(concurrentEmail).count, 1);
     });
   } finally {
     await new Promise((resolve) => setImmediate(resolve));

@@ -1,6 +1,7 @@
 """Tests for the gopay_pay_chatgpt task type integration into application/tasks.py."""
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 from typing import Any
 
@@ -351,6 +352,169 @@ def test_task_registers_when_no_chatgpt_selected(monkeypatch):
     assert final is not None
     assert len(registered) == 2
     assert final["success"] == 2
+
+
+def test_gopay_registration_payload_concurrency_is_clamped_for_both_paths(monkeypatch):
+    from application import tasks as tasks_mod
+
+    calls = []
+
+    def fake_plain(*args, **kwargs):
+        calls.append(("plain", kwargs["concurrency"]))
+        return []
+
+    def fake_short(*args, **kwargs):
+        calls.append(("short", kwargs["concurrency"]))
+        return []
+
+    monkeypatch.setattr(tasks_mod, "_register_chatgpt_accounts_for_gopay", fake_plain)
+    monkeypatch.setattr(tasks_mod, "_register_chatgpt_shortlink_grab_for_gopay", fake_short)
+
+    class Logger:
+        def is_cancel_requested(self):
+            return False
+
+        def log(self, *args, **kwargs):
+            pass
+
+        def finish(self, *args, **kwargs):
+            pass
+
+    for use_short_link in (False, True):
+        tasks_mod._execute_gopay_pay_chatgpt_task(
+            {
+                "chatgpt_account_ids": [],
+                "register_count": 8,
+                "concurrency": 99,
+                "use_short_link": use_short_link,
+            },
+            Logger(),
+        )
+
+    assert calls == [("plain", 5), ("short", 5)]
+
+
+def test_gopay_registration_paths_share_global_five_slot_limit(monkeypatch):
+    from application import tasks as tasks_mod
+    from core.base_platform import Account, AccountStatus
+
+    real_executor = tasks_mod.ThreadPoolExecutor
+    worker_limits = []
+
+    def recording_executor(*args, **kwargs):
+        worker_limits.append(args[0] if args else kwargs["max_workers"])
+        return real_executor(*args, **kwargs)
+
+    class SlotProbe:
+        def __init__(self):
+            self.semaphore = threading.BoundedSemaphore(5)
+            self.lock = threading.Lock()
+            self.acquire_calls = 0
+            self.release_calls = 0
+            self.active = 0
+            self.max_active = 0
+
+        def acquire(self, timeout=None):
+            acquired = self.semaphore.acquire(timeout=timeout)
+            if acquired:
+                with self.lock:
+                    self.acquire_calls += 1
+                    self.active += 1
+                    self.max_active = max(self.max_active, self.active)
+            return acquired
+
+        def release(self):
+            with self.lock:
+                self.release_calls += 1
+                self.active -= 1
+            self.semaphore.release()
+
+    slots = SlotProbe()
+    registration_calls = {"plain": 0, "short": 0}
+    registration_calls_lock = threading.Lock()
+    first_five_started = threading.Event()
+
+    class FakePlatform:
+        def __init__(self, path):
+            self.path = path
+            self.mailbox = None
+
+        def register(self):
+            with registration_calls_lock:
+                registration_calls[self.path] += 1
+                sequence = registration_calls[self.path]
+                total_started = sum(registration_calls.values())
+                if total_started == 5:
+                    first_five_started.set()
+            if total_started <= 5:
+                first_five_started.wait(timeout=2)
+            return Account(
+                platform="chatgpt",
+                email=f"{self.path}-{sequence}@example.test",
+                password="pw",
+                user_id=f"user-{self.path}-{sequence}",
+                status=AccountStatus.REGISTERED,
+            )
+
+    def fake_build(platform_name, payload, logger, resolved_proxy=None, shared_mailbox=None):
+        return FakePlatform(payload["extra"]["test_path"])
+
+    monkeypatch.setattr(tasks_mod, "ThreadPoolExecutor", recording_executor)
+    monkeypatch.setattr(tasks_mod, "_registration_execution_slots", slots)
+    monkeypatch.setattr(tasks_mod, "_build_platform_instance", fake_build)
+    monkeypatch.setattr(tasks_mod, "_resolve_registration_proxy_for_platform", lambda *args, **kwargs: None)
+    monkeypatch.setattr(tasks_mod, "_save_account_for_task", lambda *args, **kwargs: None)
+    monkeypatch.setattr(tasks_mod, "_mark_outlook_mailbox_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "platforms._browser_backend.parse_checkout_mode",
+        lambda *args, **kwargs: SimpleNamespace(),
+    )
+
+    class Logger:
+        def is_cancel_requested(self):
+            return False
+
+        def log(self, *args, **kwargs):
+            pass
+
+        def set_subtask(self, *args, **kwargs):
+            pass
+
+        def clear_subtask(self):
+            pass
+
+    errors = []
+
+    def run_plain():
+        try:
+            tasks_mod._register_chatgpt_accounts_for_gopay(
+                6, {"test_path": "plain"}, Logger(), concurrency=99,
+            )
+        except Exception as exc:
+            errors.append(exc)
+
+    def run_short():
+        try:
+            tasks_mod._register_chatgpt_shortlink_grab_for_gopay(
+                6, {"test_path": "short"}, Logger(), concurrency=99,
+            )
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run_plain), threading.Thread(target=run_short)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert errors == []
+    assert sorted(worker_limits) == [5, 5]
+    assert registration_calls == {"plain": 6, "short": 6}
+    assert slots.acquire_calls == 12
+    assert slots.release_calls == 12
+    assert slots.active == 0
+    assert slots.max_active == 5
 
 
 def test_task_fails_when_no_accounts_and_no_register():

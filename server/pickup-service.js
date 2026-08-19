@@ -1,3 +1,5 @@
+import { mailcomRecyclingReservations } from "./mailcom-recycle-reservation.js";
+
 function publicError(message, status = 500, code = "PICKUP_SERVICE_ERROR") {
   return Object.assign(new Error(message), { status, code });
 }
@@ -62,6 +64,7 @@ function addressTypeLabel(item) {
 function publicSourceAddress(item) {
   const chatgptRegistered = Boolean(item.chatgpt_registered);
   const sourceConnected = item.source_status === "connected";
+  const recyclingReserved = Boolean(item.mailcom_recycling_reserved);
   return {
     id: Number(item.id),
     email: String(item.email || "").trim().toLowerCase(),
@@ -76,9 +79,11 @@ function publicSourceAddress(item) {
     chatgpt_registered: chatgptRegistered,
     chatgpt_registration_completed: Boolean(item.chatgpt_registration_completed),
     chatgpt_registration_occupied: Boolean(item.chatgpt_registration_occupied),
-    eligible: sourceConnected && !chatgptRegistered,
+    mailcom_recycling_reserved: recyclingReserved,
+    eligible: sourceConnected && !chatgptRegistered && !recyclingReserved,
     blocked_reason: chatgptRegistered
       ? "已注册 ChatGPT，禁止上架"
+      : recyclingReserved ? "Mail.com 别名正在轮换，禁止上架"
       : sourceConnected ? "" : "源头邮箱未连接",
     created_at: String(item.created_at || ""),
   };
@@ -117,6 +122,8 @@ export class PickupService {
     this.username = String(username || "admin");
     this.password = String(password || "");
     this.fetch = fetchFn;
+    this.publishCounts = new Map();
+    this.publishVersions = new Map();
   }
 
   configuration() {
@@ -133,7 +140,7 @@ export class PickupService {
 
   sourceAddresses() {
     if (!this.db) throw publicError("源头邮箱库存未配置", 503, "PICKUP_SOURCE_NOT_CONFIGURED");
-    return this.db.prepare(`
+    const rows = this.db.prepare(`
       SELECT
         addresses.id,
         addresses.address AS email,
@@ -169,7 +176,70 @@ export class PickupService {
         AND addresses.kind = 'official'
         AND addresses.status = 'active'
       ORDER BY addresses.created_at DESC, addresses.id DESC
-    `).all().map(publicSourceAddress);
+    `).all();
+    const reservations = mailcomRecyclingReservations(this.db, rows
+      .filter((item) => item.source_provider === "mailcom")
+      .map((item) => item.email));
+    return rows.map((item) => publicSourceAddress({
+      ...item,
+      mailcom_recycling_reserved: reservations.has(String(item.email || "").trim().toLowerCase()),
+    }));
+  }
+
+  assertNotRecycling(items, message = "所选 Mail.com 地址正在轮换，不能上架") {
+    const reservations = mailcomRecyclingReservations(this.db, items.map((item) => item?.email));
+    if (reservations.size) {
+      throw publicError(message, 409, "PICKUP_MAILCOM_RECYCLING_RESERVED");
+    }
+  }
+
+  publishingState(value) {
+    const email = String(value || "").trim().toLowerCase();
+    return {
+      active: Boolean(email && Number(this.publishCounts.get(email) || 0) > 0),
+      version: email ? Number(this.publishVersions.get(email) || 0) : 0,
+    };
+  }
+
+  reservePublishing(items) {
+    this.assertNotRecycling(items);
+    const emails = [...new Set(items
+      .map((item) => String(item?.email || "").trim().toLowerCase())
+      .filter(Boolean))];
+    emails.forEach((email) => {
+      this.publishCounts.set(email, Number(this.publishCounts.get(email) || 0) + 1);
+      this.publishVersions.set(email, Number(this.publishVersions.get(email) || 0) + 1);
+    });
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      emails.forEach((email) => {
+        const remaining = Math.max(0, Number(this.publishCounts.get(email) || 0) - 1);
+        if (remaining) this.publishCounts.set(email, remaining);
+        else this.publishCounts.delete(email);
+        this.publishVersions.set(email, Number(this.publishVersions.get(email) || 0) + 1);
+      });
+    };
+    try {
+      this.assertNotRecycling(items);
+    } catch (error) {
+      release();
+      throw error;
+    }
+    return release;
+  }
+
+  async publish(items, payload) {
+    const release = this.reservePublishing(items);
+    try {
+      return await this.request("/api/admin/mailboxes", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    } finally {
+      release();
+    }
   }
 
   listSourceAddresses() {
@@ -189,6 +259,7 @@ export class PickupService {
     if (selected.length !== ids.length) {
       throw publicError("选择中包含不属于源头邮箱导入库存的地址", 409, "PICKUP_ADDRESS_MISMATCH");
     }
+    this.assertNotRecycling(selected);
     const blocked = selected.filter((item) => !item.eligible);
     if (blocked.length) {
       const detail = blocked.slice(0, 3).map((item) => `${item.email}（${item.blocked_reason}）`).join("、");
@@ -203,10 +274,7 @@ export class PickupService {
         extra: [`源头邮箱 ${item.source_email}`, item.label, item.purpose].filter(Boolean).join(" · ").slice(0, 2000),
       })),
     };
-    const result = await this.request("/api/admin/mailboxes", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
+    const result = await this.publish(selected, payload);
     const items = Array.isArray(result?.items) ? result.items : [];
     if (items.length !== selected.length) {
       throw publicError("取件站返回的邮箱数量不完整", 502, "PICKUP_RESULT_INCOMPLETE");
@@ -255,9 +323,11 @@ export class PickupService {
     if (selected.length !== ids.length) {
       throw publicError("选择中包含不属于当前注册账号列表的账号", 409, "PICKUP_ACCOUNT_MISMATCH");
     }
+    this.assertNotRecycling(selected, "所选注册账号使用的 Mail.com 地址正在轮换，不能上架");
     const payload = {
       upsert: true,
       clear_credentials: false,
+      relist: true,
       items: selected.map((item) => ({
         email: String(item.email || "").trim().toLowerCase(),
         ...(item.password_available && item.password
@@ -267,10 +337,7 @@ export class PickupService {
         extra: String(item.custom_name || item.display_name || "").trim().slice(0, 2000),
       })),
     };
-    const result = await this.request("/api/admin/mailboxes", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
+    const result = await this.publish(selected, payload);
     const items = Array.isArray(result?.items) ? result.items : [];
     if (items.length !== selected.length) {
       throw publicError("取件站返回的账号数量不完整", 502, "PICKUP_RESULT_INCOMPLETE");

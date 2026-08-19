@@ -21,11 +21,16 @@ RUN npm run build:local \
 
 FROM node:22-bookworm-slim AS runtime
 
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends chromium chromium-sandbox \
+  && rm -rf /var/lib/apt/lists/*
+
 ENV NODE_ENV=production \
   HOST=0.0.0.0 \
   PORT=4180 \
   DATA_DIR=/app/data \
-  DATABASE_PATH=/app/data/outlook-alias-hub.db
+  DATABASE_PATH=/app/data/outlook-alias-hub.db \
+  MAILCOM_BROWSER_EXECUTABLE=/usr/bin/chromium
 
 WORKDIR /app
 COPY --from=build --chown=node:node /app/node_modules ./node_modules

@@ -68,3 +68,78 @@ test("accepts email-only accounts for mailbox OTP recovery", () => {
   assert.equal(csv.payload.email, "csv@example.com");
   assert.equal(csv.payload.password, "");
 });
+
+test("parses external accounts with four-dash or bare HTTPS inbox links", () => {
+  const accounts = parseLocalAccountImport({
+    content: [
+      "Coding-Owl9A@icloud.com----https://dispose.lol/ib/ffVHmbNVuhin2DuP",
+      "second@example.com https://pickup.example.test/p/CaseSensitiveKey?view=Inbox",
+    ].join("\n"),
+  });
+
+  assert.deepEqual(accounts.map((item) => ({
+    email: item.payload.email,
+    password: item.payload.password,
+    inboxLink: item.inboxLink,
+  })), [
+    {
+      email: "coding-owl9a@icloud.com",
+      password: "",
+      inboxLink: "https://dispose.lol/ib/ffVHmbNVuhin2DuP",
+    },
+    {
+      email: "second@example.com",
+      password: "",
+      inboxLink: "https://pickup.example.test/p/CaseSensitiveKey?view=Inbox",
+    },
+  ]);
+});
+
+test("parses explicit inbox-link fields without changing legacy cashier rows", () => {
+  const [json] = parseLocalAccountImport({
+    content: JSON.stringify({
+      email: "json@example.com",
+      mail_link: "https://pickup.example.test/mail/JsonKey",
+    }),
+  });
+  assert.equal(json.inboxLink, "https://pickup.example.test/mail/JsonKey");
+
+  const [csv] = parseLocalAccountImport({
+    content: "email,inbox link\ncsv@example.com,https://pickup.example.test/mail/CsvKey",
+  });
+  assert.equal(csv.inboxLink, "https://pickup.example.test/mail/CsvKey");
+
+  const [legacy] = parseLocalAccountImport({
+    content: "legacy@example.com Password123 https://cashier.example.test/session/CaseKey",
+  });
+  assert.equal(legacy.payload.password, "Password123");
+  assert.equal(legacy.payload.cashier_url, "https://cashier.example.test/session/CaseKey");
+  assert.equal(legacy.inboxLink, "");
+
+  const [dashedPassword] = parseLocalAccountImport({
+    content: "dashed@example.com password----with----dashes",
+  });
+  assert.equal(dashedPassword.payload.password, "password----with----dashes");
+  assert.equal(dashedPassword.inboxLink, "");
+});
+
+test("rejects unsafe, malformed, or multiply assigned inbox links", () => {
+  for (const content of [
+    "one@example.com----http://dispose.lol/ib/plain-http",
+    "one@example.com----https://user:password@dispose.lol/ib/credentialed",
+    "one@example.com----not-a-link",
+  ]) {
+    assert.throws(() => parseLocalAccountImport({ content }), (error) => {
+      assert.equal(error.status, 400);
+      assert.doesNotMatch(error.message, /plain-http|credentialed|not-a-link/);
+      return true;
+    });
+  }
+
+  assert.throws(() => parseLocalAccountImport({
+    content: [
+      "one@example.com----https://dispose.lol/ib/shared-key",
+      "two@example.com----https://dispose.lol/ib/shared-key",
+    ].join("\n"),
+  }), /重复取件链接/);
+});

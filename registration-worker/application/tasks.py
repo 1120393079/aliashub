@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import json
 import queue
+import re
+import secrets
 import threading
 import time
 import uuid
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
@@ -48,10 +51,16 @@ TASK_STATUS_INTERRUPTED = "interrupted"
 TASK_STATUS_CANCEL_REQUESTED = "cancel_requested"
 TASK_STATUS_CANCELLED = "cancelled"
 TASK_STATUS_PAUSED = "paused"
+MAX_REGISTRATION_BATCH_CONCURRENCY = 20
 
 
 def _mask_proxy_for_log(proxy: str | None) -> str:
     return redact_proxy_url(proxy)
+
+
+def _mask_phone_for_log(value: Any) -> str:
+    digits = "".join(char for char in str(value or "") if char.isdigit())
+    return f"{'*' * max(len(digits) - 4, 3)}{digits[-4:]}" if digits else "***"
 
 TERMINAL_TASK_STATUSES = {
     TASK_STATUS_SUCCEEDED,
@@ -68,7 +77,43 @@ ACTIVE_TASK_STATUSES = {
 
 _task_locks: dict[str, threading.Lock] = {}
 _task_locks_guard = threading.Lock()
+_phone_bind_create_lock = threading.Lock()
+_phone_bind_secret_lock = threading.RLock()
+_phone_bind_secrets: dict[str, tuple[float, str]] = {}
+_PHONE_BIND_SECRET_TTL_SECONDS = 2 * 60 * 60
+_PHONE_BIND_TASK_ID_PATTERN = re.compile(r"^ahpb_[A-Za-z0-9_-]{20,64}$")
 _REGISTRATION_QUEUE_PAUSED_KEY = "registration_queue_paused"
+_registration_execution_slots = threading.BoundedSemaphore(MAX_REGISTRATION_BATCH_CONCURRENCY)
+
+
+def _prune_phone_bind_secrets(now: float | None = None) -> None:
+    current = time.monotonic() if now is None else now
+    expired = [ref for ref, (expires_at, _value) in _phone_bind_secrets.items() if expires_at <= current]
+    for ref in expired:
+        _phone_bind_secrets.pop(ref, None)
+
+
+def _store_phone_bind_secret(value: str) -> str:
+    ref = secrets.token_urlsafe(24)
+    with _phone_bind_secret_lock:
+        _prune_phone_bind_secrets()
+        _phone_bind_secrets[ref] = (
+            time.monotonic() + _PHONE_BIND_SECRET_TTL_SECONDS,
+            str(value or ""),
+        )
+    return ref
+
+
+def _take_phone_bind_secret(ref: str) -> str:
+    with _phone_bind_secret_lock:
+        _prune_phone_bind_secrets()
+        item = _phone_bind_secrets.pop(str(ref or ""), None)
+    return item[1] if item else ""
+
+
+def _discard_phone_bind_secret(ref: str) -> None:
+    with _phone_bind_secret_lock:
+        _phone_bind_secrets.pop(str(ref or ""), None)
 
 
 def _utcnow() -> datetime:
@@ -178,6 +223,29 @@ class TaskExecutionStopped(RuntimeError):
     """Raised when a detached worker tries to perform a fenced side effect."""
 
 
+def _bounded_registration_concurrency(value: Any, total: int) -> int:
+    return min(
+        max(int(value or 1), 1),
+        max(int(total or 1), 1),
+        MAX_REGISTRATION_BATCH_CONCURRENCY,
+    )
+
+
+@contextmanager
+def _registration_execution_slot(cancel_check: Callable[[], bool] | None = None):
+    while True:
+        if callable(cancel_check) and cancel_check():
+            raise TaskExecutionStopped("任务已取消")
+        if _registration_execution_slots.acquire(timeout=0.25):
+            break
+    try:
+        if callable(cancel_check) and cancel_check():
+            raise TaskExecutionStopped("任务已取消")
+        yield
+    finally:
+        _registration_execution_slots.release()
+
+
 def _worker_writes_allowed(task: TaskModel | None) -> bool:
     return bool(
         task
@@ -207,16 +275,34 @@ def _task_result_seed(result: dict[str, Any] | None = None) -> dict[str, Any]:
 
 
 def _task_account_keys(task_type: str, payload: dict[str, Any]) -> list[str]:
+    if task_type == TASK_TYPE_REGISTER:
+        email = str(payload.get("email") or "").strip().lower()
+        return [f"registration-email:{email}"] if email else []
     if task_type in {TASK_TYPE_ACCOUNT_CHECK, TASK_TYPE_PLATFORM_ACTION}:
         account_id = int(payload.get("account_id", 0) or 0)
         if account_id > 0:
             return [f"account:{account_id}"]
     if task_type in {TASK_TYPE_PHONE_BIND, TASK_TYPE_CODEX_OAUTH}:
         ids = [int(item) for item in payload.get("ids") or [] if int(item or 0) > 0]
+        if task_type == TASK_TYPE_PHONE_BIND and not ids:
+            ids = [int(item) for item in payload.get("fallback_ids") or [] if int(item or 0) > 0]
         if not ids and int(payload.get("account_id") or 0) > 0:
             ids = [int(payload.get("account_id") or 0)]
         return [f"account:{account_id}" for account_id in ids]
     return []
+
+
+def _registration_batch_id(payload: dict[str, Any]) -> str:
+    extra = payload.get("extra") if isinstance(payload.get("extra"), dict) else {}
+    batch_id = str(extra.get("registration_batch_id") or "").strip()
+    if not batch_id or len(batch_id) > 64:
+        return ""
+    if any(
+        not char.isascii() or (not char.isalnum() and char not in "-_")
+        for char in batch_id
+    ):
+        return ""
+    return batch_id
 
 
 def _task_runtime_lane(task_type: str, platform: str, payload: dict[str, Any]) -> str:
@@ -225,13 +311,35 @@ def _task_runtime_lane(task_type: str, platform: str, payload: dict[str, Any]) -
     if not normalized_platform:
         return ""
     if task_type == TASK_TYPE_REGISTER:
-        return f"{normalized_platform}:registration"
+        batch_id = _registration_batch_id(payload)
+        return f"{normalized_platform}:registration{f':{batch_id}' if batch_id else ''}"
+    if task_type == TASK_TYPE_PHONE_BIND:
+        return f"{normalized_platform}:phone_bind"
     if (
         task_type == TASK_TYPE_PLATFORM_ACTION
         and str(payload.get("action_id", "") or "").strip() == "refresh_access_token"
     ):
         return f"{normalized_platform}:at_recovery"
     return normalized_platform
+
+
+def _task_runtime_lane_limit(
+    task_type: str,
+    payload: dict[str, Any],
+    fallback: int,
+) -> int:
+    if task_type == TASK_TYPE_PHONE_BIND:
+        return 3
+    if task_type != TASK_TYPE_REGISTER:
+        return max(int(fallback or 1), 1)
+    if not _registration_batch_id(payload):
+        return 1
+    extra = payload.get("extra") if isinstance(payload.get("extra"), dict) else {}
+    try:
+        requested = int(extra.get("registration_batch_concurrency") or 1)
+    except (TypeError, ValueError):
+        requested = 1
+    return min(max(requested, 1), MAX_REGISTRATION_BATCH_CONCURRENCY)
 
 
 def _task_dispatch_priority(task_type: str, payload: dict[str, Any]) -> int:
@@ -307,8 +415,9 @@ def create_task(
     payload: dict[str, Any],
     progress_total: int = 1,
     result_seed: dict[str, Any] | None = None,
+    task_id: str = "",
 ) -> dict[str, Any]:
-    task_id = f"task_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
+    task_id = str(task_id or f"task_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}")
     task = TaskModel(
         id=task_id,
         type=task_type,
@@ -372,16 +481,88 @@ def create_platform_action_task(payload: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _phone_bind_target_ids(payload: dict[str, Any]) -> set[int]:
+    selected = {int(item) for item in payload.get("ids") or [] if int(item or 0) > 0}
+    if selected:
+        return selected
+    return {int(item) for item in payload.get("fallback_ids") or [] if int(item or 0) > 0}
+
+
+def _active_phone_bind_conflicts(target_ids: set[int]) -> set[int]:
+    if not target_ids:
+        return set()
+    with Session(engine) as session:
+        tasks = session.exec(
+            select(TaskModel).where(TaskModel.type == TASK_TYPE_PHONE_BIND)
+        ).all()
+    conflicts: set[int] = set()
+    for task in tasks:
+        if task.status in TERMINAL_TASK_STATUSES:
+            continue
+        conflicts.update(target_ids & _phone_bind_target_ids(task.get_payload()))
+    return conflicts
+
+
 def create_phone_bind_task(payload: dict[str, Any]) -> dict[str, Any]:
     selected = [item for item in payload.get("ids") or [] if int(item or 0) > 0]
     fallback = [item for item in payload.get("fallback_ids") or [] if int(item or 0) > 0]
     total = len(selected) if selected else max(len(fallback), 1)
-    return create_task(
-        task_type=TASK_TYPE_PHONE_BIND,
-        platform=str(payload.get("platform", "chatgpt") or "chatgpt"),
-        payload=payload,
-        progress_total=total,
-    )
+    target_ids = _phone_bind_target_ids(payload)
+    if len(target_ids) > 100:
+        raise ValueError("phone-bind supports at most 100 selected accounts")
+    concurrency = int(payload.get("concurrency") or 1)
+    if concurrency < 1 or concurrency > 3:
+        raise ValueError("phone-bind concurrency must be between 1 and 3")
+    requested_task_id = str(payload.get("task_id") or "").strip()
+    if requested_task_id and not _PHONE_BIND_TASK_ID_PATTERN.fullmatch(requested_task_id):
+        raise ValueError("phone-bind task_id is invalid")
+    with _phone_bind_create_lock:
+        if requested_task_id:
+            with Session(engine) as session:
+                existing = session.get(TaskModel, requested_task_id)
+            if existing:
+                existing_payload = existing.get_payload()
+                same_request = (
+                    existing.type == TASK_TYPE_PHONE_BIND
+                    and existing.platform == str(payload.get("platform", "chatgpt") or "chatgpt")
+                    and _phone_bind_target_ids(existing_payload) == target_ids
+                    and str(existing_payload.get("browser_mode") or "camoufox_headed")
+                    == str(payload.get("browser_mode") or "camoufox_headed")
+                    and int(existing_payload.get("sms_wait_seconds") or 30)
+                    == int(payload.get("sms_wait_seconds") or 30)
+                    and int(existing_payload.get("concurrency") or 1)
+                    == int(payload.get("concurrency") or 1)
+                    and str(existing_payload.get("bit_profile_id") or "")
+                    == str(payload.get("bit_profile_id") or "")
+                )
+                if not same_request:
+                    raise ValueError("phone-bind task_id is already used by a different request")
+                return serialize_task(existing)
+        conflicts = _active_phone_bind_conflicts(target_ids)
+        if conflicts:
+            rendered = ", ".join(str(item) for item in sorted(conflicts))
+            raise ValueError(f"账号已有进行中的手机绑定任务: {rendered}")
+        phone_lines = str(payload.get("phone_lines") or "")
+        if not phone_lines.strip():
+            raise ValueError("phone_lines is empty")
+        if len(phone_lines) > 50_000:
+            raise ValueError("phone_lines is too large")
+        secret_ref = _store_phone_bind_secret(phone_lines)
+        persisted_payload = dict(payload)
+        persisted_payload.pop("task_id", None)
+        persisted_payload.pop("phone_lines", None)
+        persisted_payload["phone_lines_ref"] = secret_ref
+        try:
+            return create_task(
+                task_type=TASK_TYPE_PHONE_BIND,
+                platform=str(payload.get("platform", "chatgpt") or "chatgpt"),
+                payload=persisted_payload,
+                progress_total=total,
+                task_id=requested_task_id,
+            )
+        except Exception:
+            _discard_phone_bind_secret(secret_ref)
+            raise
 
 
 def create_codex_oauth_task(payload: dict[str, Any]) -> dict[str, Any]:
@@ -508,6 +689,7 @@ def append_task_event(task_id: str, message: str, *, event_type: str = "log", le
 
 def mark_incomplete_tasks_interrupted() -> None:
     interrupted_ids: list[str] = []
+    phone_bind_secret_refs: list[str] = []
     with Session(engine) as session:
         non_terminal = list(ACTIVE_TASK_STATUSES)
         tasks = session.exec(
@@ -522,7 +704,11 @@ def mark_incomplete_tasks_interrupted() -> None:
             task.updated_at = _utcnow()
             session.add(task)
             interrupted_ids.append(task.id)
+            if task.type == TASK_TYPE_PHONE_BIND:
+                phone_bind_secret_refs.append(str(task.get_payload().get("phone_lines_ref") or ""))
         session.commit()
+    for secret_ref in phone_bind_secret_refs:
+        _discard_phone_bind_secret(secret_ref)
     for task_id in interrupted_ids:
         append_task_event(
             task_id,
@@ -539,6 +725,8 @@ def request_cancel(task_id: str) -> Optional[dict[str, Any]]:
     )
     if not task:
         return None
+    if task.type == TASK_TYPE_PHONE_BIND:
+        _discard_phone_bind_secret(str(task.get_payload().get("phone_lines_ref") or ""))
     append_task_event(task_id, "已请求取消任务", event_type="state", level="warning")
     return serialize_task(task)
 
@@ -680,6 +868,8 @@ def force_release_task(task_id: str) -> Optional[dict[str, Any]]:
     task = _mutate_task(task_id, _release)
     if not task:
         return None
+    if task.type == TASK_TYPE_PHONE_BIND:
+        _discard_phone_bind_secret(str(task.get_payload().get("phone_lines_ref") or ""))
     if released:
         append_task_event(
             task_id,
@@ -735,9 +925,10 @@ def claim_next_runnable_task(
             platform = task.platform or str(payload.get("platform", "") or "")
             runtime_lane = _task_runtime_lane(task.type, platform, payload)
             account_keys = _task_account_keys(task.type, payload)
-            lane_limit = max(
-                int(max_parallel_by_lane.get(runtime_lane, max_parallel_per_platform) or 1),
-                1,
+            lane_limit = _task_runtime_lane_limit(
+                task.type,
+                payload,
+                max_parallel_by_lane.get(runtime_lane, max_parallel_per_platform),
             )
             if runtime_lane and running_platform_counts.get(runtime_lane, 0) >= lane_limit:
                 continue
@@ -1267,11 +1458,26 @@ def execute_task(task_id: str) -> None:
     logger.mark_running()
 
     if logger.is_cancel_requested():
+        if task_type == TASK_TYPE_PHONE_BIND:
+            _discard_phone_bind_secret(str(payload.get("phone_lines_ref") or ""))
         logger.finish(TASK_STATUS_CANCELLED, error="任务在启动后立即被取消")
         return
     if not logger.wait_if_paused():
+        if task_type == TASK_TYPE_PHONE_BIND:
+            _discard_phone_bind_secret(str(payload.get("phone_lines_ref") or ""))
         logger.finish(TASK_STATUS_CANCELLED, error="任务已取消")
         return
+
+    if task_type == TASK_TYPE_PHONE_BIND:
+        phone_lines = _take_phone_bind_secret(str(payload.get("phone_lines_ref") or ""))
+        payload = dict(payload)
+        payload.pop("phone_lines_ref", None)
+        if not phone_lines:
+            error = "临时接码凭据已失效，请重新提交任务"
+            logger.record_error(error)
+            logger.finish(TASK_STATUS_FAILED, error=error)
+            return
+        payload["phone_lines"] = phone_lines
 
     handlers: dict[str, Callable[[dict[str, Any], TaskLogger], None]] = {
         TASK_TYPE_REGISTER: _execute_register_task,
@@ -1643,7 +1849,7 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
     from core.proxy_pool import proxy_pool
 
     count = max(int(payload.get("count", 1) or 1), 1)
-    concurrency = min(max(int(payload.get("concurrency", 1) or 1), 1), count, 5)
+    concurrency = _bounded_registration_concurrency(payload.get("concurrency", 1), count)
     platform_name = str(payload.get("platform", ""))
     email = payload.get("email") or None
     password = payload.get("password") or None
@@ -2072,6 +2278,19 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
                 except Exception:
                     pass
 
+    def _do_one_with_execution_slot(index: int) -> bool | str:
+        while True:
+            if logger.is_cancel_requested():
+                return "__cancel_requested__"
+            if _is_paused() and not _wait_if_paused():
+                return "__cancel_requested__"
+            if _registration_execution_slots.acquire(timeout=0.25):
+                break
+        try:
+            return _do_one(index)
+        finally:
+            _registration_execution_slots.release()
+
     try:
         submitted = 0
         completed = 0
@@ -2147,7 +2366,7 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
                     and _should_submit_more()
                     and len(futures) < concurrency
                 ):
-                    futures[pool.submit(_do_one, submitted)] = submitted
+                    futures[pool.submit(_do_one_with_execution_slot, submitted)] = submitted
                     submitted += 1
 
                 if futures:
@@ -2278,6 +2497,8 @@ def _execute_phone_bind_task(payload: dict[str, Any], logger: TaskLogger) -> Non
             bit_profile_id=str(payload.get("bit_profile_id") or ""),
             concurrency=max(int(payload.get("concurrency") or 1), 1),
             log_fn=logger.log,
+            cancel_check=logger.is_cancel_requested,
+            sms_wait_seconds=min(max(int(payload.get("sms_wait_seconds") or 30), 30), 1800),
         )
     except ValueError as exc:
         logger.record_error(str(exc))
@@ -2290,9 +2511,17 @@ def _execute_phone_bind_task(payload: dict[str, Any], logger: TaskLogger) -> Non
 
     for _ in range(int(result.get("success_count") or 0)):
         logger.record_success()
+
+    if logger.is_cancel_requested() or result.get("cancelled"):
+        logger.set_result_data(result)
+        done = int(result.get("total") or 0)
+        logger.set_progress(done, total)
+        logger.finish(TASK_STATUS_CANCELLED, error="任务已取消")
+        return
+
     for item in result.get("results") or []:
         if item.get("ok"):
-            logger.log(f"✓ 绑定成功: {item.get('email')} -> {item.get('phone')}")
+            logger.log(f"✓ 绑定成功: {item.get('email')} -> {_mask_phone_for_log(item.get('phone'))}")
         else:
             error = str(item.get("error") or "unknown error")
             logger.record_error(error)
@@ -2751,10 +2980,9 @@ def _execute_gopay_pay_chatgpt_task(payload: dict[str, Any], logger: TaskLogger)
             )
             return
         register_extra = dict(payload.get("register_extra") or {})
-        # 注册阶段也按任务并发数并行（之前是串行 for 循环，导致 10 个号一个
-        # 一个排队注册）。并发上限 = min(payload.concurrency, register_count)。
-        register_concurrency = min(
-            max(int(payload.get("concurrency") or 1), 1), register_count
+        # 注册阶段也按任务并发数并行；所有入口共享全局 5 槽上限。
+        register_concurrency = _bounded_registration_concurrency(
+            payload.get("concurrency"), register_count
         )
         # 短链模式：注册浏览器物理复用——在同一浏览器里注册→拿短链→抓 midtrans。
         _short_link_early = payload.get("use_short_link")
@@ -3052,7 +3280,7 @@ def _register_chatgpt_shortlink_grab_for_gopay(
         "captcha_solver": str(register_extra.get("captcha_solver") or "auto"),
         "extra": dict(register_extra or {}),
     }
-    concurrency = min(max(int(concurrency or 1), 1), max(int(register_count), 1))
+    concurrency = _bounded_registration_concurrency(concurrency, register_count)
 
     results: list[dict[str, Any]] = []
     results_lock = threading.Lock()
@@ -3108,7 +3336,8 @@ def _register_chatgpt_shortlink_grab_for_gopay(
             platform = _build_platform_instance(
                 "chatgpt", slot_payload, logger, resolved_proxy=resolved_proxy,
             )
-            account = platform.register()
+            with _registration_execution_slot(logger.is_cancel_requested):
+                account = platform.register()
             _save_account_for_task(logger, account)
             with Session(engine) as session:
                 fresh = session.exec(
@@ -3177,7 +3406,7 @@ def _register_chatgpt_accounts_for_gopay(
         "captcha_solver": str(register_extra.get("captcha_solver") or "auto"),
         "extra": dict(register_extra or {}),
     }
-    concurrency = min(max(int(concurrency or 1), 1), max(int(register_count), 1))
+    concurrency = _bounded_registration_concurrency(concurrency, register_count)
 
     new_ids: list[int] = []
     new_ids_lock = threading.Lock()
@@ -3195,7 +3424,8 @@ def _register_chatgpt_accounts_for_gopay(
             platform = _build_platform_instance(
                 "chatgpt", payload, logger, resolved_proxy=resolved_proxy
             )
-            account = platform.register()
+            with _registration_execution_slot(logger.is_cancel_requested):
+                account = platform.register()
             _save_account_for_task(logger, account)
             _mark_outlook_mailbox_event(getattr(platform, "mailbox", None), account, "registration_success", logger)
             # save_account 返回的 model 出 session 即 detached，访问 .id 会抛

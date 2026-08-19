@@ -1,0 +1,1 @@
+"""Payment-link extractor tests."""
