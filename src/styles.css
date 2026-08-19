@@ -438,7 +438,7 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .registration-mailbox-group-toggle { min-width: 0; width: 100%; min-height: 52px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 8px; border: 0; padding: 8px 10px; background: var(--surface); color: var(--text); text-align: left; }
 .registration-mailbox-group-toggle:hover { background: var(--surface-2); }
 .registration-mailbox-group-toggle:focus-visible, .registration-mailbox-option:focus-visible { outline: 2px solid var(--green); outline-offset: -2px; }
-.registration-mailbox-group-toggle > span, .registration-mailbox-option > span { min-width: 0; display: grid; gap: 2px; }
+.registration-mailbox-group-toggle > .registration-mailbox-copy, .registration-mailbox-option > .registration-mailbox-copy { min-width: 0; display: grid; gap: 2px; }
 .registration-mailbox-group-toggle b { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .registration-mailbox-group-toggle small { overflow: hidden; color: var(--text-soft); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
 .registration-mailbox-group-toggle strong { color: var(--text-soft); font-size: 9px; font-weight: 650; white-space: nowrap; }
