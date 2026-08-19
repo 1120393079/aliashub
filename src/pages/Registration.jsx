@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, Cable, Check, CircleStop, ClipboardCopy, Copy, CreditCard, Database, Download, ExternalLink, EyeOff, Fingerprint, Gift, Globe2, KeyRound, Link2, ListChecks, LoaderCircle, Mail, Monitor, Network, Pause, Pencil, Play, RefreshCw, Save, ScrollText, Search, Server, ShieldCheck, SlidersHorizontal, Smartphone, Store, Trash2, Upload, UserPlus, WalletCards, Workflow } from "lucide-react";
+import { AlertTriangle, Cable, Check, ChevronDown, CircleStop, ClipboardCopy, Copy, CreditCard, Database, Download, ExternalLink, EyeOff, Fingerprint, Gift, Globe2, KeyRound, Link2, ListChecks, LoaderCircle, Mail, Monitor, Network, Pause, Pencil, Play, RefreshCw, Save, ScrollText, Search, Server, ShieldCheck, SlidersHorizontal, Smartphone, Store, Trash2, Upload, UserPlus, WalletCards, Workflow } from "lucide-react";
 import { api } from "../api.js";
 import { planAgentIdentityBulk, runAgentIdentityBulk } from "../agent-identity-bulk.js";
-import { Button, ConfirmDialog, EmptyState, FormField, IconButton, LoadingBlock, Modal, Pagination, Segmented, StatusBadge, useToast } from "../components.jsx";
+import { Button, ConfirmDialog, EmptyState, FormField, IconButton, LoadingBlock, Modal, Pagination, ProviderMark, Segmented, StatusBadge, useToast } from "../components.jsx";
 import { providerMeta } from "../providers.js";
 import { copyText, formatDate } from "../utils.js";
 import {
@@ -76,6 +76,100 @@ function downloadTextFile(filename, content, type) {
   link.click();
   link.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+}
+
+const registrationProviderOrder = new Map([
+  ["microsoft", 0],
+  ["google", 1],
+  ["icloud", 2],
+  ["mailcom", 3],
+  ["netease", 4],
+]);
+
+function registrationMailboxSummary(account) {
+  const bases = Array.isArray(account?.bases) ? account.bases : [];
+  const available = bases.filter((base) => !base.registration_disabled).length;
+  if (account?.registration_mode === "direct") {
+    return available ? `${available} 个可直接注册地址` : "暂无可用地址";
+  }
+  return `${bases.length} 个基础地址 · 支持 +tag 分裂`;
+}
+
+function RegistrationMailboxPicker({ accounts = [], value, onChange }) {
+  const groups = useMemo(() => {
+    const grouped = new Map();
+    for (const account of accounts) {
+      const provider = String(account?.provider || "microsoft");
+      const current = grouped.get(provider) || [];
+      current.push(account);
+      grouped.set(provider, current);
+    }
+    return [...grouped.entries()]
+      .map(([provider, items]) => ({
+        provider,
+        items: [...items].sort((left, right) => String(left.email || "").localeCompare(String(right.email || ""), "zh-CN")),
+      }))
+      .sort((left, right) => (registrationProviderOrder.get(left.provider) ?? 99) - (registrationProviderOrder.get(right.provider) ?? 99)
+        || providerMeta(left.provider).name.localeCompare(providerMeta(right.provider).name, "zh-CN"));
+  }, [accounts]);
+  const selected = accounts.find((account) => String(account.id) === String(value));
+  const selectedProvider = selected?.provider || "";
+  const [expandedProvider, setExpandedProvider] = useState("");
+
+  useEffect(() => {
+    if (selectedProvider) {
+      setExpandedProvider(selectedProvider);
+      return;
+    }
+    setExpandedProvider((current) => current || groups[0]?.provider || "");
+  }, [groups, selectedProvider]);
+
+  if (!groups.length) {
+    return <div className="registration-mailbox-empty"><Mail size={17} /><span>没有已连接的源头邮箱，请先到邮箱工作台添加。</span></div>;
+  }
+
+  return <div className="registration-mailbox-picker">
+    <div className="registration-mailbox-groups" role="list" aria-label="邮箱提供商">
+      {groups.map(({ provider, items }) => {
+        const meta = providerMeta(provider);
+        const expanded = expandedProvider === provider;
+        const regionId = `registration-mailbox-${provider}-submenu`;
+        const providerSelected = items.some((item) => String(item.id) === String(value));
+        return <article className={`registration-mailbox-group${expanded ? " is-expanded" : ""}${providerSelected ? " is-selected" : ""}`} key={provider}>
+          <button
+            type="button"
+            className="registration-mailbox-group-toggle"
+            aria-expanded={expanded}
+            aria-controls={regionId}
+            onClick={() => setExpandedProvider((current) => current === provider ? "" : provider)}
+          >
+            <ProviderMark provider={provider} size={30} />
+            <span><b>{meta.name}</b><small>{meta.shortDescription}</small></span>
+            <strong>{items.length} 个</strong>
+            <ChevronDown size={16} />
+          </button>
+          {expanded && <div className="registration-mailbox-submenu" id={regionId} role="listbox" aria-label={`${meta.name}邮箱`}>
+            {items.map((account) => {
+              const accountSelected = String(account.id) === String(value);
+              return <button
+                type="button"
+                role="option"
+                aria-selected={accountSelected}
+                className={`registration-mailbox-option${accountSelected ? " is-selected" : ""}`}
+                key={account.id}
+                onClick={() => onChange(String(account.id))}
+              >
+                <ProviderMark provider={provider} size={22} />
+                <span><b>{account.email}</b><small>{registrationMailboxSummary(account)}</small></span>
+                {accountSelected && <Check size={16} />}
+              </button>;
+            })}
+          </div>}
+        </article>;
+      })}
+    </div>
+    {selected && <div className="registration-mailbox-selected" role="status"><Check size={15} /><span><small>当前注册邮箱</small><b>{selected.email}</b></span><StatusBadge status={selected.status === "connected" ? "active" : "warning"}>{selected.status === "connected" ? "已连接" : "需更新"}</StatusBadge></div>}
+  </div>;
 }
 
 function PickupStatusCell({ inventory, email, compact = false }) {
@@ -2477,7 +2571,7 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
                 });
               }}><option value="source">邮箱工作台地址</option><option value="inbox_link">链接取件邮箱池（可用 {inboxLinkMailboxCount}）</option></select></FormField>
               {!isInboxLinkRegistration && <div className="form-grid two">
-                <FormField label="源头邮箱"><select value={form.accountId} onChange={(event) => changeAccount(event.target.value)}><option value="">请选择</option>{options.accounts.map((item) => <option key={item.id} value={item.id}>{item.email}</option>)}</select></FormField>
+                <div className="form-field registration-mailbox-field"><span className="field-label">源头邮箱</span><RegistrationMailboxPicker accounts={options.accounts} value={form.accountId} onChange={changeAccount} /><small>先选择邮箱类型，再从子菜单选择具体母号</small></div>
                 <FormField label={isDirectRegistration ? directAddressLabel : "基础地址"}><select value={form.baseAddressId} onChange={(event) => {
                   const baseAddressId = event.target.value;
                   const available = directRegistrationBases(selectedAccount, baseAddressId).length;

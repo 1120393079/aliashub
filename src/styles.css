@@ -429,6 +429,37 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .registration-launch-form { display: grid; gap: 14px; padding: 17px; }
 .registration-launch-form > .button { justify-self: start; }
 .registration-launch-form .inline-alert { margin: 0; }
+.registration-mailbox-field { gap: 6px; }
+.registration-mailbox-picker { min-width: 0; display: grid; gap: 7px; }
+.registration-mailbox-groups { min-width: 0; display: grid; gap: 6px; }
+.registration-mailbox-group { min-width: 0; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--surface); transition: border-color .16s ease, box-shadow .16s ease; }
+.registration-mailbox-group:hover, .registration-mailbox-group.is-expanded { border-color: color-mix(in srgb, var(--green) 45%, var(--line-strong)); }
+.registration-mailbox-group.is-selected { box-shadow: 0 0 0 2px color-mix(in srgb, var(--green) 10%, transparent); }
+.registration-mailbox-group-toggle { min-width: 0; width: 100%; min-height: 52px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 8px; border: 0; padding: 8px 10px; background: var(--surface); color: var(--text); text-align: left; }
+.registration-mailbox-group-toggle:hover { background: var(--surface-2); }
+.registration-mailbox-group-toggle:focus-visible, .registration-mailbox-option:focus-visible { outline: 2px solid var(--green); outline-offset: -2px; }
+.registration-mailbox-group-toggle > span, .registration-mailbox-option > span { min-width: 0; display: grid; gap: 2px; }
+.registration-mailbox-group-toggle b { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.registration-mailbox-group-toggle small { overflow: hidden; color: var(--text-soft); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.registration-mailbox-group-toggle strong { color: var(--text-soft); font-size: 9px; font-weight: 650; white-space: nowrap; }
+.registration-mailbox-group-toggle > svg { color: var(--text-faint); transition: transform .16s ease; }
+.registration-mailbox-group.is-expanded .registration-mailbox-group-toggle > svg { transform: rotate(180deg); color: var(--green); }
+.registration-mailbox-submenu { display: grid; gap: 3px; max-height: 218px; overflow-y: auto; border-top: 1px solid var(--line); padding: 5px; background: var(--surface-2); }
+.registration-mailbox-option { min-width: 0; width: 100%; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 7px; border: 1px solid transparent; border-radius: 5px; padding: 7px; background: transparent; color: var(--text); text-align: left; }
+.registration-mailbox-option:hover { background: var(--surface); border-color: var(--line); }
+.registration-mailbox-option.is-selected { border-color: color-mix(in srgb, var(--green) 48%, var(--line)); background: var(--green-soft); color: var(--green-dark); }
+.registration-mailbox-option b { min-width: 0; overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.registration-mailbox-option small { color: var(--text-faint); font-size: 8px; }
+.registration-mailbox-option.is-selected small { color: var(--green-dark); }
+.registration-mailbox-option > svg { flex: 0 0 auto; color: var(--green); }
+.registration-mailbox-selected { min-width: 0; display: flex; align-items: center; gap: 7px; padding: 7px 8px; border: 1px solid color-mix(in srgb, var(--green) 28%, var(--line)); border-radius: 6px; background: var(--green-soft); color: var(--green-dark); }
+.registration-mailbox-selected > svg { flex: 0 0 auto; }
+.registration-mailbox-selected > span { min-width: 0; display: grid; gap: 2px; flex: 1; }
+.registration-mailbox-selected small { font-size: 8px; }
+.registration-mailbox-selected b { overflow: hidden; color: var(--text); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.registration-mailbox-selected .status-badge { flex: 0 0 auto; }
+.registration-mailbox-empty { min-height: 52px; display: flex; align-items: center; gap: 7px; padding: 9px; border: 1px dashed var(--line-strong); border-radius: 6px; background: var(--surface-2); color: var(--text-soft); font-size: 9px; }
+.registration-mailbox-empty > svg { flex: 0 0 auto; color: var(--amber); }
 .registration-inline-link { margin-left: 8px; border: 0; border-bottom: 1px solid currentColor; background: transparent; color: inherit; font-size: 9px; cursor: pointer; }
 .inbox-link-page { max-width: 1320px; margin: 0 auto; }
 .inbox-link-summary { min-height: 54px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: 7px; background: var(--surface); box-shadow: var(--shadow); }
