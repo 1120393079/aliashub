@@ -144,7 +144,7 @@ function RegistrationMailboxPicker({ accounts = [], value, onChange }) {
             onClick={() => setExpandedProvider((current) => current === provider ? "" : provider)}
           >
             <ProviderMark provider={provider} size={30} />
-            <span><b>{meta.name}</b><small>{meta.shortDescription}</small></span>
+            <span className="registration-mailbox-copy"><b>{meta.name}</b><small>{meta.shortDescription}</small></span>
             <strong>{items.length} 个</strong>
             <ChevronDown size={16} />
           </button>
@@ -160,7 +160,7 @@ function RegistrationMailboxPicker({ accounts = [], value, onChange }) {
                 onClick={() => onChange(String(account.id))}
               >
                 <ProviderMark provider={provider} size={22} />
-                <span><b>{account.email}</b><small>{registrationMailboxSummary(account)}</small></span>
+                <span className="registration-mailbox-copy"><b>{account.email}</b><small>{registrationMailboxSummary(account)}</small></span>
                 {accountSelected && <Check size={16} />}
               </button>;
             })}
@@ -168,7 +168,7 @@ function RegistrationMailboxPicker({ accounts = [], value, onChange }) {
         </article>;
       })}
     </div>
-    {selected && <div className="registration-mailbox-selected" role="status"><Check size={15} /><span><small>当前注册邮箱</small><b>{selected.email}</b></span><StatusBadge status={selected.status === "connected" ? "active" : "warning"}>{selected.status === "connected" ? "已连接" : "需更新"}</StatusBadge></div>}
+    {selected && <div className="registration-mailbox-selected" role="status"><Check size={15} /><span className="registration-mailbox-copy"><small>当前注册邮箱</small><b>{selected.email}</b></span><StatusBadge status={selected.status === "connected" ? "active" : "warning"}>{selected.status === "connected" ? "已连接" : "需更新"}</StatusBadge></div>}
   </div>;
 }
 
