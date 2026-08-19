@@ -668,6 +668,8 @@ export default function SourcesPage({ refreshKey, onDataChange, onNavigate, addO
   const [removing, setRemoving] = useState(null);
   const [aliasSyncTarget, setAliasSyncTarget] = useState(null);
   const [mailcomImportOpen, setMailcomImportOpen] = useState(false);
+  const [neteaseImportOpen, setNeteaseImportOpen] = useState(false);
+  const [neteaseAliasTarget, setNeteaseAliasTarget] = useState(null);
   const [expandedProviders, setExpandedProviders] = useState(() => new Set());
   const [mailcomDomain, setMailcomDomain] = useState("mail.com");
   const [mailcomBatch, setMailcomBatch] = useState({
@@ -715,7 +717,11 @@ export default function SourcesPage({ refreshKey, onDataChange, onNavigate, addO
   };
   const connectionDone = () => { load(); onDataChange(); };
   const mailcomImportDone = async () => { await load(); onDataChange(); };
-  const openAliasSync = (account, icloudKind = "") => setAliasSyncTarget({ account, icloudKind });
+  const neteaseImportDone = async () => { await load(); onDataChange(); };
+  const openAliasSync = (account, icloudKind = "") => {
+    if (icloudKind === "netease_alias") setNeteaseAliasTarget(account);
+    else setAliasSyncTarget({ account, icloudKind });
+  };
   const items = data?.items || [];
   const mailcomDomains = normalizedMailcomDomains(data?.mailcomDomains);
   const mailcomAccounts = items.filter((account) => normalizeProvider(account.provider) === "mailcom");
@@ -806,7 +812,7 @@ export default function SourcesPage({ refreshKey, onDataChange, onNavigate, addO
 
   return (
     <div className="page-stack sources-page">
-      <div className="context-bar"><div className="context-copy"><Mail size={16} />已添加 {items.length} 个源头邮箱</div><div className="context-actions"><Button icon={Upload} onClick={() => setMailcomImportOpen(true)}>导入 mail.com 母号</Button><Button variant="primary" icon={Plus} onClick={() => setAddOpen(true)}>添加源头邮箱</Button></div></div>
+      <div className="context-bar"><div className="context-copy"><Mail size={16} />已添加 {items.length} 个源头邮箱</div><div className="context-actions"><Button icon={Upload} onClick={() => setNeteaseImportOpen(true)}>导入网易邮箱</Button><Button icon={Upload} onClick={() => setMailcomImportOpen(true)}>导入 mail.com 母号</Button><Button variant="primary" icon={Plus} onClick={() => setAddOpen(true)}>添加源头邮箱</Button></div></div>
       <section className="source-provider-workspace">
         {!data ? <LoadingBlock rows={7} /> : <>
           <div className="source-provider-groups">{SOURCE_PROVIDER_ITEMS.map((providerItem) => {
@@ -823,6 +829,8 @@ export default function SourcesPage({ refreshKey, onDataChange, onNavigate, addO
         </>}
       </section>
       <MailComImportModal open={mailcomImportOpen} onClose={() => setMailcomImportOpen(false)} onImported={mailcomImportDone} />
+      <NeteaseImportModal open={neteaseImportOpen} onClose={() => setNeteaseImportOpen(false)} onImported={neteaseImportDone} />
+      <NeteaseAliasModal account={neteaseAliasTarget} onClose={() => setNeteaseAliasTarget(null)} onSaved={connectionDone} />
       <ConnectionModal open={addOpen} onClose={() => setAddOpen(false)} onConnected={connectionDone} />
       <ConnectionModal open={Boolean(reconnecting)} existingAccount={reconnecting} onClose={() => setReconnecting(null)} onConnected={connectionDone} />
       <AliasSyncModal account={aliasSyncTarget?.account} icloudKind={aliasSyncTarget?.icloudKind} mailcomDomains={mailcomDomains} initialMailcomDomain={mailcomDomain} onClose={() => setAliasSyncTarget(null)} onSynced={connectionDone} />

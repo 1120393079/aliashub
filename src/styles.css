@@ -1115,7 +1115,7 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .source-provider-expanded-list { min-width: 0; display: grid; gap: 16px; }
 .source-provider-expanded { min-width: 0; padding: 0 0 4px 14px; border-left: 2px solid color-mix(in srgb, var(--green) 24%, var(--line)); }
 .source-provider-expanded-header { min-height: 44px; display: flex; align-items: center; gap: 9px; margin-bottom: 10px; padding: 0 2px 9px 0; border-bottom: 1px solid var(--line); }
-.source-provider-expanded-header > span { min-width: 0; flex: 1; display: grid; gap: 2px; }
+.source-provider-expanded-header > span:not(.provider-mark) { min-width: 0; flex: 1; display: grid; gap: 2px; }
 .source-provider-expanded-header b { font-size: 12px; }
 .source-provider-expanded-header small { color: var(--text-soft); font-size: 8px; }
 .source-provider-empty { min-height: 180px; display: grid; place-items: center; border: 1px dashed var(--line-strong); border-radius: 7px; background: var(--surface-2); }
