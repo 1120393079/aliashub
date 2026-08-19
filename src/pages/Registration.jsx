@@ -113,16 +113,11 @@ function RegistrationMailboxPicker({ accounts = [], value, onChange }) {
         || providerMeta(left.provider).name.localeCompare(providerMeta(right.provider).name, "zh-CN"));
   }, [accounts]);
   const selected = accounts.find((account) => String(account.id) === String(value));
-  const selectedProvider = selected?.provider || "";
   const [expandedProvider, setExpandedProvider] = useState("");
 
   useEffect(() => {
-    if (selectedProvider) {
-      setExpandedProvider(selectedProvider);
-      return;
-    }
-    setExpandedProvider((current) => current || groups[0]?.provider || "");
-  }, [groups, selectedProvider]);
+    setExpandedProvider((current) => current && groups.some((group) => group.provider === current) ? current : "");
+  }, [groups]);
 
   if (!groups.length) {
     return <div className="registration-mailbox-empty"><Mail size={17} /><span>没有已连接的源头邮箱，请先到邮箱工作台添加。</span></div>;
@@ -134,7 +129,8 @@ function RegistrationMailboxPicker({ accounts = [], value, onChange }) {
         const meta = providerMeta(provider);
         const expanded = expandedProvider === provider;
         const regionId = `registration-mailbox-${provider}-submenu`;
-        const providerSelected = items.some((item) => String(item.id) === String(value));
+        const selectedItem = items.find((item) => String(item.id) === String(value));
+        const providerSelected = Boolean(selectedItem);
         return <article className={`registration-mailbox-group${expanded ? " is-expanded" : ""}${providerSelected ? " is-selected" : ""}`} key={provider}>
           <button
             type="button"
@@ -144,7 +140,7 @@ function RegistrationMailboxPicker({ accounts = [], value, onChange }) {
             onClick={() => setExpandedProvider((current) => current === provider ? "" : provider)}
           >
             <ProviderMark provider={provider} size={30} />
-            <span className="registration-mailbox-copy"><b>{meta.name}</b><small>{meta.shortDescription}</small></span>
+            <span className="registration-mailbox-copy"><b>{meta.name}</b><small>{selectedItem ? `当前：${selectedItem.email}` : meta.shortDescription}</small></span>
             <strong>{items.length} 个</strong>
             <ChevronDown size={16} />
           </button>
@@ -2570,7 +2566,7 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
                     : (selectedAccount?.registration_mode === "direct" ? { count: 1, suffix: "" } : {})),
                 });
               }}><option value="source">邮箱工作台地址</option><option value="inbox_link">链接取件邮箱池（可用 {inboxLinkMailboxCount}）</option></select></FormField>
-              {!isInboxLinkRegistration && <div className="form-grid two">
+              {!isInboxLinkRegistration && <div className={`form-grid two registration-source-selection${isDirectRegistration ? " is-direct" : ""}`}>
                 <div className="form-field registration-mailbox-field"><span className="field-label">源头邮箱</span><RegistrationMailboxPicker accounts={options.accounts} value={form.accountId} onChange={changeAccount} /><small>先选择邮箱类型，再从子菜单选择具体母号</small></div>
                 <FormField label={isDirectRegistration ? directAddressLabel : "基础地址"}><select value={form.baseAddressId} onChange={(event) => {
                   const baseAddressId = event.target.value;
@@ -2581,10 +2577,10 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
                     ...(isDirectRegistration ? { count: Math.max(1, Math.min(Number(current.count) || 1, available || 1)) } : {}),
                   }));
                 }}><option value="">请选择</option>{registrationBaseOptions(selectedAccount).map((item) => <option key={item.id} value={item.id}>{baseOptionLabel(item)}</option>)}</select></FormField>
+                {!isDirectRegistration && <FormField label="注册邮箱模式" hint="基础地址成功率更高；Plus 分裂适合目标站仍接受 +tag 时批量使用"><select value={form.addressMode} onChange={(event) => setForm({ ...form, addressMode: event.target.value, ...(event.target.value === "base" ? { count: 1, suffix: "" } : {}) })}><option value="base">直接使用基础地址（推荐）</option><option value="split">生成 +tag 分裂地址</option></select></FormField>}
               </div>}
               {!isInboxLinkRegistration && <OccupiedAliasNotice base={selectedBase} />}
               {!isInboxLinkRegistration && selectedBase?.registration_hint && <div className="inline-alert warning"><AlertTriangle size={16} /><span>{selectedBase.registration_hint}</span></div>}
-              {!isInboxLinkRegistration && !isDirectRegistration && <FormField label="注册邮箱模式" hint="基础地址成功率更高；Plus 分裂适合目标站仍接受 +tag 时批量使用"><select value={form.addressMode} onChange={(event) => setForm({ ...form, addressMode: event.target.value, ...(event.target.value === "base" ? { count: 1, suffix: "" } : {}) })}><option value="base">直接使用基础地址（推荐）</option><option value="split">生成 +tag 分裂地址</option></select></FormField>}
               {isInboxLinkRegistration && <div className={`inline-alert ${inboxLinkMailboxCount ? "success" : "warning"}`}><Link2 size={16} /><span>{inboxLinkMailboxCount ? `当前有 ${inboxLinkMailboxCount} 个已绑定链接邮箱可用；输入几个就分配几个。` : "没有可用的链接取件邮箱，请先到邮箱工作台绑定。"}<button type="button" className="bare-button registration-inline-link" onClick={() => onNavigate("inbox-link")}>管理链接邮箱</button></span></div>}
               <div className="form-grid two">
                 <FormField label="注册数量" error={registrationCountError} hint={isInboxLinkRegistration ? "从已绑定可用池按绑定时间依次分配；输入多少就提交多少" : isDirectRegistration ? `从所选地址开始按下拉顺序取可用邮箱；当前最多 ${directAvailableCount} 个` : isBaseAddressRegistration ? "当前模式直接使用基础地址，固定为 1 个任务" : form.suffix.trim() ? "批量注册会自动追加 -01、-02 编号" : "留空后缀时，每个账号生成随机分裂邮箱"}><input type="number" min="1" max={isInboxLinkRegistration ? 200 : isDirectRegistration ? Math.max(1, directAvailableCount) : 20} step="1" value={isBaseAddressRegistration ? 1 : form.count} disabled={isBaseAddressRegistration} onChange={(event) => setForm({ ...form, count: Number(event.target.value) })} /></FormField>
@@ -2600,8 +2596,10 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
                 <label className="registration-password-option"><input type="checkbox" checked={form.autoContinuePostSignup} onChange={(event) => setForm({ ...form, autoContinuePostSignup: event.target.checked })} /><span><b>自动点击准备完成页“继续”</b><small>取消勾选后，到达该页面即结束，不点击，也不等待人工操作。</small></span></label>
                 <label className="registration-password-option"><input type="checkbox" checked={form.setPasswordAfterRegistration} onChange={(event) => setForm({ ...form, setPasswordAfterRegistration: event.target.checked, ...(event.target.checked ? {} : { password: "" }) })} /><span><b>注册后设置密码</b><small>未勾选时，仅在官网注册流程强制要求密码时设置；勾选后会进入 ChatGPT 安全设置并再次读取邮箱验证码。</small></span></label>
               </div>
-              <FormField label="指定密码（可选）" hint="填写后使用此密码；留空时由注册服务随机生成。长度 12-128 个字符，不能包含首尾空白。"><input type="password" autoComplete="new-password" minLength={12} maxLength={128} disabled={!form.setPasswordAfterRegistration} value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} placeholder={form.setPasswordAfterRegistration ? "留空自动生成随机密码" : "请先勾选注册后设置密码"} /></FormField>
-              <Button variant="primary" size="lg" icon={Play} loading={starting} disabled={!options.service?.ok || registrationCountInvalid || registrationConcurrencyInvalid || (isInboxLinkRegistration ? !inboxLinkMailboxCount || registrationCount > inboxLinkMailboxCount : !form.accountId || !form.baseAddressId || Boolean(selectedBase?.registration_disabled) || (isDirectRegistration && registrationCount > directAvailableCount))} onClick={start}>{isInboxLinkRegistration ? "使用链接邮箱池注册" : isDirectRegistration ? directSubmitLabel : isBaseAddressRegistration ? "使用此基础地址注册" : "开始注册"}</Button>
+              <div className="registration-password-row">
+                <FormField label="指定密码（可选）" hint="填写后使用此密码；留空时由注册服务随机生成。长度 12-128 个字符，不能包含首尾空白。"><input type="password" autoComplete="new-password" minLength={12} maxLength={128} disabled={!form.setPasswordAfterRegistration} value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} placeholder={form.setPasswordAfterRegistration ? "留空自动生成随机密码" : "请先勾选注册后设置密码"} /></FormField>
+                <Button variant="primary" size="lg" icon={Play} loading={starting} disabled={!options.service?.ok || registrationCountInvalid || registrationConcurrencyInvalid || (isInboxLinkRegistration ? !inboxLinkMailboxCount || registrationCount > inboxLinkMailboxCount : !form.accountId || !form.baseAddressId || Boolean(selectedBase?.registration_disabled) || (isDirectRegistration && registrationCount > directAvailableCount))} onClick={start}>{isInboxLinkRegistration ? "使用链接邮箱池注册" : isDirectRegistration ? directSubmitLabel : isBaseAddressRegistration ? "使用此基础地址注册" : "开始注册"}</Button>
+              </div>
             </div>
           </article>
 
