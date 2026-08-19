@@ -17,7 +17,7 @@ import SettingsPage from "./pages/Settings.jsx";
 
 const pages = {
   overview: { label: "总览", subtitle: "源头邮箱与任务状态", icon: LayoutDashboard },
-  sources: { label: "源头邮箱", subtitle: "Microsoft、Google、iCloud 与 mail.com", icon: Mail },
+  sources: { label: "源头邮箱", subtitle: "Microsoft、Google、iCloud、mail.com 与网易邮箱", icon: Mail },
   factory: { label: "别名工厂", subtitle: "官方别名与 Plus 分裂地址", icon: WandSparkles },
   inbox: { label: "邮件中心", subtitle: "集中接收所有绑定邮箱的邮件", icon: Inbox },
   codes: { label: "验证码中心", subtitle: "集中查看所有源头号的验证码", icon: KeyRound },
@@ -181,7 +181,7 @@ export default function App() {
             return <button key={key} className={className} onClick={() => navigate(key)}><Icon size={18} /><span>{item.label}</span></button>;
           })}
         </nav>
-        <div className="sidebar-provider"><span className="provider-mark-stack"><ProviderMark provider="microsoft" size={25} /><ProviderMark provider="google" size={25} /><ProviderMark provider="icloud" size={25} /><ProviderMark provider="mailcom" size={25} /></span><span className="sidebar-provider-copy"><b>Microsoft + Google + iCloud + mail.com</b><small>Outlook · Gmail · iCloud · mail.com</small></span><i className="online-dot" /></div>
+        <div className="sidebar-provider"><span className="provider-mark-stack"><ProviderMark provider="microsoft" size={25} /><ProviderMark provider="google" size={25} /><ProviderMark provider="icloud" size={25} /><ProviderMark provider="mailcom" size={25} /><ProviderMark provider="netease" size={25} /></span><span className="sidebar-provider-copy"><b>Microsoft · Google · iCloud · mail.com · 网易</b><small>Outlook · Gmail · iCloud · mail.com · 163/126/yeah</small></span><i className="online-dot" /></div>
         <div className="sidebar-footer">{auth.authEnabled && <button onClick={logout}><LogOut size={17} /><span>退出管理台</span></button>}<span className="version">v1.0</span></div>
       </aside>
       {mobileNav && <button className="sidebar-overlay" aria-label="关闭菜单" onClick={() => setMobileNav(false)} />}

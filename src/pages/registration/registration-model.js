@@ -106,6 +106,8 @@ export function baseOptionLabel(item) {
       ? "邮箱别名"
       : String(item.strategy || "").startsWith("mailcom")
         ? "官方别名"
+      : item.strategy === "netease_alias"
+        ? "替身邮箱"
         : "";
   const occupied = occupiedAliasInfo(item);
   const failureCount = Math.max(0, Number(item.registration_failure_count) || 0);

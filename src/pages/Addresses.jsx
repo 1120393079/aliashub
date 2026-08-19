@@ -65,6 +65,7 @@ export default function AddressesPage({ refreshKey, onDataChange, onNavigate, in
   const isImportedIcloudAddress = (item) => itemProvider(item).id === "icloud"
     && ["icloud_mail_alias", "icloud_hide_my_email", "icloud_custom_domain"].includes(item.strategy);
   const isMailcomAlias = (item) => itemProvider(item).id === "mailcom" && item.kind === "official";
+  const isNeteaseAlias = (item) => itemProvider(item).id === "netease" && item.strategy === "netease_alias";
   const addressTypeLabel = (item) => item.strategy === "icloud_hide_my_email"
     ? "隐藏邮箱"
     : item.strategy === "icloud_custom_domain"
@@ -73,12 +74,16 @@ export default function AddressesPage({ refreshKey, onDataChange, onNavigate, in
       ? "iCloud 邮箱别名"
       : isMailcomAlias(item)
         ? "mail.com 官方别名"
+      : isNeteaseAlias(item)
+        ? "网易替身邮箱"
       : kindText[item.kind];
-  const canDeleteAddress = (item) => item.kind === "split" || isImportedIcloudAddress(item) || isMailcomAlias(item);
+  const canDeleteAddress = (item) => item.kind === "split" || isImportedIcloudAddress(item) || isMailcomAlias(item) || isNeteaseAlias(item);
   const removeAddressLabel = (item, compact = false) => isImportedIcloudAddress(item)
     ? (compact ? "移除本地映射" : "移除本地 iCloud 映射")
     : isMailcomAlias(item)
       ? (compact ? "移除本地别名" : "移除本地 mail.com 别名")
+    : isNeteaseAlias(item)
+      ? (compact ? "移除替身邮箱" : "移除本地网易替身邮箱")
       : (compact ? "删除" : "删除分裂地址");
   const isRegistrationOccupied = (item) => {
     const value = item?.registration_occupied;

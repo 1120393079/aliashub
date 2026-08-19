@@ -180,6 +180,13 @@ const schema = `
     credential_updated_at TEXT NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS netease_credentials (
+    account_id INTEGER PRIMARY KEY REFERENCES source_accounts(id) ON DELETE CASCADE,
+    username TEXT NOT NULL,
+    auth_code_encrypted TEXT NOT NULL,
+    credential_updated_at TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS oauth_code_sessions (
     id TEXT PRIMARY KEY,
     expected_account_id INTEGER REFERENCES source_accounts(id) ON DELETE SET NULL,

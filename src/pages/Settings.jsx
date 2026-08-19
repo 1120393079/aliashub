@@ -192,12 +192,14 @@ export default function SettingsPage({ initialSection = "" }) {
         </section>
 
         <section id="security" className="settings-section">
-          <header><span><LockKeyhole size={19} /></span><div><h2>邮箱连接安全</h2><p>Microsoft、Google 公共客户端与 iCloud / mail.com 邮箱凭据存储</p></div></header>
+          <header><span><LockKeyhole size={19} /></span><div><h2>邮箱连接安全</h2><p>Microsoft、Google 公共客户端与 iCloud / mail.com / 网易邮箱凭据存储</p></div></header>
           <div className="security-list">
             <div><ShieldCheck size={17} /><span><b>Microsoft Authorization Code + PKCE</b><small>{form.microsoft_oauth_client}</small></span><StatusBadge status="active">已启用</StatusBadge></div>
             <div><ShieldCheck size={17} /><span><b>Google 内置公共客户端 + PKCE</b><small>Thunderbird 邮件公共客户端；注册工作站只执行 Gmail 邮件读取</small></span><StatusBadge status="active">已启用</StatusBadge></div>
-            <div><KeyRound size={17} /><span><b>邮箱连接凭据</b><small>OAuth Refresh Token、iCloud App 专用密码与 mail.com 登录密码均使用 AES-256-GCM 加密保存</small></span><StatusBadge status="active">已加密</StatusBadge></div>
-            <div><Database size={17} /><span><b>邮件读取权限</b><small>Microsoft Graph Mail.Read · Google Gmail readonly · iCloud / mail.com IMAP readonly</small></span><StatusBadge status="active">只读</StatusBadge></div>
+            <div><KeyRound size={17} /><span><b>邮箱连接凭据</b><small>OAuth Refresh Token、iCloud App 专用密码、mail.com 登录密码与网易客户端授权码均使用 AES-256-GCM 加密保存</small></span><StatusBadge status="active">已加密</StatusBadge></div>
+            <div><Database size={17} /><span><b>网易邮箱 IMAP</b><small>@163.com / @126.com / @yeah.net 母号；固定连接 imap.163.com:993 / imap.126.com:993 / imap.yeah.net:993 · TLS</small></span><StatusBadge status="active">已支持</StatusBadge></div>
+            <div><Mail size={17} /><span><b>网易替身邮箱</b><small>替身邮箱固定使用 @aka.yeah.net，通过所属母号的 IMAP 邮箱读取邮件</small></span><StatusBadge status="active">已支持</StatusBadge></div>
+            <div><Database size={17} /><span><b>邮件读取权限</b><small>Microsoft Graph Mail.Read · Google Gmail readonly · iCloud / mail.com / 网易邮箱 IMAP readonly</small></span><StatusBadge status="active">只读</StatusBadge></div>
           </div>
         </section>
 
@@ -208,7 +210,7 @@ export default function SettingsPage({ initialSection = "" }) {
 
         <section id="runtime" className="settings-section">
           <header><span><Server size={19} /></span><div><h2>运行状态</h2><p>生产服务与支持范围</p></div></header>
-          <dl className="runtime-grid"><div><dt>API 服务</dt><dd><span className="live-dot" />{health?.status === "ok" ? "运行正常" : "未知"}</dd></div><div><dt>源头邮箱</dt><dd>{health?.accounts || 0} 个</dd></div><div><dt>邮箱提供商</dt><dd>Microsoft · Google · iCloud · mail.com</dd></div><div><dt>Microsoft 域名</dt><dd>{(form.supported_domains || []).join(" · ")}</dd></div><div><dt>服务地址</dt><dd>{form.public_base_url}</dd></div><div><dt>Google OAuth</dt><dd>内置授权</dd></div><div><dt>iCloud IMAP</dt><dd>{form.icloud_imap?.host || "imap.mail.me.com"}:{form.icloud_imap?.port || 993} · TLS</dd></div><div><dt>mail.com IMAP</dt><dd>imap.mail.com:993 · TLS</dd></div></dl>
+          <dl className="runtime-grid"><div><dt>API 服务</dt><dd><span className="live-dot" />{health?.status === "ok" ? "运行正常" : "未知"}</dd></div><div><dt>源头邮箱</dt><dd>{health?.accounts || 0} 个</dd></div><div><dt>邮箱提供商</dt><dd>Microsoft · Google · iCloud · mail.com · 网易邮箱</dd></div><div><dt>Microsoft 域名</dt><dd>{(form.supported_domains || []).join(" · ")}</dd></div><div><dt>服务地址</dt><dd>{form.public_base_url}</dd></div><div><dt>Google OAuth</dt><dd>内置授权</dd></div><div><dt>iCloud IMAP</dt><dd>{form.icloud_imap?.host || "imap.mail.me.com"}:{form.icloud_imap?.port || 993} · TLS</dd></div><div><dt>mail.com IMAP</dt><dd>imap.mail.com:993 · TLS</dd></div><div><dt>网易邮箱域名</dt><dd>@163.com · @126.com · @yeah.net</dd></div><div><dt>网易替身域</dt><dd>@aka.yeah.net</dd></div><div><dt>网易 IMAP</dt><dd>imap.163.com:993 / imap.126.com:993 / imap.yeah.net:993 · TLS</dd></div></dl>
           <a className="official-doc-link" href="https://support.microsoft.com/en-us/outlook/add-or-remove-an-email-alias-in-outlook-com" target="_blank" rel="noreferrer"><ExternalLink size={15} />Microsoft 官方别名规则</a>
         </section>
       </div>

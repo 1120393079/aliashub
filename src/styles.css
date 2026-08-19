@@ -139,12 +139,13 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .sidebar-nav button b { display: grid; place-items: center; min-width: 20px; height: 20px; padding: 0 5px; border-radius: 10px; background: #d25852; color: white; font-size: 11px; }
 .sidebar-provider { display: flex; align-items: center; gap: 6px; margin: auto 11px 12px; padding: 11px 8px; border: 1px solid rgba(255,255,255,0.08); border-radius: 7px; background: rgba(255,255,255,0.03); }
 .sidebar-provider-copy { display: grid; min-width: 0; flex: 1; }
-.provider-mark-stack { position: relative; flex: 0 0 61px; width: 61px; height: 31px; }
+.provider-mark-stack { position: relative; flex: 0 0 73px; width: 73px; height: 31px; }
 .provider-mark-stack .provider-mark { position: absolute; top: 3px; box-shadow: 0 0 0 2px #1f2522; }
 .provider-mark-stack .provider-mark:nth-child(1) { left: 0; }
 .provider-mark-stack .provider-mark:nth-child(2) { left: 12px; top: 5px; }
 .provider-mark-stack .provider-mark:nth-child(3) { left: 24px; top: 3px; }
 .provider-mark-stack .provider-mark:nth-child(4) { left: 36px; top: 5px; }
+.provider-mark-stack .provider-mark:nth-child(5) { left: 48px; top: 3px; }
 .sidebar-provider b { font-size: 10.5px; line-height: 1.25; }
 .sidebar-provider small { display: block; max-width: 100%; margin-top: 3px; color: #818b86; font-size: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .online-dot { flex: 0 0 7px; width: 7px; height: 7px; border-radius: 50%; background: #2fc28b; box-shadow: 0 0 0 3px rgba(47,194,139,0.12); }
@@ -985,6 +986,9 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .mailcom-mark { position: relative; display: grid; place-items: center; overflow: hidden; border-color: #164c73; background: linear-gradient(145deg, #236793, #123e60); color: #fff; }
 .mailcom-mark svg { stroke-width: 1.85; }
 .mailcom-mark i { position: absolute; right: 12%; bottom: 12%; width: max(3px, calc(var(--mark-size) * 0.16)); height: max(3px, calc(var(--mark-size) * 0.16)); border: 1px solid rgba(255,255,255,0.9); border-radius: 50%; background: #f5a623; }
+.netease-mark { position: relative; display: grid; place-items: center; overflow: hidden; border-color: #cf302b; background: linear-gradient(145deg, #ff5149, #dc2d27); color: #fff; }
+.netease-mark svg { stroke-width: 1.9; }
+.netease-mark b { position: absolute; right: 8%; bottom: 5%; display: grid; min-width: max(9px, calc(var(--mark-size) * 0.3)); height: max(9px, calc(var(--mark-size) * 0.3)); place-items: center; border-radius: 4px; background: #fff; color: #df312b; font-size: max(6px, calc(var(--mark-size) * 0.21)); line-height: 1; }
 .inbox-link-mark { display: grid; place-items: center; background: linear-gradient(145deg, #f3f0ff, #e5ddff); color: #7657d5; }
 .inbox-link-mark svg { stroke-width: 2; }
 
@@ -1849,6 +1853,9 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
   .context-bar { align-items: flex-start; flex-direction: column; padding: 10px; }
   .context-actions { width: 100%; }
   .context-actions .button { flex: 1; }
+  .sources-page .context-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .sources-page .context-actions .button { width: 100%; min-width: 0; padding-left: 7px; padding-right: 7px; }
+  .sources-page .context-actions .button:last-child { grid-column: 1 / -1; }
   .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
   .metric-card { min-height: 95px; gap: 9px; padding: 12px; }
   .metric-card strong { font-size: 21px; }

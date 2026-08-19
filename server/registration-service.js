@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { generateSplits, parseJson, persistInboxScanResult } from "./account-service.js";
-import { isIcloudImportedStrategy, isMailcomAliasStrategy } from "./address-generator.js";
+import { isIcloudImportedStrategy, isMailcomAliasStrategy, isNeteaseAliasStrategy } from "./address-generator.js";
 import {
   getSetting,
   listRegisteredAccountStatusChecks,
@@ -63,7 +63,7 @@ const ACCOUNT_DELETE_SQL_BATCH_SIZE = 500;
 const ACCOUNT_DELETE_LOOKUP_CONCURRENCY = 20;
 const ACCOUNT_DELETE_REQUEST_CONCURRENCY = 4;
 const PICKUP_REGISTRATION_BLOCKED_STATUSES = new Set(["ready", "sold", "disabled"]);
-const DIRECT_MAILBOX_PROVIDERS = new Set(["icloud", "mailcom"]);
+const DIRECT_MAILBOX_PROVIDERS = new Set(["icloud", "mailcom", "netease"]);
 
 function pickupInventoryByEmail(items = []) {
   const inventory = new Map();
@@ -96,11 +96,14 @@ function isDirectMailboxAddress(account, address) {
   if (address?.kind !== "official") return false;
   if (account?.provider === "icloud") return isIcloudImportedStrategy(address.strategy);
   if (account?.provider === "mailcom") return isMailcomAliasStrategy(address.strategy);
+  if (account?.provider === "netease") return isNeteaseAliasStrategy(address.strategy);
   return false;
 }
 
 function directMailboxLabel(account) {
-  return account?.provider === "mailcom" ? "Mail.com 地址" : "iCloud 地址";
+  if (account?.provider === "mailcom") return "Mail.com 地址";
+  if (account?.provider === "netease") return "网易邮箱地址";
+  return "iCloud 地址";
 }
 
 function normalizeSelectedIds(input, label, maximum = Number.POSITIVE_INFINITY) {
@@ -1808,7 +1811,7 @@ export class RegistrationService {
       ORDER BY COALESCE(registration_jobs.finished_at, registration_jobs.updated_at, registration_jobs.created_at) DESC,
         registration_jobs.id DESC
     `);
-    const accounts = this.db.prepare("SELECT * FROM source_accounts WHERE status = 'connected' AND provider IN ('microsoft', 'google', 'icloud', 'mailcom') ORDER BY updated_at DESC").all().map((account) => {
+    const accounts = this.db.prepare("SELECT * FROM source_accounts WHERE status = 'connected' AND provider IN ('microsoft', 'google', 'icloud', 'mailcom', 'netease') ORDER BY updated_at DESC").all().map((account) => {
       const direct = DIRECT_MAILBOX_PROVIDERS.has(account.provider);
       const addressLabel = directMailboxLabel(account);
       const bases = this.db.prepare("SELECT id, address, kind, label, strategy FROM addresses WHERE account_id = ? AND kind IN ('primary', 'official') AND status = 'active' ORDER BY kind = 'primary' DESC, created_at, id")
@@ -1963,7 +1966,7 @@ export class RegistrationService {
     const account = this.db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(Number(input.accountId));
     if (!account) throw Object.assign(new Error("源头邮箱不存在"), { status: 404 });
     if (account.status !== "connected") throw Object.assign(new Error("请先完成这个源头邮箱的连接验证"), { status: 409 });
-    if (!["microsoft", "google", "icloud", "mailcom"].includes(account.provider)) {
+    if (!["microsoft", "google", "icloud", "mailcom", "netease"].includes(account.provider)) {
       throw Object.assign(new Error("这个邮箱提供商不支持注册地址"), { status: 409 });
     }
     const directMailbox = DIRECT_MAILBOX_PROVIDERS.has(account.provider);
@@ -1985,7 +1988,7 @@ export class RegistrationService {
         throw Object.assign(new Error("指定注册地址数量与注册数量不一致"), { status: 400 });
       }
       if (!directMailbox) {
-        throw Object.assign(new Error("只有 iCloud 或 Mail.com 直连邮箱支持指定注册地址"), { status: 409 });
+        throw Object.assign(new Error("只有 iCloud、Mail.com 或网易直连邮箱支持指定注册地址"), { status: 409 });
       }
       const placeholders = exactAddressIds.map(() => "?").join(",");
       const rows = this.db.prepare(`
@@ -5117,7 +5120,7 @@ export class RegistrationService {
     }
 
     const sources = [...sourceById.values()];
-    const sourcesToScan = sources.filter((account) => ["icloud", "mailcom", "inbox_link"]
+    const sourcesToScan = sources.filter((account) => ["icloud", "mailcom", "netease", "inbox_link"]
       .includes(String(account.provider || "").toLowerCase()));
     for (let offset = 0; offset < sourcesToScan.length; offset += 8) {
       await Promise.allSettled(sourcesToScan.slice(offset, offset + 8).map((account) => this.scanAccount(account)));

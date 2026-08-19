@@ -41,6 +41,8 @@ const MICROSOFT_DOMAINS = new Set([
 ]);
 const ICLOUD_DOMAINS = new Set(["icloud.com", "me.com", "mac.com"]);
 const ICLOUD_PRIVATE_RELAY_DOMAIN = "privaterelay.appleid.com";
+const NETEASE_DOMAINS = new Set(["163.com", "126.com", "yeah.net"]);
+const NETEASE_ALIAS_DOMAIN = "aka.yeah.net";
 const MAILCOM_DOMAINS = new Set([
   "2trom.com", "accountant.com", "acdcfan.com", "adexec.com", "africamail.com", "alumni.com",
   "angelic.com", "archaeologist.com", "arcticmail.com", "artlover.com", "asia.com", "atheist.com",
@@ -72,6 +74,7 @@ export const ICLOUD_MAIL_ALIAS_STRATEGY = "icloud_mail_alias";
 export const ICLOUD_HIDE_MY_EMAIL_STRATEGY = "icloud_hide_my_email";
 export const ICLOUD_CUSTOM_DOMAIN_STRATEGY = "icloud_custom_domain";
 export const MAILCOM_ALIAS_STRATEGY = "mailcom_alias";
+export const NETEASE_ALIAS_STRATEGY = "netease_alias";
 export const ICLOUD_IMPORTED_ADDRESS_STRATEGIES = new Set([
   ICLOUD_MAIL_ALIAS_STRATEGY,
   ICLOUD_HIDE_MY_EMAIL_STRATEGY,
@@ -118,6 +121,17 @@ export function normalizeMailcomLoginEmail(value) {
   return normalizeEmail(value);
 }
 
+export function normalizeNeteaseEmail(value) {
+  const email = normalizeEmail(value);
+  if (!email) return "";
+  return NETEASE_DOMAINS.has(email.split("@")[1]) ? email : "";
+}
+
+export function normalizeNeteaseAliasEmail(value) {
+  const email = normalizeEmail(value);
+  return email?.endsWith(`@${NETEASE_ALIAS_DOMAIN}`) ? email : "";
+}
+
 export function normalizeIcloudAliasEmail(value) {
   const email = normalizeEmail(value);
   if (!email) return "";
@@ -143,6 +157,10 @@ export function isIcloudImportedStrategy(value) {
 
 export function isMailcomAliasStrategy(value) {
   return String(value || "") === MAILCOM_ALIAS_STRATEGY;
+}
+
+export function isNeteaseAliasStrategy(value) {
+  return String(value || "") === NETEASE_ALIAS_STRATEGY;
 }
 
 export function normalizeMicrosoftEmail(value) {
@@ -219,3 +237,5 @@ export const microsoftDomains = [...MICROSOFT_DOMAINS];
 export const icloudDomains = [...ICLOUD_DOMAINS];
 export const icloudPrivateRelayDomain = ICLOUD_PRIVATE_RELAY_DOMAIN;
 export const mailcomDomains = [...MAILCOM_DOMAINS];
+export const neteaseDomains = [...NETEASE_DOMAINS];
+export const neteaseAliasDomain = NETEASE_ALIAS_DOMAIN;

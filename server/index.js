@@ -6,7 +6,7 @@ import "dotenv/config";
 import express from "express";
 import { deleteSelectedAddresses, deleteSplitAddresses, generateSplits, importIcloudAliases, importMailcomAliases, JobRunner, parseJson, publicAccount, syncOfficialAddresses } from "./account-service.js";
 import { createAuth } from "./auth.js";
-import { MAILCOM_ALIAS_STRATEGY, isIcloudImportedStrategy, isMailcomAliasStrategy, mailcomDomains, microsoftDomains, normalizeIcloudAliasEmail, normalizeMailcomEmail, normalizeMicrosoftEmail } from "./address-generator.js";
+import { MAILCOM_ALIAS_STRATEGY, NETEASE_ALIAS_STRATEGY, isIcloudImportedStrategy, isMailcomAliasStrategy, isNeteaseAliasStrategy, mailcomDomains, microsoftDomains, neteaseAliasDomain, neteaseDomains, normalizeIcloudAliasEmail, normalizeMailcomEmail, normalizeMicrosoftEmail, normalizeNeteaseAliasEmail } from "./address-generator.js";
 import { audit, createDatabase, createSourceAccount, getSettings, nowIso, setSetting } from "./db.js";
 import { ExtensionService } from "./extension-service.js";
 import { registerEzCaptchaAdapter } from "./ez-captcha-adapter.js";
@@ -20,6 +20,9 @@ import { MailcomAliasAutomationService } from "./mailcom-alias-service.js";
 import { MailcomAliasPlaywrightAdapter } from "./mailcom-alias-playwright.js";
 import { MailComImapClient, mailcomImapConfiguration } from "./mailcom-imap.js";
 import { MailcomRegistrationPipelineService } from "./mailcom-registration-pipeline-service.js";
+import { importNeteaseAliases } from "./netease-aliases.js";
+import { NeteaseImapClient, neteaseImapHosts } from "./netease-imap.js";
+import { importNeteaseAccounts } from "./netease-import.js";
 import { MicrosoftGraphClient } from "./microsoft-graph.js";
 import { NfapiService, PUBLIC_AGENT_IDENTITY_ERROR_CODES } from "./nfapi-service.js";
 import { NfapiCredentialStore, NfapiCredentialSync } from "./nfapi-credential-sync.js";
@@ -143,6 +146,7 @@ function isLocallyImportedAlias(item) {
   return item?.kind === "official" && (
     (item.source_provider === "icloud" && isIcloudImportedStrategy(item.strategy))
     || (item.source_provider === "mailcom" && isMailcomAliasStrategy(item.strategy))
+    || (item.source_provider === "netease" && isNeteaseAliasStrategy(item.strategy))
   );
 }
 
@@ -375,6 +379,10 @@ function failedRegistrationAddressIds(db, { accountId, kind, strategy, q } = {})
       source_accounts.provider = 'mailcom'
       AND addresses.kind = 'official'
       AND addresses.strategy = 'mailcom_alias'
+    ) OR (
+      source_accounts.provider = 'netease'
+      AND addresses.kind = 'official'
+      AND addresses.strategy = 'netease_alias'
     ))`,
     `COALESCE((
       SELECT lower(latest_registration.status)
@@ -656,6 +664,12 @@ export function createApp(options = {}) {
     imapFactory: options.mailcomImapFactory,
     parseMessage: options.mailcomParseMessage,
   });
+  const netease = options.netease || new NeteaseImapClient({
+    db,
+    encryptionKey: options.dataEncryptionKey || process.env.DATA_ENCRYPTION_KEY,
+    imapFactory: options.neteaseImapFactory,
+    parseMessage: options.neteaseParseMessage,
+  });
   const mailcomAliases = options.mailcomAliases || new MailcomAliasAutomationService({
     db,
     mailcom,
@@ -687,6 +701,7 @@ export function createApp(options = {}) {
       if (account.provider === "microsoft") return graph.scanInbox(account);
       if (account.provider === "icloud") return icloud.scanInbox(account);
       if (account.provider === "mailcom") return mailcom.scanInbox(account);
+      if (account.provider === "netease") return netease.scanInbox(account);
       if (account.provider === "inbox_link") return inboxLinkMailboxes.scanInbox(account);
       throw Object.assign(new Error(`不支持的邮箱提供商：${account.provider}`), {
         status: 409,
@@ -1478,6 +1493,32 @@ export function createApp(options = {}) {
     } catch (error) { next(error); }
   });
 
+  app.post("/api/netease/connect", async (req, res, next) => {
+    try {
+      if (["host", "port", "server", "secure", "proxy"].some((key) => Object.hasOwn(req.body || {}, key))) {
+        throw Object.assign(new Error("网易邮箱 IMAP 服务地址由系统按母号后缀固定配置，不能自定义"), {
+          status: 400,
+          code: "NETEASE_IMAP_CONFIGURATION_FIXED",
+        });
+      }
+      const reconnecting = Boolean(req.body?.accountId);
+      const result = await netease.connectAccount({
+        accountId: req.body?.accountId,
+        email: req.body?.email,
+        displayName: req.body?.displayName,
+        authCode: req.body?.authCode,
+        aliases: req.body?.aliases,
+      });
+      res.status(reconnecting ? 200 : 201).json(result);
+    } catch (error) { next(error); }
+  });
+
+  app.post("/api/netease/import", async (req, res, next) => {
+    try {
+      res.status(201).json(await importNeteaseAccounts(netease, req.body || {}));
+    } catch (error) { next(error); }
+  });
+
   app.get("/api/overview", (_req, res) => {
     const accounts = db.prepare(`
       SELECT COUNT(*) AS total,
@@ -1539,11 +1580,14 @@ export function createApp(options = {}) {
       items,
       supportedDomains: microsoftDomains,
       mailcomDomains,
+      neteaseDomains,
+      neteaseAliasDomain,
       providers: {
         microsoft: { authMode: "oauth", supportsOfficialAliases: true, supportsPlusAliases: true, supportsImportedAliases: false, supportsDirectRegistration: false },
         google: { authMode: "oauth", supportsOfficialAliases: false, supportsPlusAliases: true, supportsImportedAliases: false, supportsDirectRegistration: false },
         icloud: { authMode: "app_password", supportsOfficialAliases: false, supportsPlusAliases: false, supportsImportedAliases: true, supportsDirectRegistration: true },
         mailcom: { authMode: "password", supportsOfficialAliases: false, supportsPlusAliases: false, supportsImportedAliases: true, supportsDirectRegistration: true, supportsMailcomAliases: true, aliasLimit: 10 },
+        netease: { authMode: "imap_auth_code", supportsOfficialAliases: false, supportsPlusAliases: false, supportsImportedAliases: true, supportsDirectRegistration: true, supportsNeteaseAliases: true, aliasDomain: neteaseAliasDomain },
         inbox_link: { authMode: "inbox_link", supportsOfficialAliases: false, supportsPlusAliases: false, supportsImportedAliases: false, supportsDirectRegistration: false },
       },
     });
@@ -1595,7 +1639,7 @@ export function createApp(options = {}) {
     try {
       const row = db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(Number(req.params.id));
       if (!row) throw Object.assign(new Error("源头邮箱不存在"), { status: 404 });
-      if (row.provider === "mailcom") {
+      if (row.provider === "mailcom" || row.provider === "netease") {
         const accountAddresses = () => db.prepare(`
             SELECT addresses.*, source_accounts.provider AS source_provider
             FROM addresses
@@ -1603,15 +1647,17 @@ export function createApp(options = {}) {
             WHERE addresses.account_id = ?
           `).all(row.id);
         await assertAddressRemovalAllowed(db, pickup, accountAddresses(), {
-          activeMessage: "这个 Mail.com 母号仍有邮箱正在注册，请等待任务结束后再移除",
-          inventoryMessage: "这个 Mail.com 母号包含取件站售卖库存，请先从取件站下架",
+          activeMessage: `这个 ${row.provider === "netease" ? "网易" : "Mail.com"} 母号仍有邮箱正在注册，请等待任务结束后再移除`,
+          inventoryMessage: `这个 ${row.provider === "netease" ? "网易" : "Mail.com"} 母号包含取件站售卖库存，请先从取件站下架`,
           checkInventoryForAll: true,
           refreshItems: accountAddresses,
         });
-        mailcomRegistrationPipelines.abandonRecoveries({
-          accountId: row.id,
-          reason: `Mail.com 母号 ${row.email} 已从系统移除，不再恢复别名轮换`,
-        });
+        if (row.provider === "mailcom") {
+          mailcomRegistrationPipelines.abandonRecoveries({
+            accountId: row.id,
+            reason: `Mail.com 母号 ${row.email} 已从系统移除，不再恢复别名轮换`,
+          });
+        }
       }
       db.prepare("DELETE FROM source_accounts WHERE id = ?").run(row.id);
       res.status(204).end();
@@ -1714,6 +1760,69 @@ export function createApp(options = {}) {
       res.json({
         items,
         account: publicAccount(db, db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(account.id)),
+      });
+    } catch (error) { next(error); }
+  });
+
+  app.get("/api/accounts/:id/netease-aliases", (req, res, next) => {
+    try {
+      const account = db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(Number(req.params.id));
+      if (!account) throw Object.assign(new Error("源头邮箱不存在"), { status: 404 });
+      if (account.provider !== "netease") {
+        throw Object.assign(new Error("这个源头邮箱不是网易邮箱账号"), { status: 409, code: "NETEASE_ACCOUNT_REQUIRED" });
+      }
+      const items = db.prepare(`
+        SELECT * FROM addresses
+        WHERE account_id = ? AND kind = 'official' AND strategy = ? AND status = 'active'
+        ORDER BY created_at, id
+      `).all(account.id, NETEASE_ALIAS_STRATEGY);
+      res.json({
+        items,
+        aliases: items.map((item) => item.address),
+        account: publicAccount(db, account),
+      });
+    } catch (error) { next(error); }
+  });
+
+  app.post("/api/accounts/:id/netease-aliases", async (req, res, next) => {
+    try {
+      const account = db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(Number(req.params.id));
+      if (!account) throw Object.assign(new Error("源头邮箱不存在"), { status: 404 });
+      if (account.provider !== "netease") {
+        throw Object.assign(new Error("这个源头邮箱不是网易邮箱账号"), { status: 409, code: "NETEASE_ACCOUNT_REQUIRED" });
+      }
+      if (!Array.isArray(req.body?.aliases)) {
+        throw Object.assign(new Error("网易替身邮箱列表必须是数组"), { status: 400, code: "NETEASE_ALIAS_LIST_REQUIRED" });
+      }
+      const input = req.body.aliases;
+      const requested = new Set(input.map(normalizeNeteaseAliasEmail).filter(Boolean));
+      const invalid = input.some((value) => String(value || "").trim() && !normalizeNeteaseAliasEmail(value));
+      if (!invalid) {
+        const removalCandidates = () => db.prepare(`
+          SELECT addresses.*, source_accounts.provider AS source_provider
+          FROM addresses
+          JOIN source_accounts ON source_accounts.id = addresses.account_id
+          WHERE addresses.account_id = ? AND addresses.kind = 'official'
+            AND addresses.strategy = ? AND addresses.status = 'active'
+        `).all(account.id, NETEASE_ALIAS_STRATEGY)
+          .filter((item) => !requested.has(String(item.address || "").toLowerCase()));
+        await assertAddressRemovalAllowed(db, pickup, removalCandidates(), {
+          activeMessage: "待移除的网易替身邮箱中有地址正在注册，请等待任务结束后再同步",
+          inventoryMessage: "待移除的网易替身邮箱已进入售卖库存，请先从取件站下架",
+          checkActive: true,
+          refreshItems: removalCandidates,
+        });
+      }
+      const allItems = importNeteaseAliases(db, account, input, {
+        replace: true,
+        purpose: String(req.body?.purpose || "网易替身邮箱手工导入"),
+      });
+      const items = allItems.filter((item) => isNeteaseAliasStrategy(item.strategy) && item.status === "active");
+      const currentAccount = db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(account.id);
+      res.json({
+        items,
+        aliases: items.map((item) => item.address),
+        account: publicAccount(db, currentAccount),
       });
     } catch (error) { next(error); }
   });
@@ -1886,7 +1995,7 @@ export function createApp(options = {}) {
       await assertAddressRemovalAllowed(db, pickup, [item], {
         activeMessage: "这个邮箱正在注册，请等待任务结束后再删除",
         inventoryMessage: "这个邮箱已进入售卖库存，请先从取件站下架",
-        checkActive: item.source_provider === "mailcom",
+        checkActive: ["mailcom", "netease"].includes(item.source_provider),
       });
       if (item.source_provider === "mailcom" && importedAliasAddress) {
         mailcomRegistrationPipelines.abandonRecoveries({
@@ -1906,7 +2015,7 @@ export function createApp(options = {}) {
         item.account_id,
         importedAliasAddress ? "alias" : "split",
         importedAliasAddress
-          ? `移除本地 ${item.source_provider === "mailcom" ? "Mail.com" : "iCloud"} 地址映射`
+          ? `移除本地 ${item.source_provider === "mailcom" ? "Mail.com" : item.source_provider === "netease" ? "网易" : "iCloud"} 地址映射`
           : "删除分裂地址",
         item.address,
         {},
@@ -2273,6 +2382,7 @@ export function createApp(options = {}) {
       microsoft_oauth_client: "Mailspring · Microsoft Graph Mail.Read",
       icloud_imap: icloudImapConfiguration,
       mailcom_imap: mailcomImapConfiguration,
+      netease_imap: { hosts: neteaseImapHosts, port: 993, secure: true, alias_domain: neteaseAliasDomain },
       extension_download: "/api/extension/download",
     });
   });
@@ -2298,15 +2408,16 @@ export function createApp(options = {}) {
     const status = Number(error.status) || (String(error.message).includes("UNIQUE constraint") ? 409 : 500);
     if (status >= 500) console.error(error);
     const publicMailcomError = String(error?.code || "").startsWith("MAILCOM_");
+    const publicNeteaseError = String(error?.code || "").startsWith("NETEASE_") || String(error?.code || "").startsWith("INVALID_NETEASE_");
     const publicIcPipelineError = String(error?.code || "").startsWith("IC_PIPELINE_");
-    const body = { error: status >= 500 && !publicMailcomError && !publicIcPipelineError ? "服务器处理请求失败" : error.message };
-    if (PUBLIC_AGENT_IDENTITY_ERROR_CODES.has(error?.code) || publicMailcomError || publicIcPipelineError) {
+    const body = { error: status >= 500 && !publicMailcomError && !publicNeteaseError && !publicIcPipelineError ? "服务器处理请求失败" : error.message };
+    if (PUBLIC_AGENT_IDENTITY_ERROR_CODES.has(error?.code) || publicMailcomError || publicNeteaseError || publicIcPipelineError) {
       body.code = error.code;
     }
     if (publicMailcomError && error?.partial) Object.assign(body, safeMailcomPartialError(error));
     res.status(status).json(body);
   });
-  return { app, db, graph, gmail, icloud, icloudPrivacy, mailcom, mailcomAliases, inbox, inboxLinkMailboxes, extension, jobs, registration, pickup, paymentLinks, paymentAgreements, icRegistrationPipelines, mailcomRegistrationPipelines, openAiSms, nfapi, nfapiCredentialSync, microsoftRegistration, microsoftRegistrationRunner };
+  return { app, db, graph, gmail, icloud, icloudPrivacy, mailcom, mailcomAliases, netease, inbox, inboxLinkMailboxes, extension, jobs, registration, pickup, paymentLinks, paymentAgreements, icRegistrationPipelines, mailcomRegistrationPipelines, openAiSms, nfapi, nfapiCredentialSync, microsoftRegistration, microsoftRegistrationRunner };
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

@@ -16,12 +16,14 @@ const MicrosoftProviderIcon = ({ size }) => <ProviderMark provider="microsoft" s
 const GoogleProviderIcon = ({ size }) => <ProviderMark provider="google" size={size} />;
 const ICloudProviderIcon = ({ size }) => <ProviderMark provider="icloud" size={size} />;
 const MailComProviderIcon = ({ size }) => <ProviderMark provider="mailcom" size={size} />;
+const NeteaseProviderIcon = ({ size }) => <ProviderMark provider="netease" size={size} />;
 
 const SOURCE_PROVIDER_ITEMS = [
   { value: "microsoft", label: "Microsoft", icon: MicrosoftProviderIcon },
   { value: "google", label: "Google", icon: GoogleProviderIcon },
   { value: "icloud", label: "iCloud", icon: ICloudProviderIcon },
   { value: "mailcom", label: "mail.com", icon: MailComProviderIcon },
+  { value: "netease", label: "网易邮箱", icon: NeteaseProviderIcon },
 ];
 
 function count(value) {
@@ -36,6 +38,32 @@ function mailcomUsage(account) {
   return { aliases, used, limit, remaining: Math.max(0, limit - used) };
 }
 
+function neteaseAliasCount(account) {
+  const value = account?.netease_aliases ?? account?.netease_alias_count ?? account?.alias_count;
+  return Array.isArray(value) ? value.length : count(value);
+}
+
+function normalizeNeteaseAliases(value) {
+  return [...new Set(String(value || "")
+    .split(/[\s,;，；]+/)
+    .map((alias) => alias.trim().toLowerCase())
+    .filter(Boolean))];
+}
+
+function neteaseAliasesFromResult(result) {
+  const candidates = Array.isArray(result)
+    ? result
+    : Array.isArray(result?.aliases)
+      ? result.aliases
+      : Array.isArray(result?.items)
+        ? result.items
+        : [];
+  return [...new Set(candidates
+    .map((item) => typeof item === "string" ? item : item?.address || item?.alias || item?.email)
+    .map((alias) => String(alias || "").trim().toLowerCase())
+    .filter((alias) => /^[^@\s]+@aka\.yeah\.net$/i.test(alias)))];
+}
+
 function latestScan(accounts) {
   const latest = accounts.map((account) => account.last_inbox_scan_at).filter(Boolean).sort().at(-1);
   return relativeTime(latest);
@@ -44,6 +72,14 @@ function latestScan(accounts) {
 function providerSummaryStats(provider, accounts) {
   const connected = accounts.filter((account) => account.status === "connected").length;
   const total = (field) => accounts.reduce((sum, account) => sum + count(account[field]), 0);
+  if (provider === "netease") {
+    return [
+      { label: "母号", value: accounts.length },
+      { label: "已连接", value: connected },
+      { label: "替身邮箱", value: accounts.reduce((sum, account) => sum + neteaseAliasCount(account), 0) },
+      { label: "最近扫描", value: latestScan(accounts) },
+    ];
+  }
   if (provider === "mailcom") {
     const usage = accounts.map(mailcomUsage);
     return [
@@ -113,7 +149,8 @@ function SourceAccountCard({ account, initialAccountId, operation, onAliasSync, 
   const supportsPlus = accountSupportsPlusAliases(account);
   const supportsImported = accountSupportsImportedAliases(account);
   const isMailcom = accountMeta.id === "mailcom";
-  const supportsAliases = isMailcom || supportsOfficial || supportsImported;
+  const isNetease = accountMeta.id === "netease";
+  const supportsAliases = isMailcom || isNetease || supportsOfficial || supportsImported;
   const usage = mailcomUsage(account);
   const operationComplete = operation?.status === "completed";
   const operationPartial = operation?.partial;
@@ -122,12 +159,12 @@ function SourceAccountCard({ account, initialAccountId, operation, onAliasSync, 
   const operationLocked = operationQueued || operationRunning;
   return <article id={`source-account-${account.id}`} className={`source-card source-card-${accountMeta.id}${Number(initialAccountId) === account.id ? " source-card-target" : ""}`}>
     <header><ProviderMark provider={accountMeta.id} size={38} /><div><h2>{account.display_name || account.email.split("@")[0]}</h2><p>{account.email}<span className="provider-name">{accountMeta.name}</span></p></div><StatusBadge status={account.status}>{accountStatus[account.status]}</StatusBadge></header>
-    {isMailcom ? <div className="source-quota"><div><span>母号 / 官方分裂别名</span><b>{usage.used} <small>/ {usage.limit}</small></b></div><div className="quota-track"><i style={{ width: `${Math.min(100, usage.used / usage.limit * 100)}%` }} /></div><small>母号与别名合计最多 10 个地址；不支持 +tag / Plus 分裂</small></div> : supportsOfficial ? <div className="source-quota"><div><span>官方基础地址</span><b>{account.official_used} <small>/ {account.official_limit}</small></b></div><div className="quota-track"><i style={{ width: `${Math.min(100, account.official_used / account.official_limit * 100)}%` }} /></div><small>剩余 {account.official_remaining} 个记录名额，实际以 Microsoft 官网限制为准</small></div> : <div className="source-provider-capability">{supportsPlus ? <WandSparkles size={18} /> : supportsImported ? <AtSign size={18} /> : <KeyRound size={18} />}<span><b>{accountMeta.capabilityTitle}</b><small>{accountMeta.capabilityDescription}</small></span></div>}
-    {isMailcom ? <dl className="source-stats"><div><dt>母号</dt><dd>1</dd></div><div><dt>官方分裂别名</dt><dd>{usage.aliases}</dd></div><div><dt>可直接注册</dt><dd>{usage.used} 个地址</dd></div><div><dt>收件扫描</dt><dd>{relativeTime(account.last_inbox_scan_at)}</dd></div></dl> : supportsImported ? <dl className="source-stats"><div><dt>邮箱别名</dt><dd>{account.icloud_mail_aliases || 0}</dd></div><div><dt>隐藏邮箱</dt><dd>{account.icloud_hide_my_emails || 0}</dd></div><div><dt>自定义域名</dt><dd>{account.icloud_custom_domain_emails || 0}</dd></div><div><dt>本地登记</dt><dd>{(account.icloud_mail_aliases || 0) + (account.icloud_hide_my_emails || 0) + (account.icloud_custom_domain_emails || 0)} 个可直接注册</dd></div></dl> : <dl className="source-stats"><div><dt>官方别名</dt><dd>{supportsAliases ? account.official_aliases : "不支持"}</dd></div><div><dt>分裂地址</dt><dd>{supportsPlus ? account.split_count : "不支持"}</dd></div><div><dt>收件扫描</dt><dd>{relativeTime(account.last_inbox_scan_at)}</dd></div><div><dt>{supportsOfficial ? "别名同步" : accountMeta.connectionLabel}</dt><dd>{supportsOfficial ? relativeTime(account.last_synced_at) : account.connection_connected ? "已连接" : "待连接"}</dd></div></dl>}
+    {isMailcom ? <div className="source-quota"><div><span>母号 / 官方分裂别名</span><b>{usage.used} <small>/ {usage.limit}</small></b></div><div className="quota-track"><i style={{ width: `${Math.min(100, usage.used / usage.limit * 100)}%` }} /></div><small>母号与别名合计最多 10 个地址；不支持 +tag / Plus 分裂</small></div> : isNetease ? <div className="source-provider-capability"><AtSign size={18} /><span><b>{accountMeta.capabilityTitle}</b><small>{accountMeta.capabilityDescription}</small></span></div> : supportsOfficial ? <div className="source-quota"><div><span>官方基础地址</span><b>{account.official_used} <small>/ {account.official_limit}</small></b></div><div className="quota-track"><i style={{ width: `${Math.min(100, account.official_used / account.official_limit * 100)}%` }} /></div><small>剩余 {account.official_remaining} 个记录名额，实际以 Microsoft 官网限制为准</small></div> : <div className="source-provider-capability">{supportsPlus ? <WandSparkles size={18} /> : supportsImported ? <AtSign size={18} /> : <KeyRound size={18} />}<span><b>{accountMeta.capabilityTitle}</b><small>{accountMeta.capabilityDescription}</small></span></div>}
+    {isMailcom ? <dl className="source-stats"><div><dt>母号</dt><dd>1</dd></div><div><dt>官方分裂别名</dt><dd>{usage.aliases}</dd></div><div><dt>可直接注册</dt><dd>{usage.used} 个地址</dd></div><div><dt>收件扫描</dt><dd>{relativeTime(account.last_inbox_scan_at)}</dd></div></dl> : isNetease ? <dl className="source-stats"><div><dt>母号</dt><dd>1</dd></div><div><dt>替身邮箱</dt><dd>{neteaseAliasCount(account)}</dd></div><div><dt>可直接注册</dt><dd>{neteaseAliasCount(account) + 1} 个地址</dd></div><div><dt>收件扫描</dt><dd>{relativeTime(account.last_inbox_scan_at)}</dd></div></dl> : supportsImported ? <dl className="source-stats"><div><dt>邮箱别名</dt><dd>{account.icloud_mail_aliases || 0}</dd></div><div><dt>隐藏邮箱</dt><dd>{account.icloud_hide_my_emails || 0}</dd></div><div><dt>自定义域名</dt><dd>{account.icloud_custom_domain_emails || 0}</dd></div><div><dt>本地登记</dt><dd>{(account.icloud_mail_aliases || 0) + (account.icloud_hide_my_emails || 0) + (account.icloud_custom_domain_emails || 0)} 个可直接注册</dd></div></dl> : <dl className="source-stats"><div><dt>官方别名</dt><dd>{supportsAliases ? account.official_aliases : "不支持"}</dd></div><div><dt>分裂地址</dt><dd>{supportsPlus ? account.split_count : "不支持"}</dd></div><div><dt>收件扫描</dt><dd>{relativeTime(account.last_inbox_scan_at)}</dd></div><div><dt>{supportsOfficial ? "别名同步" : accountMeta.connectionLabel}</dt><dd>{supportsOfficial ? relativeTime(account.last_synced_at) : account.connection_connected ? "已连接" : "待连接"}</dd></div></dl>}
     {operation && <div className={`source-account-operation is-${operation.status}${operationPartial ? " is-partial" : ""}`} role="status">{operationRunning ? <LoaderCircle className="spin" size={16} /> : operationQueued ? <LoaderCircle size={16} /> : operationComplete ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}<span><b>{operationRunning ? "正在创建官方别名" : operationQueued ? "等待创建官方别名" : operationComplete ? `已新建 ${operation.created || 0} 个别名` : operationPartial ? `部分完成，新建 ${operation.created || 0} 个` : "创建失败"}</b>{operation.error && <small>{operation.error}</small>}</span></div>}
     {account.status === "action_required" && <div className="inline-alert warning"><AlertCircle size={15} /><span>{accountMeta.name} 连接需要更新</span><Button size="sm" onClick={() => onReconnect(account)}>{accountMeta.reconnectLabel}</Button></div>}
     {account.limit_reason && <div className="inline-alert warning"><AlertCircle size={15} /><span>{account.limit_reason}</span></div>}
-    <footer>{isMailcom && <Button icon={AtSign} disabled={operationLocked} onClick={() => onAliasSync(account)}>管理别名</Button>}{supportsOfficial && <Button icon={AtSign} onClick={() => onNavigate("factory", { accountId: account.id, mode: "official" })}>官方别名</Button>}{supportsImported && !isMailcom && <Button icon={AtSign} onClick={() => onAliasSync(account, "mail_alias")}>邮箱别名</Button>}{supportsImported && !isMailcom && <Button icon={ShieldCheck} onClick={() => onAliasSync(account, "hide_my_email")}>隐藏邮箱</Button>}{supportsImported && !isMailcom && <Button icon={Globe2} onClick={() => onAliasSync(account, "custom_domain")}>自定义域名</Button>}{supportsPlus && <Button icon={WandSparkles} onClick={() => onNavigate("factory", { accountId: account.id, mode: "split" })}>生成分裂</Button>}<div className="source-more">{supportsOfficial && <IconButton icon={ListPlus} label="手工登记官网别名" onClick={() => onAliasSync(account)} />}<IconButton icon={account.status === "connected" ? ShieldCheck : Unplug} label={`${accountMeta.reconnectLabel} ${accountMeta.name}`} disabled={operationLocked} onClick={() => onReconnect(account)} /><IconButton icon={Trash2} label="移除源头邮箱" disabled={operationLocked} onClick={() => onRemove(account)} /></div></footer>
+    <footer>{isMailcom && <Button icon={AtSign} disabled={operationLocked} onClick={() => onAliasSync(account)}>管理别名</Button>}{isNetease && <Button icon={AtSign} onClick={() => onAliasSync(account, "netease_alias")}>管理替身</Button>}{supportsOfficial && <Button icon={AtSign} onClick={() => onNavigate("factory", { accountId: account.id, mode: "official" })}>官方别名</Button>}{supportsImported && !isMailcom && !isNetease && <Button icon={AtSign} onClick={() => onAliasSync(account, "mail_alias")}>邮箱别名</Button>}{supportsImported && !isMailcom && !isNetease && <Button icon={ShieldCheck} onClick={() => onAliasSync(account, "hide_my_email")}>隐藏邮箱</Button>}{supportsImported && !isMailcom && !isNetease && <Button icon={Globe2} onClick={() => onAliasSync(account, "custom_domain")}>自定义域名</Button>}{supportsPlus && <Button icon={WandSparkles} onClick={() => onNavigate("factory", { accountId: account.id, mode: "split" })}>生成分裂</Button>}<div className="source-more">{supportsOfficial && <IconButton icon={ListPlus} label="手工登记官网别名" onClick={() => onAliasSync(account)} />}<IconButton icon={account.status === "connected" ? ShieldCheck : Unplug} label={`${accountMeta.reconnectLabel} ${accountMeta.name}`} disabled={operationLocked} onClick={() => onReconnect(account)} /><IconButton icon={Trash2} label="移除源头邮箱" disabled={operationLocked} onClick={() => onRemove(account)} /></div></footer>
   </article>;
 }
 
@@ -195,6 +232,156 @@ function MailComImportModal({ open, onClose, onImported }) {
   </Modal>;
 }
 
+function NeteaseImportModal({ open, onClose, onImported }) {
+  const [content, setContent] = useState("");
+  const [importResult, setImportResult] = useState(null);
+  const [message, setMessage] = useState("");
+  const [loading, setLoading] = useState(false);
+  const toast = useToast();
+
+  useEffect(() => {
+    if (!open) {
+      setContent("");
+      setImportResult(null);
+      setMessage("");
+    }
+  }, [open]);
+
+  const submit = async () => {
+    if (!content.trim()) return;
+    setLoading(true);
+    setImportResult(null);
+    setMessage("");
+    try {
+      const result = await api("/api/netease/import", { method: "POST", body: { content } });
+      const imported = Number(result.imported ?? result.succeeded ?? result.success ?? result.items?.filter((item) => item?.status !== "failed").length) || 0;
+      const created = Number(result.created) || 0;
+      const updated = Number(result.updated) || 0;
+      const failed = Number(result.failed ?? result.invalid) || 0;
+      const failures = Array.isArray(result.items)
+        ? result.items.filter((item) => item?.status === "failed" || item?.error).map((item) => ({
+          email: String(item.email || item.account || "未知邮箱"),
+          error: String(item.error || "连接失败"),
+        }))
+        : [];
+      const summary = `成功 ${imported} 个（新增 ${created}，更新 ${updated}）${failed ? `，失败 ${failed} 个` : ""}`;
+      setContent("");
+      setImportResult({ imported, created, updated, failed, failures });
+      toast(summary, failed ? "error" : "success");
+      await onImported?.(result);
+      if (!failed) onClose();
+    } catch (error) {
+      setMessage(error.message);
+      toast(error.message, "error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return <Modal
+    open={open}
+    onClose={() => { if (!loading) onClose(); }}
+    title="导入网易邮箱"
+    description="批量连接 163、126、yeah 母号，并登记 @aka.yeah.net 替身邮箱"
+    size="lg"
+    footer={<><Button disabled={loading} onClick={onClose}>取消</Button><Button variant="primary" icon={Upload} loading={loading} disabled={!content.trim()} onClick={submit}>导入网易邮箱</Button></>}
+  >
+    <div className="form-stack">
+      <div className="provider-login-note"><ProviderMark provider="netease" size={34} /><span><b>母号使用客户端授权码连接</b><small>母号仅支持 @163.com、@126.com、@yeah.net；替身邮箱仅支持 @aka.yeah.net</small></span></div>
+      <FormField label="网易邮箱账号" hint="一条记录可继续追加多个 ----替身邮箱，也可把替身邮箱逐行写在母号记录后面">
+        <textarea
+          rows="12"
+          value={content}
+          disabled={loading}
+          onChange={(event) => setContent(event.target.value)}
+          placeholder={'mother@163.com----客户端授权码----alias1@aka.yeah.net----alias2@aka.yeah.net\nalias3@aka.yeah.net\n\nmother@yeah.net----客户端授权码----alias4@aka.yeah.net'}
+          autoCapitalize="off"
+          autoCorrect="off"
+          spellCheck="false"
+          autoFocus
+        />
+      </FormField>
+      <div className="inline-alert warning"><AlertCircle size={17} /><span>请填写网易邮箱设置中生成的客户端授权码，不是网页登录密码。授权码只发送到服务器并加密保存，导入结果不会回显。</span></div>
+      {importResult && <div className="provider-login-note"><CheckCircle2 size={24} /><span><b>本次成功 {importResult.imported} 个</b><small>新增 {importResult.created} · 更新 {importResult.updated} · 失败 {importResult.failed}；提交内容已清空</small></span></div>}
+      {importResult?.failures?.length > 0 && <div className="provider-login-note" role="alert"><AlertCircle size={24} /><span><b>失败详情</b>{importResult.failures.map((item, index) => <small key={`${item.email}-${index}`}>{item.email}：{item.error}</small>)}</span></div>}
+      {message && <div className="inline-alert danger"><AlertCircle size={17} /><span>{message}</span></div>}
+    </div>
+  </Modal>;
+}
+
+function NeteaseAliasModal({ account, onClose, onSaved }) {
+  const [aliases, setAliases] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
+  const toast = useToast();
+
+  useEffect(() => {
+    if (!account?.id) {
+      setAliases("");
+      setMessage("");
+      return undefined;
+    }
+    let active = true;
+    setLoading(true);
+    setMessage("");
+    const localAliases = neteaseAliasesFromResult(account?.netease_alias_items || account?.aliases || []);
+    setAliases(localAliases.join("\n"));
+    api(`/api/accounts/${account.id}/netease-aliases`)
+      .then((result) => {
+        if (active) setAliases(neteaseAliasesFromResult(result).join("\n"));
+      })
+      .catch((error) => { if (active) setMessage(error.message); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [account?.id]);
+
+  const save = async () => {
+    const normalized = normalizeNeteaseAliases(aliases);
+    const invalid = normalized.filter((alias) => !/^[^@\s]+@aka\.yeah\.net$/i.test(alias));
+    if (invalid.length) {
+      setMessage(`替身邮箱必须使用 @aka.yeah.net：${invalid.slice(0, 3).join("、")}`);
+      return;
+    }
+    setSaving(true);
+    setMessage("");
+    try {
+      const result = await api(`/api/accounts/${account.id}/netease-aliases`, {
+        method: "POST",
+        body: { aliases: normalized },
+      });
+      const savedAliases = neteaseAliasesFromResult(result);
+      setAliases((savedAliases.length || !normalized.length ? savedAliases : normalized).join("\n"));
+      toast(`已保存 ${savedAliases.length || normalized.length} 个网易替身邮箱`);
+      await onSaved?.(result);
+      onClose();
+    } catch (error) {
+      setMessage(error.message);
+      toast(error.message, "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return <Modal
+    open={Boolean(account)}
+    onClose={() => { if (!saving) onClose(); }}
+    title="管理网易替身邮箱"
+    description={account ? `${account.email} 的 @aka.yeah.net 替身邮箱` : ""}
+    size="md"
+    footer={<><Button disabled={saving} onClick={onClose}>取消</Button><Button variant="primary" icon={AtSign} loading={saving} disabled={loading} onClick={save}>保存替身邮箱</Button></>}
+  >
+    <div className="form-stack">
+      <div className="provider-login-note"><ProviderMark provider="netease" size={34} /><span><b>共用母号收件箱</b><small>每行一个 @aka.yeah.net 地址，也支持用逗号、分号或空格分隔</small></span></div>
+      <FormField label="替身邮箱" hint={`当前识别 ${normalizeNeteaseAliases(aliases).length} 个地址`}>
+        <textarea rows="10" value={aliases} disabled={loading || saving} onChange={(event) => setAliases(event.target.value)} placeholder={'alias1@aka.yeah.net\nalias2@aka.yeah.net'} autoCapitalize="off" autoCorrect="off" spellCheck="false" />
+      </FormField>
+      {loading && <div className="provider-login-note"><LoaderCircle className="spin" size={24} /><span><b>正在读取替身邮箱</b><small>从服务器加载当前登记列表</small></span></div>}
+      {message && <div className="inline-alert danger"><AlertCircle size={17} /><span>{message}</span></div>}
+    </div>
+  </Modal>;
+}
+
 function ConnectionModal({ open, onClose, existingAccount, onConnected }) {
   const [session, setSession] = useState(null);
   const [account, setAccount] = useState(null);
@@ -204,6 +391,7 @@ function ConnectionModal({ open, onClose, existingAccount, onConnected }) {
   const [provider, setProvider] = useState(() => normalizeProvider(existingAccount?.provider));
   const [icloudForm, setIcloudForm] = useState({ email: existingAccount?.email || "", appSpecificPassword: "" });
   const [mailcomForm, setMailcomForm] = useState({ email: existingAccount?.email || "", password: "" });
+  const [neteaseForm, setNeteaseForm] = useState({ email: existingAccount?.email || "", authCode: "", aliases: "" });
   const [loading, setLoading] = useState(false);
   const toast = useToast();
 
@@ -217,6 +405,7 @@ function ConnectionModal({ open, onClose, existingAccount, onConnected }) {
     setProvider(normalizeProvider(existingAccount?.provider));
     setIcloudForm({ email: existingAccount?.email || "", appSpecificPassword: "" });
     setMailcomForm({ email: existingAccount?.email || "", password: "" });
+    setNeteaseForm({ email: existingAccount?.email || "", authCode: "", aliases: "" });
   }, [open, existingAccount?.id]);
 
   const meta = providerMeta(provider);
@@ -351,10 +540,56 @@ function ConnectionModal({ open, onClose, existingAccount, onConnected }) {
     }
   };
 
+  const connectNetease = async () => {
+    const email = String(existingAccount?.email || neteaseForm.email).trim().toLowerCase();
+    const authCode = neteaseForm.authCode.trim();
+    const aliases = normalizeNeteaseAliases(neteaseForm.aliases);
+    if (!email || !authCode) {
+      setMessage("请填写网易邮箱母号和客户端授权码");
+      return;
+    }
+    if (!/^[^@\s]+@(163\.com|126\.com|yeah\.net)$/i.test(email)) {
+      setMessage("母号仅支持 @163.com、@126.com 或 @yeah.net");
+      return;
+    }
+    const invalidAliases = aliases.filter((alias) => !/^[^@\s]+@aka\.yeah\.net$/i.test(alias));
+    if (invalidAliases.length) {
+      setMessage(`替身邮箱必须使用 @aka.yeah.net：${invalidAliases.slice(0, 3).join("、")}`);
+      return;
+    }
+    setLoading(true);
+    setStatus("connecting");
+    setMessage("");
+    try {
+      const result = await api("/api/netease/connect", {
+        method: "POST",
+        body: {
+          accountId: existingAccount?.id || null,
+          email,
+          authCode,
+          ...(aliases.length ? { aliases } : {}),
+        },
+      });
+      setAccount(result.account);
+      setStatus("connected");
+      setNeteaseForm((current) => ({ ...current, authCode: "", aliases: "" }));
+      toast(`${result.account.email} 已连接网易邮箱`);
+      onConnected();
+    } catch (error) {
+      setStatus("error");
+      setMessage(error.message);
+      toast(error.message, "error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const waiting = status === "awaiting_callback" || status === "completing";
   const footer = status === "connected"
     ? <Button variant="primary" icon={CheckCircle2} onClick={onClose}>完成</Button>
-    : provider === "mailcom"
+    : provider === "netease"
+      ? <><Button onClick={onClose}>取消</Button><Button variant="primary" icon={ShieldCheck} loading={loading} onClick={connectNetease}>{existingAccount ? "验证并更新" : "连接网易邮箱"}</Button></>
+      : provider === "mailcom"
       ? <><Button onClick={onClose}>取消</Button><Button variant="primary" icon={ShieldCheck} loading={loading} onClick={connectMailcom}>{existingAccount ? "验证并更新" : "连接 mail.com"}</Button></>
       : provider === "icloud"
       ? <><Button onClick={onClose}>取消</Button><Button variant="primary" icon={ShieldCheck} loading={loading} onClick={connectIcloud}>{existingAccount ? "验证并更新" : "连接 iCloud"}</Button></>
@@ -365,7 +600,22 @@ function ConnectionModal({ open, onClose, existingAccount, onConnected }) {
   return (
     <Modal open={open} onClose={onClose} title={existingAccount ? `${meta.reconnectLabel} ${meta.name} 账号` : "绑定源头邮箱"} description={existingAccount?.email || meta.description} size="md" footer={footer}>
       {status === "connected" ? (
-        <div className="connection-success"><span><CheckCircle2 size={30} /></span><h3>{provider === "icloud" ? "iCloud Mail 已连接" : provider === "mailcom" ? "mail.com 已连接" : "OAuth 授权已完成"}</h3><p>{account?.email}</p><div><b>{provider === "icloud" ? "IMAP" : provider === "mailcom" ? "密码" : "RT"}</b><small>{provider === "icloud" ? "App 专用密码已加密保存" : provider === "mailcom" ? "mail.com 登录密码已加密保存" : "长期授权已加密保存"}</small></div></div>
+        <div className="connection-success"><span><CheckCircle2 size={30} /></span><h3>{provider === "icloud" ? "iCloud Mail 已连接" : provider === "mailcom" ? "mail.com 已连接" : provider === "netease" ? "网易邮箱已连接" : "OAuth 授权已完成"}</h3><p>{account?.email}</p><div><b>{provider === "icloud" ? "IMAP" : provider === "mailcom" ? "密码" : provider === "netease" ? "授权码" : "RT"}</b><small>{provider === "icloud" ? "App 专用密码已加密保存" : provider === "mailcom" ? "mail.com 登录密码已加密保存" : provider === "netease" ? "网易客户端授权码已加密保存" : "长期授权已加密保存"}</small></div></div>
+      ) : provider === "netease" ? (
+        <div className="oauth-start-panel">
+          {!existingAccount && <Segmented value={provider} onChange={(value) => { setProvider(value); setMessage(""); setStatus("idle"); }} ariaLabel="邮箱提供商" items={SOURCE_PROVIDER_ITEMS} />}
+          <ProviderMark provider="netease" size={48} />
+          <h3>网易邮箱客户端授权码</h3>
+          <p>连接 163、126 或 yeah 母号，并通过同一收件箱接收 @aka.yeah.net 替身邮箱邮件。</p>
+          {message && <div className="inline-alert danger"><AlertCircle size={17} /><span>{message}</span></div>}
+          <div className="icloud-connect-form">
+            <FormField label="网易邮箱母号" hint="支持 @163.com、@126.com、@yeah.net"><input type="email" value={existingAccount?.email || neteaseForm.email} disabled={Boolean(existingAccount)} onChange={(event) => setNeteaseForm({ ...neteaseForm, email: event.target.value })} placeholder="name@163.com" autoComplete="username" /></FormField>
+            <FormField label="客户端授权码" hint="不是网页登录密码；验证成功后使用 AES-256-GCM 加密保存"><input type="password" value={neteaseForm.authCode} onChange={(event) => setNeteaseForm({ ...neteaseForm, authCode: event.target.value })} placeholder="输入客户端授权码" autoComplete="new-password" autoFocus /></FormField>
+            {!existingAccount && <FormField label="@aka.yeah.net 替身邮箱（可选）" hint={`已填写 ${normalizeNeteaseAliases(neteaseForm.aliases).length} 个；支持换行、逗号或分号分隔`}><textarea rows="4" value={neteaseForm.aliases} onChange={(event) => setNeteaseForm({ ...neteaseForm, aliases: event.target.value })} placeholder={'alias1@aka.yeah.net\nalias2@aka.yeah.net'} autoCapitalize="off" autoCorrect="off" spellCheck="false" /></FormField>}
+            <a className="icloud-password-link" href="https://mail.163.com/" target="_blank" rel="noreferrer"><ExternalLink size={14} />前往网易邮箱开启 IMAP 并生成授权码</a>
+            <div className="provider-login-note"><KeyRound size={24} /><span><b>服务端登录反代</b><small>客户端授权码由服务端安全连接网易 IMAP，替身邮箱共用母号收件箱</small></span></div>
+          </div>
+        </div>
       ) : provider === "mailcom" ? (
         <div className="oauth-start-panel">
           {!existingAccount && <Segmented value={provider} onChange={(value) => { setProvider(value); setMessage(""); setStatus("idle"); }} ariaLabel="邮箱提供商" items={SOURCE_PROVIDER_ITEMS} />}

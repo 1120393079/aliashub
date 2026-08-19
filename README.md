@@ -1,21 +1,24 @@
 # AliasHub
 
 AliasHub is a self-hosted mailbox and account-operations hub for Microsoft
-Outlook, Google Gmail/Workspace, and Apple iCloud Mail accounts. It keeps
-mailbox OAuth tokens, encrypted iCloud credentials, and service credentials on
-the installation that you control.
+Outlook, Google Gmail/Workspace, Apple iCloud Mail, Mail.com, and NetEase Mail
+accounts. It keeps mailbox OAuth tokens, encrypted IMAP credentials, and
+service credentials on the installation that you control.
 
 ## Features
 
-- Connect multiple Microsoft and Google source mailboxes with OAuth, plus
-  iCloud Mail with an Apple App-specific password.
-- Encrypt refresh tokens and iCloud App-specific passwords at rest with
-  AES-256-GCM.
+- Connect multiple Microsoft and Google source mailboxes with OAuth, iCloud Mail
+  with an Apple App-specific password, Mail.com with its login password, and
+  NetEase Mail with a client authorization code.
+- Encrypt refresh tokens and stored IMAP credentials at rest with AES-256-GCM.
 - Read inbox messages, extract verification codes, search mail, and export
   address inventories.
 - Manage Outlook official aliases and generate repeatable `+tag` addresses.
 - Import Mail.com sources, read their mail over IMAP, and create official aliases
   in an isolated Chromium context without persisting a browser profile.
+- Import NetEase `@163.com`, `@126.com`, or `@yeah.net` mother accounts, map
+  their `@aka.yeah.net` alias addresses, and use those aliases directly for
+  registration and verification-code delivery.
 - Mark addresses whose latest registration attempt failed, select every failed
   address in the current filtered inventory with one action, and remove the
   selected addresses in a guarded bulk operation.
@@ -200,6 +203,33 @@ AliasHub refuses to store iCloud credentials without it. iCloud integration is r
 verification-code extraction. AliasHub does not generate iCloud aliases or
 `+tag` addresses.
 
+### NetEase Mail
+
+NetEase Mail uses the fixed TLS IMAP endpoints `imap.163.com:993`,
+`imap.126.com:993`, and `imap.yeah.net:993`, selected from the mother account's
+domain. Enable IMAP in NetEase Mail and enter a client authorization code; do
+not enter the normal webmail password.
+
+The source importer accepts one mother account per line, followed by any known
+`@aka.yeah.net` aliases:
+
+```text
+mother@163.com----client-authorization-code----alias1@aka.yeah.net----alias2@aka.yeah.net
+alias3@aka.yeah.net
+```
+
+Alias-only continuation lines belong to the preceding mother account. Mother
+accounts must end in `@163.com`, `@126.com`, or `@yeah.net`; imported alias
+addresses must end exactly in `@aka.yeah.net`. Reconnecting a mother account
+adds newly supplied aliases, while an empty alias list keeps its existing alias
+mapping.
+
+The authorization code is sent only to the AliasHub backend, verified against
+the matching fixed endpoint, encrypted with AES-256-GCM, and never returned to
+the browser. Set a unique server-side `DATA_ENCRYPTION_KEY` before importing a
+NetEase account. Imported aliases support inbox routing, verification-code
+extraction, and direct registration.
+
 ## Optional SUB2-compatible service
 
 SUB2 integration is optional and disabled until an administrator configures it.
@@ -270,8 +300,8 @@ mode stores the worker database in `data/registration-worker/`, Pickup state in
 `data/mail-pickup/`, and extractor logs under `data/payment-link-extractor/`.
 Back up `.env` and the complete `data/` directory together. Losing
 `DATA_ENCRYPTION_KEY` or `PICKUP_TOKEN_SECRET` makes encrypted OAuth tokens,
-iCloud App-specific passwords, inbox-link keys, stored service credentials, or
-Pickup tokens unreadable.
+iCloud App-specific passwords, NetEase client authorization codes, inbox-link
+keys, stored service credentials, or Pickup tokens unreadable.
 
 Never commit:
 

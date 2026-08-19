@@ -34,6 +34,9 @@ All notable changes to AliasHub are documented in this file.
   limits, bounded concurrency, masked runtime state, and per-account results.
 - Added Mail.com source import, IMAP mailbox access, official-alias creation,
   recycle reservation, provider-specific source grouping, and guarded deletion.
+- Added NetEase mailbox import for `@163.com`, `@126.com`, and `@yeah.net`
+  accounts using client authorization codes, including direct registration,
+  verification-code routing, and guarded mapping for `@aka.yeah.net` aliases.
 - Added persistent multi-page account selection with one-click selection for an
   entire filtered group.
 

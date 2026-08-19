@@ -3,9 +3,11 @@ import {
   ICLOUD_HIDE_MY_EMAIL_STRATEGY,
   ICLOUD_MAIL_ALIAS_STRATEGY,
   MAILCOM_ALIAS_STRATEGY,
+  NETEASE_ALIAS_STRATEGY,
   isIcloudPrivateRelay,
   isIcloudImportedStrategy,
   isMailcomAliasStrategy,
+  isNeteaseAliasStrategy,
   normalizeIcloudAliasEmail,
   normalizeIcloudCustomDomainEmail,
   normalizeMailcomEmail,
@@ -33,6 +35,7 @@ export function publicAccount(db, row) {
       SUM(CASE WHEN kind = 'official' AND status = 'active' AND strategy = 'icloud_hide_my_email' THEN 1 ELSE 0 END) AS icloud_hide_my_email_count,
       SUM(CASE WHEN kind = 'official' AND status = 'active' AND strategy = 'icloud_custom_domain' THEN 1 ELSE 0 END) AS icloud_custom_domain_count,
       SUM(CASE WHEN kind = 'official' AND status = 'active' AND strategy = 'mailcom_alias' THEN 1 ELSE 0 END) AS mailcom_alias_count,
+      SUM(CASE WHEN kind = 'official' AND status = 'active' AND strategy = 'netease_alias' THEN 1 ELSE 0 END) AS netease_alias_count,
       SUM(CASE WHEN kind = 'split' AND status = 'active' THEN 1 ELSE 0 END) AS split_count,
       COUNT(*) AS address_count
     FROM addresses WHERE account_id = ?
@@ -46,10 +49,12 @@ export function publicAccount(db, row) {
         ? Boolean(db.prepare("SELECT 1 FROM icloud_credentials WHERE account_id = ?").get(row.id))
         : provider === "mailcom"
           ? Boolean(db.prepare("SELECT 1 FROM mailcom_credentials WHERE account_id = ?").get(row.id))
+        : provider === "netease"
+          ? Boolean(db.prepare("SELECT 1 FROM netease_credentials WHERE account_id = ?").get(row.id))
         : provider === "inbox_link"
           ? Boolean(db.prepare("SELECT 1 FROM inbox_link_mailboxes WHERE source_account_id = ? AND status = 'active'").get(row.id))
           : false;
-  const oauthConnected = !["icloud", "mailcom", "inbox_link"].includes(provider) && credentialConnected;
+  const oauthConnected = !["icloud", "mailcom", "netease", "inbox_link"].includes(provider) && credentialConnected;
   return {
     ...row,
     provider,
@@ -60,17 +65,19 @@ export function publicAccount(db, row) {
     icloud_hide_my_emails: counts.icloud_hide_my_email_count || 0,
     icloud_custom_domain_emails: counts.icloud_custom_domain_count || 0,
     mailcom_aliases: counts.mailcom_alias_count || 0,
+    netease_aliases: counts.netease_alias_count || 0,
     split_count: counts.split_count || 0,
     address_count: counts.address_count || 0,
     oauth_connected: oauthConnected,
     credential_connected: credentialConnected,
     connection_connected: credentialConnected,
-    auth_mode: provider === "icloud" ? "app_password" : provider === "mailcom" ? "password" : provider === "inbox_link" ? "inbox_link" : "oauth",
+    auth_mode: provider === "icloud" ? "app_password" : provider === "mailcom" ? "password" : provider === "netease" ? "imap_auth_code" : provider === "inbox_link" ? "inbox_link" : "oauth",
     supports_official_aliases: provider === "microsoft",
     supports_plus_aliases: ["microsoft", "google"].includes(provider),
-    supports_imported_aliases: ["icloud", "mailcom"].includes(provider),
-    supports_direct_registration: ["icloud", "mailcom"].includes(provider),
+    supports_imported_aliases: ["icloud", "mailcom", "netease"].includes(provider),
+    supports_direct_registration: ["icloud", "mailcom", "netease"].includes(provider),
     supports_mailcom_aliases: provider === "mailcom",
+    supports_netease_aliases: provider === "netease",
   };
 }
 
@@ -474,8 +481,11 @@ export function deleteSelectedAddresses(db, { ids = [], accountId } = {}) {
     imported_mailcom: item.source_provider === "mailcom"
       && item.kind === "official"
       && isMailcomAliasStrategy(item.strategy),
+    imported_netease: item.source_provider === "netease"
+      && item.kind === "official"
+      && isNeteaseAliasStrategy(item.strategy),
   }));
-  if (typed.some((item) => item.kind !== "split" && !item.imported_icloud && !item.imported_mailcom)) {
+  if (typed.some((item) => item.kind !== "split" && !item.imported_icloud && !item.imported_mailcom && !item.imported_netease)) {
     throw Object.assign(new Error("所选地址包含不能从本地删除的源头号或官方别名"), { status: 409 });
   }
   if (!typed.length) return {
@@ -483,6 +493,7 @@ export function deleteSelectedAddresses(db, { ids = [], accountId } = {}) {
     split_deleted: 0,
     imported_icloud_deleted: 0,
     imported_mailcom_deleted: 0,
+    imported_netease_deleted: 0,
     imported_alias_deleted: 0,
     accountIds: [],
     ids: [],
@@ -500,31 +511,35 @@ export function deleteSelectedAddresses(db, { ids = [], accountId } = {}) {
     for (const item of typed) {
       if (item.imported_mailcom) archiveMailcom.run(removedAt, item.id, MAILCOM_ALIAS_STRATEGY);
       else remove.run(item.id);
-      const current = summaries.get(item.account_id) || { split: 0, importedIcloud: 0, importedMailcom: 0 };
+      const current = summaries.get(item.account_id) || { split: 0, importedIcloud: 0, importedMailcom: 0, importedNetease: 0 };
       if (item.imported_icloud) current.importedIcloud += 1;
       else if (item.imported_mailcom) current.importedMailcom += 1;
+      else if (item.imported_netease) current.importedNetease += 1;
       else current.split += 1;
       summaries.set(item.account_id, current);
     }
     for (const [sourceAccountId, summary] of summaries) {
-      const count = summary.split + summary.importedIcloud + summary.importedMailcom;
+      const count = summary.split + summary.importedIcloud + summary.importedMailcom + summary.importedNetease;
       audit(db, sourceAccountId, "address", "批量删除本地地址", `共删除 ${count} 个`, {
         count,
         split_count: summary.split,
         imported_icloud_count: summary.importedIcloud,
         imported_mailcom_count: summary.importedMailcom,
+        imported_netease_count: summary.importedNetease,
       });
     }
   })();
   const splitDeleted = typed.filter((item) => item.kind === "split").length;
   const importedIcloudDeleted = typed.filter((item) => item.imported_icloud).length;
   const importedMailcomDeleted = typed.filter((item) => item.imported_mailcom).length;
+  const importedNeteaseDeleted = typed.filter((item) => item.imported_netease).length;
   return {
     deleted: typed.length,
     split_deleted: splitDeleted,
     imported_icloud_deleted: importedIcloudDeleted,
     imported_mailcom_deleted: importedMailcomDeleted,
-    imported_alias_deleted: importedIcloudDeleted + importedMailcomDeleted,
+    imported_netease_deleted: importedNeteaseDeleted,
+    imported_alias_deleted: importedIcloudDeleted + importedMailcomDeleted + importedNeteaseDeleted,
     accountIds: [...summaries.keys()],
     ids: typed.map((item) => item.id),
   };
@@ -570,7 +585,7 @@ export function persistInboxScanResult(db, account, result = {}) {
       .filter(Boolean);
     const matches = recipients.map((value) => addressByValue.get(value)).filter(Boolean);
     return matches.find((address) => (
-      isIcloudImportedStrategy(address.strategy) || isMailcomAliasStrategy(address.strategy)
+      isIcloudImportedStrategy(address.strategy) || isMailcomAliasStrategy(address.strategy) || isNeteaseAliasStrategy(address.strategy)
     )) || matches[0] || null;
   };
   let addedCodes = 0;
@@ -687,6 +702,8 @@ export class JobRunner {
           ? "正在读取 iCloud Mail 收件箱"
           : account.provider === "mailcom"
             ? "正在读取 Mail.com 收件箱"
+          : account.provider === "netease"
+            ? "正在读取网易邮箱收件箱"
           : account.provider === "inbox_link" ? "正在读取链接取件邮箱" : "正在读取 Outlook 收件箱",
       started_at: nowIso(),
     });

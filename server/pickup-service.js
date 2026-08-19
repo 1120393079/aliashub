@@ -54,6 +54,7 @@ const addressTypeLabels = {
   icloud_mail_alias: "iCloud 邮箱别名",
   icloud_hide_my_email: "iCloud 隐藏邮箱",
   icloud_custom_domain: "iCloud 自定义域名",
+  netease_alias: "网易替身邮箱",
   official: "官方邮箱别名",
 };
 

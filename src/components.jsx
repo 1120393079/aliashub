@@ -72,6 +72,10 @@ export function MailComMark({ size = 34 }) {
   return <span className="provider-mark mailcom-mark" style={{ "--mark-size": `${size}px` }} aria-hidden="true"><Mail size={Math.max(12, Number(size) * 0.56)} /><i /></span>;
 }
 
+export function NeteaseMark({ size = 34 }) {
+  return <span className="provider-mark netease-mark" style={{ "--mark-size": `${size}px` }} aria-hidden="true"><Mail size={Math.max(12, Number(size) * 0.55)} /><b>易</b></span>;
+}
+
 export function InboxLinkMark({ size = 34 }) {
   return <span className="provider-mark inbox-link-mark" style={{ "--mark-size": `${size}px` }} aria-hidden="true"><Link2 size={Math.max(12, Number(size) * 0.58)} /></span>;
 }
@@ -80,6 +84,7 @@ export function ProviderMark({ provider, size = 34 }) {
   if (provider === "google") return <GoogleMark size={size} />;
   if (provider === "icloud") return <ICloudMark size={size} />;
   if (provider === "mailcom") return <MailComMark size={size} />;
+  if (provider === "netease") return <NeteaseMark size={size} />;
   if (provider === "inbox_link") return <InboxLinkMark size={size} />;
   return <MicrosoftMark size={size} />;
 }
