@@ -270,6 +270,7 @@
       apply_checkout_update: byId("apply-update").checked,
       rotate_checkout_proxy: byId("rotate-checkout-proxy").checked,
       rotate_update_proxy: byId("rotate-update-proxy").checked,
+      retry_count: normalizeRetryCountInput(),
       oaics_only: byId("oaics-only").checked,
     };
     try {
@@ -305,6 +306,14 @@
     const updateCount = byId("update-proxy-count");
     if (checkoutCount) checkoutCount.textContent = `已保存 ${proxyPoolLines(byId("checkout-proxy").value).length} 条`;
     if (updateCount) updateCount.textContent = `已保存 ${proxyPoolLines(byId("update-proxy").value).length} 条`;
+  }
+
+  function normalizeRetryCountInput() {
+    const field = byId("retry-count");
+    const value = Number.parseInt(field?.value || "3", 10);
+    const count = Number.isFinite(value) ? Math.max(1, Math.min(10, value)) : 3;
+    if (field) field.value = String(count);
+    return count;
   }
 
   function selectProxyFromPool(value, kind) {
@@ -346,6 +355,16 @@
       }
       if (byId("proxy-source-url") && !byId("proxy-source-url").value.trim() && typeof defaults.proxy_source_url === "string") {
         byId("proxy-source-url").value = defaults.proxy_source_url;
+      }
+      let savedRetryCount = false;
+      try {
+        const saved = JSON.parse(localStorage.getItem(FORM_PREFERENCES_KEY) || "null");
+        savedRetryCount = Boolean(saved && Object.prototype.hasOwnProperty.call(saved, "retry_count"));
+      } catch (error) {
+        savedRetryCount = false;
+      }
+      if (!savedRetryCount && byId("retry-count") && Number.isFinite(Number(defaults.retry_count))) {
+        byId("retry-count").value = String(Math.max(1, Math.min(10, Number.parseInt(defaults.retry_count, 10) || 3)));
       }
       saveFormPreferences();
     } catch (error) {
@@ -391,6 +410,10 @@
       if (typeof preferences.checkout_proxy === "string") byId("checkout-proxy").value = preferences.checkout_proxy;
       if (typeof preferences.update_proxy === "string") byId("update-proxy").value = preferences.update_proxy;
       if (byId("proxy-source-url") && typeof preferences.proxy_source_url === "string") byId("proxy-source-url").value = preferences.proxy_source_url;
+      if (byId("retry-count") && preferences.retry_count != null) {
+        const retryCount = Number.parseInt(preferences.retry_count, 10);
+        if (Number.isFinite(retryCount)) byId("retry-count").value = String(Math.max(1, Math.min(10, retryCount)));
+      }
       const checkboxPreferences = [
         ["apply_checkout_update", "apply-update"],
         ["rotate_checkout_proxy", "rotate-checkout-proxy"],
@@ -437,6 +460,7 @@
   function formOverrides() {
     const result = {
       apply_checkout_update: byId("apply-update").checked,
+      retry_count: normalizeRetryCountInput(),
       oaics_only: byId("oaics-only").checked,
     };
     const values = [
@@ -459,11 +483,15 @@
   ) {
     const payload = { ...parseCredentialInput(credential), ...overrides };
     if (payload.checkout_proxy) {
+      const checkoutProxyPool = normalizeProxyPoolText(payload.checkout_proxy);
       payload.checkout_proxy = selectProxyFromPool(payload.checkout_proxy, "checkout");
+      payload.checkout_proxy_pool = checkoutProxyPool;
       if (rotateCheckout) payload.checkout_proxy = rotateCheckoutProxy(payload.checkout_proxy);
     }
     if (payload.update_proxy) {
+      const updateProxyPool = normalizeProxyPoolText(payload.update_proxy);
       payload.update_proxy = selectProxyFromPool(payload.update_proxy, "update");
+      payload.update_proxy_pool = updateProxyPool;
       if (rotateUpdate) payload.update_proxy = rotateUpdateProxy(payload.update_proxy);
     }
     return payload;
@@ -821,6 +849,7 @@
       task.progress = clampProgress(data.progress ?? task.progress);
       task.message = "任务失败";
       task.error = data.error || "任务失败";
+      task.error_category = data.error_category || "";
       task.network_error = Boolean(data.network_error);
     } else if (event.type === "task.cancelled") {
       task.status = "cancelled";
@@ -860,7 +889,8 @@
 
   function stageLabel(stage) {
     const labels = {
-      queued: "等待执行", running: "开始执行", eligibility_check: "检查优惠资格", checkout: "创建 Checkout",
+      queued: "等待执行", running: "开始执行", checkout_retry: "blocked，创建新 Checkout",
+      eligibility_check: "检查优惠资格", checkout: "创建 Checkout",
       checkout_update: "更新 Checkout", stripe_init: "初始化支付", elements_session: "准备支付方式",
       taxes: "同步税费", payment_confirmation: "确认支付方式", redirect_resolution: "解析跳转链接",
       completed: "任务完成", cancelled: "任务已取消", failed: "任务失败",
@@ -1286,7 +1316,10 @@
   function renderTaskError(task) {
     if (!isFailedTask(task)) return "";
     const reason = taskFailureReason(task);
-    return `<p class="task-message error-text" title="${escapeHtml(reason)}">${escapeHtml(reason)}</p>`;
+    const category = task.error_category === "blocked"
+      ? '<span class="status status-blocked">blocked</span> '
+      : "";
+    return `<p class="task-message error-text" title="${escapeHtml(reason)}">${category}${escapeHtml(reason)}</p>`;
   }
 
   function renderNetworkErrorTag(task) {
@@ -1398,6 +1431,9 @@
   }
 
   function renderNetworkErrorDetail(task) {
+    if (task.error_category === "blocked") {
+      return '<div class="detail-item"><span>错误类型</span><strong class="status status-blocked">blocked（已按新 Checkout 重试）</strong></div>';
+    }
     return task.network_error
       ? '<div class="detail-item"><span>错误类型</span><strong class="status status-network" title="网络异常，建议重试">网络错误</strong></div>'
       : "";
@@ -1427,6 +1463,8 @@
       renderModalDetail("状态", statusLabel(task.status)),
       renderNetworkErrorDetail(task),
       renderModalDetail("当前阶段", stageLabel(task.stage)),
+      renderModalDetail("Checkout 总轮数", task.retry_count || result.retry_count),
+      renderModalDetail("本次使用轮次", result.checkout_attempt),
       renderModalDetail("账单国家", task.billing_country || result.billing_country),
       renderModalDetail("金额 / 币种", taskAmount(result)),
       renderModalDetail("Checkout 会话", result.checkout_session_id),
@@ -1582,9 +1620,12 @@
       field.addEventListener("input", saveFormPreferences);
     });
     byId("refresh-proxy-source").addEventListener("click", refreshProxySource);
-    ["apply-update", "rotate-checkout-proxy", "rotate-update-proxy", "oaics-only"].forEach(id => {
-      byId(id).addEventListener("change", saveFormPreferences);
+    ["apply-update", "rotate-checkout-proxy", "rotate-update-proxy", "retry-count", "oaics-only"].forEach(id => {
+      const field = byId(id);
+      if (field) field.addEventListener("change", saveFormPreferences);
     });
+    const retryCountField = byId("retry-count");
+    if (retryCountField) retryCountField.addEventListener("input", saveFormPreferences);
     elements.extractTokenButton.addEventListener("click", extractTokenToInput);
     elements.batchImportButton.addEventListener("click", openBatchImport);
     elements.batchImportInput.addEventListener("input", function () {

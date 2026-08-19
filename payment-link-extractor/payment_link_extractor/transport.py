@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import os
 import base64
+import re
+import secrets
+import string
 import time
 import uuid
 from typing import Any, Protocol
@@ -233,6 +236,64 @@ def normalize_proxy_url(proxy: str) -> str:
         raise ValueError("proxy contains an invalid port") from exc
     netloc = auth + host + port
     return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+
+
+def proxy_pool_entries(proxy: str) -> list[str]:
+    """Return non-empty proxy entries while preserving their order."""
+    return [line.strip() for line in str(proxy or "").splitlines() if line.strip()]
+
+
+def _random_proxy_token(length: int) -> str:
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(max(1, length)))
+
+
+def _rotate_proxy_session(proxy: str) -> str:
+    """Rotate a recognizable provider session suffix in a proxy URL.
+
+    Proxy vendors use several formats (``sid-...`` and a numeric suffix are
+    the common ones). If a value has no recognizable session component it is
+    returned unchanged; the fresh ChatGPT device id still makes the checkout
+    attempt independent and we must not invent a malformed proxy URL.
+    """
+    text = str(proxy or "").strip()
+    match = re.match(r"^(?P<scheme>[a-z][a-z\d+.-]*://)(?P<userinfo>[^/@]+)(?P<rest>@.*)$", text, re.I)
+    if not match:
+        return text
+    userinfo = match.group("userinfo")
+    username, separator, password = userinfo.partition(":")
+    sid_match = re.search(r"(^|[-_])sid-([A-Za-z0-9]+)(?=[-_:]|$)", username, re.I)
+    if sid_match:
+        replacement = f"{sid_match.group(1)}sid-{_random_proxy_token(len(sid_match.group(2)))}"
+        username = username[: sid_match.start()] + replacement + username[sid_match.end() :]
+    else:
+        numeric_match = re.search(r"-(\d+)$", username)
+        if not numeric_match:
+            return text
+        username = (
+            username[: numeric_match.start() + 1]
+            + _random_proxy_token(len(numeric_match.group(1)))
+        )
+    rotated_userinfo = username + (separator + password if separator else "")
+    return f"{match.group('scheme')}{rotated_userinfo}{match.group('rest')}"
+
+
+def select_proxy_route(proxy: str, attempt_index: int) -> str:
+    """Select and, on retries, rotate one entry from a proxy pool.
+
+    ``attempt_index`` is zero-based. The first attempt keeps the selected
+    entry byte-for-byte intact; later attempts walk the pool and rotate a
+    vendor session suffix where possible.
+    """
+    entries = proxy_pool_entries(proxy)
+    if not entries:
+        return ""
+    try:
+        index = max(0, int(attempt_index))
+    except (TypeError, ValueError):
+        index = 0
+    selected = entries[index % len(entries)]
+    return _rotate_proxy_session(selected) if index > 0 else selected
 
 
 def set_proxy_url(session: Any, proxy: str) -> None:

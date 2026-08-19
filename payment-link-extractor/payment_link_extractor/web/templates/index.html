@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="light">
     <title>OAI PayPal 提链</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css', v='blocked-retry-20260819') }}">
   </head>
   <body>
     <main class="shell">
@@ -108,6 +108,11 @@
                 <input id="rotate-update-proxy" type="checkbox" checked>
                 <span>自动轮换 Update Proxy IP</span>
               </label>
+              <label class="field">
+                <span>blocked 后 Checkout 总轮数</span>
+                <input id="retry-count" type="number" min="1" max="10" step="1" value="3" inputmode="numeric">
+                <small>只在 approval 返回 blocked 时创建新的 Checkout；零元 PayPal 至少保留一次恢复轮次</small>
+              </label>
               <input id="oaics-only" type="checkbox" hidden disabled>
             </div>
 
@@ -201,6 +206,6 @@
         </section>
       </div>
     </main>
-    <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+    <script src="{{ url_for('static', filename='app.js', v='blocked-retry-20260819') }}" defer></script>
   </body>
 </html>

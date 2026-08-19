@@ -19,7 +19,7 @@ from ..config import (
     normalize_payment_method,
     processor_entity_for_country,
 )
-from ..errors import ProtocolError
+from ..errors import CheckoutApprovalBlocked, ProtocolError
 from ..models import CheckoutData, ExtractionConfig, StripeContext
 from ..providers import provider_redirect_config
 from ..stripe_common import (
@@ -268,9 +268,22 @@ def openai_checkout_confirm(
         },
         timeout=DEFAULT_TIMEOUT,
     )
+    if response.status_code in {403, 429}:
+        raise CheckoutApprovalBlocked(
+            f"oaics checkout/confirm blocked: HTTP {response.status_code}",
+            status_code=response.status_code,
+        )
     if response.status_code >= 400:
         raise ProtocolError(response.status_code, f"oaics checkout/confirm failed for {payment_method}: {response.text[:500]}")
     payload = response_json(response, "oaics checkout/confirm")
+    result = str(
+        first_value_by_key(payload, "result")
+        or first_value_by_key(payload, "approval_result")
+        or ""
+    ).strip().lower()
+    status = str(first_value_by_key(payload, "status") or "").strip().lower()
+    if result == "blocked" or status == "blocked":
+        raise CheckoutApprovalBlocked("oaics checkout/confirm blocked", status_code=response.status_code)
     if str(payload.get("status") or "").lower() != "success" or not payload.get("client_secret"):
         raise ProtocolError(409, f"oaics checkout/confirm rejected for {payment_method} or missing client_secret")
     return payload

@@ -8,6 +8,12 @@ from .models import BillingProfile
 
 DEFAULT_TIMEOUT = 30
 PROVIDER_POLL_TIMEOUT_SECONDS = 5
+# ``retry_count`` is the number of complete Checkout rounds, not the number
+# of HTTP calls. A blocked approval always starts a fresh round, including a
+# new ChatGPT session and a new Checkout session.
+DEFAULT_RETRY_COUNT = 3
+MAX_RETRY_COUNT = 10
+_RETRY_COUNT_ERROR = f"retry_count must be an integer between 1 and {MAX_RETRY_COUNT}"
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
@@ -101,6 +107,27 @@ def normalize_payment_method(value: str) -> str:
     if method not in {"paypal", "gopay", "gcash"}:
         raise ConfigurationError("payment_method must be one of paypal, gopay, gcash")
     return method
+
+
+def normalize_retry_count(value: object, *, default: int = DEFAULT_RETRY_COUNT) -> int:
+    """Normalize the number of complete Checkout rounds.
+
+    Keep this validation in one place so the CLI, HTTP API, and direct Python
+    callers apply identical limits. ``bool`` is rejected explicitly because
+    it is an ``int`` subclass but is not a useful retry setting.
+    """
+    candidate = default if value is None or (isinstance(value, str) and not value.strip()) else value
+    if isinstance(candidate, bool):
+        raise ConfigurationError(_RETRY_COUNT_ERROR)
+    if isinstance(candidate, float) and not candidate.is_integer():
+        raise ConfigurationError(_RETRY_COUNT_ERROR)
+    try:
+        count = int(candidate)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ConfigurationError(_RETRY_COUNT_ERROR) from exc
+    if count < 1 or count > MAX_RETRY_COUNT:
+        raise ConfigurationError(_RETRY_COUNT_ERROR)
+    return count
 
 
 def processor_entity_for_country(country: str, existing: str = "") -> str:

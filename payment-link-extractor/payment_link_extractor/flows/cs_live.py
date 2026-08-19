@@ -20,7 +20,7 @@ from ..config import (
     normalize_payment_method,
     processor_entity_for_country,
 )
-from ..errors import ProtocolError, ProviderRequiresApproval
+from ..errors import CheckoutApprovalBlocked, ProtocolError, ProviderRequiresApproval
 from ..logging_utils import emit_log, safe_log_text
 from ..models import CheckoutData, ExtractionConfig, StripeContext
 from ..providers import provider_redirect_config
@@ -440,11 +440,17 @@ def chatgpt_approve(chatgpt: Any, checkout: CheckoutData, log: Any | None) -> No
         },
         timeout=DEFAULT_TIMEOUT,
     )
+    if response.status_code in {403, 429}:
+        raise CheckoutApprovalBlocked(
+            f"ChatGPT manual approval blocked: HTTP {response.status_code}",
+            status_code=response.status_code,
+        )
     if response.status_code >= 400:
         raise ProtocolError(response.status_code, f"ChatGPT approve failed: {response.text[:500]}")
-    result = str(response_json(response, "ChatGPT approve").get("result") or "")
+    payload = response_json(response, "ChatGPT approve")
+    result = str(first_value_by_key(payload, "result") or "").strip().lower()
     if result == "blocked":
-        raise ProtocolError(409, "ChatGPT manual approval blocked")
+        raise CheckoutApprovalBlocked("ChatGPT manual approval blocked", status_code=response.status_code)
     if result != "approved":
         raise ProtocolError(502, f"ChatGPT approve returned unexpected result: {result or '?'}")
 

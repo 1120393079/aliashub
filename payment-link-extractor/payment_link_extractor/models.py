@@ -15,6 +15,9 @@ class ExtractionConfig:
     apply_checkout_update: bool = True
     verbose: bool = True
     oaics_only: bool = False
+    # Number of complete Checkout rounds. A retry is only consumed when the
+    # provider explicitly returns the ChatGPT approval result ``blocked``.
+    retry_count: int = 3
 
 
 @dataclass(frozen=True)

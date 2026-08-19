@@ -10,7 +10,13 @@ from urllib.request import Request, urlopen
 
 from flask import Flask, jsonify, request
 
-from ..config import SUPPORTED_COUNTRIES, country_config, normalize_payment_method
+from ..config import (
+    DEFAULT_RETRY_COUNT,
+    SUPPORTED_COUNTRIES,
+    country_config,
+    normalize_payment_method,
+    normalize_retry_count,
+)
 from ..errors import ConfigurationError
 from ..models import ExtractionConfig
 from .proxy_probe import ProxyProbeError, probe_proxy
@@ -37,6 +43,7 @@ def register_routes(app: Flask, manager: TaskManager) -> None:
                 "proxy_pool_id": hashlib.sha256(proxy_pool.encode("utf-8")).hexdigest()[:16] if proxy_pool else "",
                 "proxy_source_url": os.getenv("OPLL_PROXY_SOURCE_URL", ""),
                 "apply_checkout_update": _env_bool("OPLL_UPDATE_CHECKOUT", True),
+                "retry_count": _configured_retry_count(),
             }
         )
 
@@ -180,10 +187,17 @@ def register_routes(app: Flask, manager: TaskManager) -> None:
 
 def _config_from_payload(payload: dict[str, Any]) -> ExtractionConfig:
     access_token = _credential_value(payload) or os.getenv("OPLL_AT", "")
-    pool_lines = _configured_proxy_pool().splitlines()
-    pool_first = pool_lines[0] if pool_lines else ""
-    checkout_proxy = payload.get("checkout_proxy") or pool_first or os.getenv("OPLL_CHECKOUT_PROXY", "")
-    update_proxy = payload.get("update_proxy") or pool_first or os.getenv("OPLL_UPDATE_PROXY", "")
+    configured_pool = _configured_proxy_pool()
+    checkout_proxy = payload.get("checkout_proxy") or configured_pool or os.getenv("OPLL_CHECKOUT_PROXY", "")
+    update_proxy = payload.get("update_proxy") or configured_pool or os.getenv("OPLL_UPDATE_PROXY", "")
+    checkout_proxy = _merge_selected_proxy_with_pool(
+        checkout_proxy,
+        payload.get("checkout_proxy_pool", payload.get("checkoutProxyPool", "")),
+    )
+    update_proxy = _merge_selected_proxy_with_pool(
+        update_proxy,
+        payload.get("update_proxy_pool", payload.get("updateProxyPool", "")),
+    )
     hcaptcha = _value(payload, "stripe_hcaptcha_token", "OPLL_STRIPE_HCAPTCHA_TOKEN")
     forced_country = os.getenv("OPLL_FORCE_COUNTRY", "").strip().upper()
     requested_country = str(payload.get("country") or "").strip().upper()
@@ -196,6 +210,16 @@ def _config_from_payload(payload: dict[str, Any]) -> ExtractionConfig:
         country = proxy_country.group(1).upper()
     payment_method = str(payload.get("payment_method", os.getenv("OPLL_PAYMENT_METHOD", "paypal")) or "paypal").lower()
     apply_update = payload.get("apply_checkout_update", _env_bool("OPLL_UPDATE_CHECKOUT", True))
+    retry_value = payload.get(
+        "retry_count",
+        payload.get(
+            "checkout_retry_count",
+            payload.get(
+                "checkoutRetryCount",
+                payload.get("retryCount", os.getenv("OPLL_RETRY_COUNT", str(DEFAULT_RETRY_COUNT))),
+            ),
+        ),
+    )
     # Accept both OAICS (oaics_*) and Stripe Checkout (cs_*) PayPal flows.
     # Old browser preferences could keep oaics_only=true and discard most
     # otherwise usable accounts before provider confirmation.
@@ -211,6 +235,7 @@ def _config_from_payload(payload: dict[str, Any]) -> ExtractionConfig:
     if country not in SUPPORTED_COUNTRIES:
         country_config(country)
     normalize_payment_method(payment_method)
+    retry_count = normalize_retry_count(retry_value)
     return ExtractionConfig(
         access_token=str(access_token).strip(),
         checkout_proxy=str(checkout_proxy).strip(),
@@ -221,6 +246,7 @@ def _config_from_payload(payload: dict[str, Any]) -> ExtractionConfig:
         apply_checkout_update=apply_update,
         verbose=False,
         oaics_only=oaics_only,
+        retry_count=retry_count,
     )
 
 
@@ -253,6 +279,26 @@ def _configured_proxy_pool() -> str:
     except (OSError, UnicodeError):
         return ""
     return "\n".join(line.strip() for line in content.splitlines() if line.strip())
+
+
+def _configured_retry_count() -> int:
+    try:
+        return normalize_retry_count(os.getenv("OPLL_RETRY_COUNT", str(DEFAULT_RETRY_COUNT)))
+    except ConfigurationError:
+        return DEFAULT_RETRY_COUNT
+
+
+def _merge_selected_proxy_with_pool(selected: Any, pool: Any) -> str:
+    """Keep the UI's first selected route while retaining retry candidates."""
+    selected_text = str(selected or "").strip()
+    pool_lines = [line.strip() for line in str(pool or "").splitlines() if line.strip()]
+    if not pool_lines:
+        return selected_text
+    ordered: list[str] = []
+    if selected_text:
+        ordered.append(selected_text)
+    ordered.extend(line for line in pool_lines if line not in ordered)
+    return "\n".join(ordered)
 
 
 def _error(message: str, status_code: int) -> Any:
