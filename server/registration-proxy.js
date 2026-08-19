@@ -218,3 +218,26 @@ export function resolveJobProxies(input, savedProxies) {
   }
   return [savedProxies[index]];
 }
+
+export function resolveJobProxyPlan(input, savedProxies, cursor, count) {
+  if (!Number.isSafeInteger(count) || count < 0) {
+    throw new RangeError("注册代理分配数量无效");
+  }
+  const proxies = resolveJobProxies(input, savedProxies);
+  const choice = String(input.proxySelection || "auto").trim().toLowerCase();
+  const rotatesSavedPool = input.proxies === undefined && choice === "auto";
+  const numericCursor = Number(cursor);
+  const startIndex = rotatesSavedPool && proxies.length
+    && Number.isSafeInteger(numericCursor) && numericCursor >= 0
+    ? numericCursor % proxies.length
+    : 0;
+  const templates = Array.from({ length: count }, (_item, index) => (
+    proxies.length ? proxies[(startIndex + index) % proxies.length] : ""
+  ));
+  return {
+    templates,
+    nextCursor: rotatesSavedPool && proxies.length
+      ? (startIndex + count) % proxies.length
+      : rotatesSavedPool ? 0 : null,
+  };
+}

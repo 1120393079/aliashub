@@ -1,13 +1,19 @@
 import crypto from "node:crypto";
 import process from "node:process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import dotenv from "dotenv";
 import { ImapFlow } from "imapflow";
 import PostalMime from "postal-mime";
 
-dotenv.config({ path: "/opt/alias-hub/.env" });
+const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+dotenv.config({ path: path.join(projectRoot, ".env") });
 
-const databasePath = process.env.DATABASE_PATH || "/var/lib/alias-hub/outlook-alias-hub.db";
+const configuredDatabasePath = process.env.DATABASE_PATH || path.join("data", "outlook-alias-hub.db");
+const databasePath = path.isAbsolute(configuredDatabasePath)
+  ? configuredDatabasePath
+  : path.resolve(projectRoot, configuredDatabasePath);
 const sourceLimit = 10 * 1024 * 1024;
 const bodyLimit = 1_000_000;
 const db = new Database(databasePath, { timeout: 30_000 });

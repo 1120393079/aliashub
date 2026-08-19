@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, Cable, Check, CircleStop, ClipboardCopy, Copy, CreditCard, Database, Download, ExternalLink, EyeOff, Fingerprint, Gift, Globe2, KeyRound, Link2, ListChecks, LoaderCircle, Mail, Monitor, Network, Pause, Pencil, Play, RefreshCw, Save, ScrollText, Search, Server, ShieldCheck, SlidersHorizontal, Store, Trash2, Upload, UserPlus, WalletCards } from "lucide-react";
+import { AlertTriangle, Cable, Check, CircleStop, ClipboardCopy, Copy, CreditCard, Database, Download, ExternalLink, EyeOff, Fingerprint, Gift, Globe2, KeyRound, Link2, ListChecks, LoaderCircle, Mail, Monitor, Network, Pause, Pencil, Play, RefreshCw, Save, ScrollText, Search, Server, ShieldCheck, SlidersHorizontal, Smartphone, Store, Trash2, Upload, UserPlus, WalletCards, Workflow } from "lucide-react";
 import { api } from "../api.js";
 import { planAgentIdentityBulk, runAgentIdentityBulk } from "../agent-identity-bulk.js";
 import { Button, ConfirmDialog, EmptyState, FormField, IconButton, LoadingBlock, Modal, Pagination, Segmented, StatusBadge, useToast } from "../components.jsx";
+import { providerMeta } from "../providers.js";
 import { copyText, formatDate } from "../utils.js";
 import {
   accountGroupMeta,
@@ -44,9 +45,14 @@ import {
   serializeSub2Export,
   sub2ExportFilename,
 } from "./registration/sub2-export.js";
+import PaymentAgreementModal from "./registration/PaymentAgreementModal.jsx";
+import OpenAiSmsModal from "./registration/OpenAiSmsModal.jsx";
+import IcRegistrationPipelineBar from "./registration/IcRegistrationPipelineBar.jsx";
+import MailcomRegistrationPipelineBar from "./registration/MailcomRegistrationPipelineBar.jsx";
 import {
   accountPageSizes,
   accountPageSizeStorageKey,
+  accountPlusDate,
   ageFromBirth,
   baseOptionLabel,
   deletableStatuses,
@@ -54,7 +60,10 @@ import {
   initialAccountPageSize,
   jobStatusLabel,
   preferredBase,
+  registrationBaseOptions,
   releasableStatuses,
+  sortRegisteredAccounts,
+  toggleSelectedIds,
 } from "./registration/registration-model.js";
 
 function downloadTextFile(filename, content, type) {
@@ -110,6 +119,38 @@ function TrialStatusCell({ item, compact = false }) {
   </div>;
 }
 
+function GbTrialStatusCell({ item, compact = false }) {
+  const status = String(item?.gb_trial_status || "unchecked").toLowerCase();
+  const eligible = status === "eligible" && item?.gb_trial_eligible === true;
+  const ineligible = status === "ineligible" && item?.gb_trial_eligible === false;
+  const failed = status === "failed";
+  const label = eligible ? "0元" : ineligible ? "非0元" : failed ? "失败" : "未检测";
+  const badge = eligible ? "active" : ineligible ? "warning" : failed ? "failed" : "inactive";
+  const detail = failed
+    ? String(item?.gb_trial_error || "英国 0 元 Checkout 检测失败")
+    : item?.gb_trial_checked_at ? `检测时间：${formatDate(item.gb_trial_checked_at)}` : "尚未检测英国 Checkout 最终金额";
+  return <div className={"registration-trial-status" + (compact ? " compact" : "")} title={detail}>
+    <StatusBadge status={badge}>{label}</StatusBadge>
+    {!compact && failed && <small>{detail}</small>}
+  </div>;
+}
+
+function UsTrialStatusCell({ item, compact = false }) {
+  const status = String(item?.us_trial_status || "unchecked").toLowerCase();
+  const eligible = status === "eligible" && item?.us_trial_eligible === true;
+  const ineligible = status === "ineligible" && item?.us_trial_eligible === false;
+  const failed = status === "failed";
+  const label = eligible ? "0元" : ineligible ? "非0元" : failed ? "失败" : "未检测";
+  const badge = eligible ? "active" : ineligible ? "warning" : failed ? "failed" : "inactive";
+  const detail = failed
+    ? String(item?.us_trial_error || "美国 0 元 Checkout 检测失败")
+    : item?.us_trial_checked_at ? `检测时间：${formatDate(item.us_trial_checked_at)}` : "尚未检测美国 Checkout 最终金额";
+  return <div className={"registration-trial-status" + (compact ? " compact" : "")} title={detail}>
+    <StatusBadge status={badge}>{label}</StatusBadge>
+    {!compact && failed && <small>{detail}</small>}
+  </div>;
+}
+
 function MomoStatusCell({ item, compact = false }) {
   const status = String(item?.momo_status || "unchecked").toLowerCase();
   const eligible = status === "eligible" && item?.momo_eligible === true;
@@ -129,18 +170,81 @@ function MomoStatusCell({ item, compact = false }) {
   </div>;
 }
 
+function paymentLinkRequestCountry(item) {
+  return String(item?.request_country || "").trim().toUpperCase();
+}
+
+const protocolCountryNames = {
+  AE: "阿联酋",
+  AU: "澳大利亚",
+  BR: "巴西",
+  CA: "加拿大",
+  DE: "德国",
+  GB: "英国",
+  ID: "印度尼西亚",
+  JP: "日本",
+  MX: "墨西哥",
+  PH: "菲律宾",
+  TH: "泰国",
+  TR: "土耳其",
+  TW: "中国台湾",
+  US: "美国",
+};
+
+function protocolCountryOption(item) {
+  const source = item && typeof item === "object" ? item : {};
+  const code = String(source.code || source.country || source.value || item || "").trim().toUpperCase();
+  if (!code) return null;
+  const name = String(source.name_zh || source.zh_name || source.name || protocolCountryNames[code] || "").trim();
+  const callingCode = String(source.calling_code || source.phone_code || "").trim();
+  return { code, label: [code, name, callingCode].filter(Boolean).join(" · ") };
+}
+
+function protocolAutoStartToken() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function PaymentLinkStatusCell({ item, compact = false, onCopy, onAgreement }) {
+  if (!item) return <StatusBadge status="inactive">未提链</StatusBadge>;
+  const status = String(item.status || "").toLowerCase();
+  const active = status === "queued" || status === "running" || status === "cancel_requested";
+  const succeeded = status === "succeeded" && item.provider_url;
+  const agreementCountry = paymentLinkRequestCountry(item);
+  const label = succeeded ? `已提链${agreementCountry ? ` · ${agreementCountry}` : ""}` : active ? `${Math.max(0, Number(item.progress) || 0)}%` : status === "failed" ? "失败" : "未提链";
+  const badge = succeeded ? "active" : active ? "queued" : status === "failed" ? "failed" : "inactive";
+  const detail = item.error || [agreementCountry && `提链任务国家：${agreementCountry}`, item.updated_at && `更新时间：${formatDate(item.updated_at)}`].filter(Boolean).join("；") || label;
+  return <div className={`registration-payment-link-status${compact ? " compact" : ""}`} title={detail}>
+    <StatusBadge status={badge}>{label}</StatusBadge>
+    {succeeded && <span><a href={item.provider_url} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()}><ExternalLink size={11} />打开</a><button type="button" onClick={(event) => { event.stopPropagation(); onCopy(item.provider_url); }}><Copy size={11} />复制</button>{onAgreement && <button type="button" title="使用已保存的协议国家和代理池，自动接码并开始授权" onClick={(event) => { event.stopPropagation(); onAgreement(item); }}><Cable size={11} />协议</button>}</span>}
+    {!compact && status === "failed" && <small>{item.error || "提链失败"}</small>}
+  </div>;
+}
+
+function PaymentProxyDraftMessages({ draft, label }) {
+  return <>
+    {draft.duplicateLines.length > 0 && <div className="proxy-draft-notes">
+      {draft.duplicateLines.map((item) => <span key={item.line}><AlertTriangle size={14} />{label} 第 {item.line} 行与第 {item.originalLine} 行重复，保存时忽略</span>)}
+    </div>}
+    {draft.errors.length > 0 && <div className="proxy-line-errors" role="alert"><b><AlertTriangle size={15} />{label} 以下地址不会保存</b>{draft.errors.map((item) => <span key={item.line}>第 {item.line} 行：{item.reason}</span>)}</div>}
+  </>;
+}
+
 export default function RegistrationPage({ refreshKey, onNavigate, initialMailboxMode = "" }) {
   const [view, setView] = useState("tasks");
   const [options, setOptions] = useState(null);
+  const [optionsError, setOptionsError] = useState("");
   const [jobs, setJobs] = useState(null);
+  const [jobsError, setJobsError] = useState("");
   const [jobCounts, setJobCounts] = useState(null);
   const [jobFilter, setJobFilter] = useState("all");
   const [queueControl, setQueueControl] = useState(null);
   const [queueAction, setQueueAction] = useState("");
   const [jobActionIds, setJobActionIds] = useState(() => new Set());
-  const [accounts, setAccounts] = useState(null);
+  const [accounts, setAccounts] = useState({ total: 0, items: [] });
+  const [accountsLoaded, setAccountsLoaded] = useState(false);
   const [accountsError, setAccountsError] = useState("");
-  const [form, setForm] = useState({ mailboxMode: initialMailboxMode === "inbox_link" ? "inbox_link" : "source", accountId: "", baseAddressId: "", addressMode: "base", count: 1, suffix: "", browserMode: "headed", proxySelection: "auto", autoContinuePostSignup: true, setPasswordAfterRegistration: false, password: "" });
+  const [form, setForm] = useState({ mailboxMode: initialMailboxMode === "inbox_link" ? "inbox_link" : "source", accountId: "", baseAddressId: "", addressMode: "base", count: 1, concurrency: 1, suffix: "", browserMode: "headed", proxySelection: "auto", autoContinuePostSignup: true, setPasswordAfterRegistration: false, password: "" });
   const [proxyText, setProxyText] = useState("");
   const [proxySaveFeedback, setProxySaveFeedback] = useState(null);
   const [starting, setStarting] = useState(false);
@@ -156,15 +260,55 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
   const [selectedAccountIds, setSelectedAccountIds] = useState([]);
   const [copyingTokenId, setCopyingTokenId] = useState(null);
   const [refreshingAccessTokenId, setRefreshingAccessTokenId] = useState(null);
+  const [accessTokenRefreshTarget, setAccessTokenRefreshTarget] = useState(null);
+  const [accessTokenRefreshProxySelection, setAccessTokenRefreshProxySelection] = useState("original");
   const [copyingSelectedTokens, setCopyingSelectedTokens] = useState(false);
   const [exportingSub2, setExportingSub2] = useState(false);
   const [exportingRefreshTokens, setExportingRefreshTokens] = useState(false);
   const [publishingPickup, setPublishingPickup] = useState(false);
   const [pickupInventory, setPickupInventory] = useState({ loaded: false, byEmail: {}, error: "" });
+  const [paymentLinks, setPaymentLinks] = useState({
+    configured: false,
+    proxy_count: 0,
+    checkout_proxy_count: 0,
+    update_proxy_count: 0,
+    checkout_proxies: [],
+    update_proxies: [],
+    masked_checkout_proxies: [],
+    masked_update_proxies: [],
+    countries: [],
+    items: [],
+  });
+  const [paymentCheckoutProxyText, setPaymentCheckoutProxyText] = useState("");
+  const [paymentUpdateProxyText, setPaymentUpdateProxyText] = useState("");
+  const [paymentProxySaveFeedback, setPaymentProxySaveFeedback] = useState(null);
+  const [savingPaymentProxies, setSavingPaymentProxies] = useState(false);
+  const [paymentProxySourceUrl, setPaymentProxySourceUrl] = useState("");
+  const [paymentProxySourceStatus, setPaymentProxySourceStatus] = useState("");
+  const [refreshingPaymentProxySource, setRefreshingPaymentProxySource] = useState(false);
+  const [paymentLinkCountry, setPaymentLinkCountry] = useState("");
+  const [paymentProxyOptions, setPaymentProxyOptions] = useState({
+    initialized: false,
+    rotateCheckout: true,
+    rotateUpdate: true,
+    applyCheckoutUpdate: true,
+  });
+  const [submittingPaymentLinks, setSubmittingPaymentLinks] = useState(false);
+  const [paymentAgreementTarget, setPaymentAgreementTarget] = useState(null);
+  const [paymentAgreementSettings, setPaymentAgreementSettings] = useState(null);
+  const [paymentAgreementFrameKey, setPaymentAgreementFrameKey] = useState(0);
+  const [openAiSmsOpen, setOpenAiSmsOpen] = useState(false);
+  const [paymentAgreementRuntime, setPaymentAgreementRuntime] = useState(null);
+  const [paymentAgreementCountry, setPaymentAgreementCountry] = useState("");
+  const [paymentAgreementProxyText, setPaymentAgreementProxyText] = useState("");
+  const [paymentAgreementSaveFeedback, setPaymentAgreementSaveFeedback] = useState(null);
+  const [savingPaymentAgreementRuntime, setSavingPaymentAgreementRuntime] = useState(false);
   const [checkingAccountSignals, setCheckingAccountSignals] = useState(false);
   const [checkingAccountSignalCount, setCheckingAccountSignalCount] = useState(0);
   const [checkingCheckouts, setCheckingCheckouts] = useState(false);
   const [checkingTrials, setCheckingTrials] = useState(false);
+  const [checkingGbTrials, setCheckingGbTrials] = useState(false);
+  const [checkingUsTrials, setCheckingUsTrials] = useState(false);
   const [checkingMomo, setCheckingMomo] = useState(false);
   const accountSignalRefreshBusy = useRef(false);
   const [accountGroupFilter, setAccountGroupFilter] = useState("all");
@@ -216,6 +360,9 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
   const nfapiMailboxBusy = useRef(false);
   const accountMailboxRequest = useRef(0);
   const accountMailboxBusy = useRef(false);
+  const accountScrollTopRef = useRef(null);
+  const accountScrollTrackRef = useRef(null);
+  const accountTableScrollRef = useRef(null);
   const [passwordSetupTarget, setPasswordSetupTarget] = useState(null);
   const [passwordSetupValue, setPasswordSetupValue] = useState("");
   const [passwordSetupTask, setPasswordSetupTask] = useState(null);
@@ -228,36 +375,50 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
   const toast = useToast();
   const nfapiMailboxAccountId = nfapiImportIds[0];
 
+  const syncAccountTableScroll = useCallback((event) => {
+    const source = event.currentTarget;
+    const target = source === accountScrollTopRef.current
+      ? accountTableScrollRef.current
+      : accountScrollTopRef.current;
+    if (target && target.scrollLeft !== source.scrollLeft) target.scrollLeft = source.scrollLeft;
+  }, []);
+
   const loadOptions = useCallback(async () => {
     const requestId = ++registrationOptionsRequest.current;
-    const data = await api("/api/registration/options");
-    if (requestId !== registrationOptionsRequest.current) return null;
-    setOptions(data);
-    setProxyText((current) => current || (data.proxies || []).join("\n"));
-    setForm((current) => {
-      const accountId = current.accountId || String(data.accounts[0]?.id || "");
-      const account = data.accounts.find((item) => String(item.id) === accountId) || data.accounts[0];
-      const direct = account?.registration_mode === "direct";
-      const validBase = account?.bases.some((item) => (
-        String(item.id) === current.baseAddressId && (!direct || !item.registration_disabled)
-      ));
-      const baseAddressId = validBase ? current.baseAddressId : String(preferredBase(account)?.id || "");
-      const directAvailable = directRegistrationBases(account, baseAddressId).length;
-      const proxyMatch = current.proxySelection?.match(/^proxy:(\d+)$/);
-      const proxySelection = proxyMatch && Number(proxyMatch[1]) >= data.proxies.length ? "auto" : (current.proxySelection || "auto");
-      return {
-        ...current,
-        accountId,
-        baseAddressId,
-        count: direct && current.mailboxMode !== "inbox_link"
-          ? Math.max(1, Math.min(Number(current.count) || 1, directAvailable || 1))
-          : current.count,
-        suffix: direct ? "" : current.suffix,
-        proxySelection,
-      };
-    });
-    setProxyInspectIndex((current) => current !== "" && Number(current) < data.proxies.length ? current : (data.proxies.length ? "0" : ""));
-    return data;
+    try {
+      const data = await api("/api/registration/options");
+      if (requestId !== registrationOptionsRequest.current) return null;
+      setOptions(data);
+      setOptionsError("");
+      setProxyText((current) => current || (data.proxies || []).join("\n"));
+      setForm((current) => {
+        const accountId = current.accountId || String(data.accounts[0]?.id || "");
+        const account = data.accounts.find((item) => String(item.id) === accountId) || data.accounts[0];
+        const direct = account?.registration_mode === "direct";
+        const validBase = registrationBaseOptions(account).some((item) => String(item.id) === current.baseAddressId);
+        const baseAddressId = validBase ? current.baseAddressId : String(preferredBase(account)?.id || "");
+        const directAvailable = directRegistrationBases(account, baseAddressId).length;
+        const proxyMatch = current.proxySelection?.match(/^proxy:(\d+)$/);
+        const proxySelection = proxyMatch && Number(proxyMatch[1]) >= data.proxies.length ? "auto" : (current.proxySelection || "auto");
+        return {
+          ...current,
+          accountId,
+          baseAddressId,
+          count: direct && current.mailboxMode !== "inbox_link"
+            ? Math.max(1, Math.min(Number(current.count) || 1, directAvailable || 1))
+            : current.count,
+          suffix: direct ? "" : current.suffix,
+          proxySelection,
+        };
+      });
+      setProxyInspectIndex((current) => current !== "" && Number(current) < data.proxies.length ? current : (data.proxies.length ? "0" : ""));
+      return data;
+    } catch (error) {
+      if (requestId !== registrationOptionsRequest.current) return null;
+      setOptions({ accounts: [], proxies: [], maskedProxies: [], proxyMetadata: [], inboxLinkMailboxes: { available: 0 }, browserUrl: "about:blank", service: { ok: false } });
+      setOptionsError(error.message || "注册配置加载失败");
+      return null;
+    }
   }, []);
 
   useEffect(() => {
@@ -272,9 +433,13 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
       if (requestId !== registrationJobsRequest.current) return null;
       setJobs(result.items);
       setJobCounts(result.counts || null);
+      setJobsError("");
       return result.items;
     } catch (error) {
       if (requestId !== registrationJobsRequest.current) return null;
+      setJobs((current) => current || []);
+      setJobCounts((current) => current || { total: 0 });
+      setJobsError(error.message || "注册任务加载失败");
       toast(error.message, "error");
       return null;
     }
@@ -297,11 +462,12 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
       const data = await api("/api/registration/accounts");
       if (requestId !== registrationAccountsRequest.current) return null;
       setAccounts(data);
+      setAccountsLoaded(true);
       setAccountsError("");
       return data;
     } catch (error) {
       if (requestId !== registrationAccountsRequest.current) return null;
-      setAccounts((current) => current || { total: 0, items: [] });
+      setAccountsLoaded(true);
       setAccountsError(error.message || "注册账号加载失败");
       return null;
     }
@@ -326,10 +492,98 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
     }
   }, []);
 
+  const loadPaymentLinks = useCallback(async () => {
+    try {
+      const result = await api("/api/registration/payment-links");
+      setPaymentLinks(result);
+      setPaymentCheckoutProxyText((current) => current || (result.checkout_proxies || []).join("\n"));
+      setPaymentUpdateProxyText((current) => current || (result.update_proxies || []).join("\n"));
+      setPaymentProxySourceUrl((current) => current || result.proxy_source_url || "");
+      setPaymentLinkCountry((current) => current || result.country || "DE");
+      setPaymentProxyOptions((current) => current.initialized ? current : ({
+        initialized: true,
+        rotateCheckout: result.rotate_checkout_proxy !== false,
+        rotateUpdate: result.rotate_update_proxy !== false,
+        applyCheckoutUpdate: result.apply_checkout_update !== false,
+      }));
+      return result;
+    } catch (error) {
+      setPaymentLinks((current) => current || {
+        configured: false,
+        proxy_count: 0,
+        checkout_proxy_count: 0,
+        update_proxy_count: 0,
+        checkout_proxies: [],
+        update_proxies: [],
+        masked_checkout_proxies: [],
+        masked_update_proxies: [],
+        countries: [],
+        items: [],
+        error: error.message || "提链状态加载失败",
+      });
+      setPaymentLinkCountry((current) => current || "DE");
+      return null;
+    }
+  }, []);
+
+  const loadPaymentAgreementRuntime = useCallback(async () => {
+    try {
+      const result = await api("/api/registration/payment-agreements/runtime");
+      const proxies = Array.isArray(result.proxies) ? result.proxies : [];
+      const countries = Array.isArray(result.countries) ? result.countries : [];
+      const runtime = {
+        ...result,
+        proxies,
+        countries,
+        proxy_count: Number(result.proxy_count ?? proxies.length) || 0,
+      };
+      const firstCountry = countries.map(protocolCountryOption).find(Boolean)?.code || "";
+      setPaymentAgreementRuntime(runtime);
+      setPaymentAgreementCountry((current) => current || String(runtime.country || firstCountry).toUpperCase());
+      setPaymentAgreementProxyText((current) => current || proxies.join("\n"));
+      return runtime;
+    } catch (error) {
+      setPaymentAgreementRuntime((current) => current || {
+        configured: false,
+        country: "",
+        proxy_count: 0,
+        proxies: [],
+        masked_proxies: [],
+        countries: [],
+        error: error.message || "协议配置读取失败",
+      });
+      return null;
+    }
+  }, []);
+
+  const loadPaymentAgreementSettings = useCallback(async () => {
+    try {
+      const result = await api("/api/registration/payment-agreements/settings");
+      setPaymentAgreementSettings(result);
+      return result;
+    } catch (error) {
+      const result = { configured: false, error: error.message || "协议接码设置读取失败" };
+      setPaymentAgreementSettings(result);
+      return null;
+    }
+  }, []);
+
   const refreshRegistrationData = useCallback(async () => {
+    await Promise.all([
+      loadJobs(),
+      loadQueueControl(),
+      loadOptions(),
+      loadAccounts(),
+      loadPickupStatuses(),
+      loadPaymentLinks(),
+      loadPaymentAgreementRuntime(),
+      loadPaymentAgreementSettings(),
+    ]);
+  }, [loadJobs, loadQueueControl, loadOptions, loadAccounts, loadPickupStatuses, loadPaymentLinks, loadPaymentAgreementRuntime, loadPaymentAgreementSettings]);
+
+  const refreshRegistrationActivity = useCallback(async () => {
     await Promise.all([loadJobs(), loadQueueControl()]);
-    await Promise.all([loadOptions(), loadAccounts(), loadPickupStatuses()]);
-  }, [loadJobs, loadQueueControl, loadOptions, loadAccounts, loadPickupStatuses]);
+  }, [loadJobs, loadQueueControl]);
 
   useEffect(() => () => {
     registrationOptionsRequest.current += 1;
@@ -416,10 +670,17 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
     const active = jobs?.some((item) => releasableStatuses.has(item.status));
     if (!active) return undefined;
     const timer = window.setInterval(() => {
-      refreshRegistrationData().catch((error) => toast(error.message, "error"));
+      refreshRegistrationActivity().catch((error) => toast(error.message, "error"));
     }, 3_000);
     return () => window.clearInterval(timer);
-  }, [jobs, refreshRegistrationData, toast]);
+  }, [jobs, refreshRegistrationActivity, toast]);
+
+  const paymentLinksActive = paymentLinks?.items?.some((item) => ["queued", "running", "cancel_requested"].includes(item.status));
+  useEffect(() => {
+    if (!paymentLinksActive) return undefined;
+    const timer = window.setInterval(loadPaymentLinks, 2_000);
+    return () => window.clearInterval(timer);
+  }, [paymentLinksActive, loadPaymentLinks]);
 
   useEffect(() => {
     if (!jobs) return;
@@ -468,6 +729,42 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
     [selectedAccount, form.baseAddressId],
   );
   const proxyDraft = useMemo(() => normalizeProxyDraft(proxyText), [proxyText]);
+  const paymentCheckoutProxyDraft = useMemo(
+    () => normalizeProxyDraft(paymentCheckoutProxyText, { payment: true }),
+    [paymentCheckoutProxyText],
+  );
+  const paymentUpdateProxyDraft = useMemo(
+    () => normalizeProxyDraft(paymentUpdateProxyText, { payment: true }),
+    [paymentUpdateProxyText],
+  );
+  const paymentAgreementProxyDraft = useMemo(
+    () => normalizeProxyDraft(paymentAgreementProxyText, { payment: true }),
+    [paymentAgreementProxyText],
+  );
+  const paymentAgreementCountryOptions = useMemo(() => {
+    const optionsByCode = new Map();
+    for (const item of paymentAgreementRuntime?.countries || []) {
+      const option = protocolCountryOption(item);
+      if (option) optionsByCode.set(option.code, option);
+    }
+    const savedCountry = String(paymentAgreementRuntime?.country || "").toUpperCase();
+    if (savedCountry && !optionsByCode.has(savedCountry)) {
+      optionsByCode.set(savedCountry, protocolCountryOption(savedCountry));
+    }
+    return [...optionsByCode.values()];
+  }, [paymentAgreementRuntime]);
+  const paymentLinkByAccountId = useMemo(() => Object.fromEntries(
+    (paymentLinks?.items || []).map((item) => [String(item.external_account_id), item]),
+  ), [paymentLinks]);
+  const selectedPaymentAgreementAccount = selectedAccountIds.length === 1
+    ? (accounts?.items || []).find((item) => String(item.id) === String(selectedAccountIds[0]))
+    : null;
+  const selectedPaymentAgreementLink = selectedPaymentAgreementAccount
+    ? paymentLinkByAccountId[String(selectedPaymentAgreementAccount.id)]
+    : null;
+  const selectedPaymentAgreementCountry = paymentLinkRequestCountry(selectedPaymentAgreementLink);
+  const selectedPaymentAgreementReady = selectedPaymentAgreementLink?.status === "succeeded"
+    && Boolean(selectedPaymentAgreementLink?.provider_url);
   const activeJobs = jobs?.filter((item) => releasableStatuses.has(item.status) && item.status !== "paused").length || 0;
   const failedJobCount = Number(jobCounts?.failed ?? jobs?.filter((item) => item.status === "failed").length) || 0;
   const visibleJobs = jobFilter === "failed" ? (jobs || []).filter((item) => item.status === "failed") : (jobs || []);
@@ -502,17 +799,21 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
     .filter(Boolean))].sort((left, right) => left.localeCompare(right, "zh-CN")), [accounts]);
   const ungroupedAccountCount = useMemo(() => (accounts?.items || [])
     .filter((item) => !accountGroupMeta(item).name).length, [accounts]);
-  const visibleAccountItems = useMemo(() => {
+  const groupedAccountItems = useMemo(() => {
     const items = accounts?.items || [];
-    const groupedItems = accountGroupFilter === "all"
+    return accountGroupFilter === "all"
       ? items
       : accountGroupFilter === "ungrouped"
         ? items.filter((item) => !accountGroupMeta(item).name)
         : items.filter((item) => accountGroupMeta(item).name === (accountGroupFilter.startsWith("group:") ? accountGroupFilter.slice(6) : ""));
+  }, [accounts, accountGroupFilter]);
+  const visibleAccountItems = useMemo(() => {
     const query = accountSearch.trim().toLocaleLowerCase();
-    if (!query) return groupedItems;
-    return groupedItems.filter((item) => String(item.email || "").toLocaleLowerCase().includes(query));
-  }, [accounts, accountGroupFilter, accountSearch]);
+    const filteredItems = !query
+      ? groupedAccountItems
+      : groupedAccountItems.filter((item) => String(item.email || "").toLocaleLowerCase().includes(query));
+    return sortRegisteredAccounts(filteredItems);
+  }, [groupedAccountItems, accountSearch]);
   const accountPages = Math.max(1, Math.ceil(visibleAccountItems.length / accountPageSize));
   const safeAccountPage = Math.min(accountPage, accountPages);
   const accountPageOffset = (safeAccountPage - 1) * accountPageSize;
@@ -521,10 +822,36 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
     [visibleAccountItems, accountPageOffset, accountPageSize],
   );
   const accountIds = pagedAccountItems.map((item) => item.id);
+  const groupAccountIds = groupedAccountItems.map((item) => item.id);
   const allAccountsSelected = accountIds.length > 0 && accountIds.every((id) => selectedAccountIds.includes(id));
+  const allGroupAccountsSelected = groupAccountIds.length > 0 && groupAccountIds.every((id) => selectedAccountIds.includes(id));
   const selectedAccounts = (accounts?.items || []).filter((item) => selectedAccountIds.includes(item.id));
   const accountRangeStart = visibleAccountItems.length ? accountPageOffset + 1 : 0;
   const accountRangeEnd = Math.min(accountPageOffset + pagedAccountItems.length, visibleAccountItems.length);
+
+  useEffect(() => {
+    const topScroll = accountScrollTopRef.current;
+    const topTrack = accountScrollTrackRef.current;
+    const tableScroll = accountTableScrollRef.current;
+    if (!topScroll || !topTrack || !tableScroll) return undefined;
+
+    const updateTrackWidth = () => {
+      topTrack.style.width = `${tableScroll.scrollWidth}px`;
+      topScroll.scrollLeft = tableScroll.scrollLeft;
+    };
+    updateTrackWidth();
+
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateTrackWidth);
+      return () => window.removeEventListener("resize", updateTrackWidth);
+    }
+
+    const observer = new ResizeObserver(updateTrackWidth);
+    observer.observe(tableScroll);
+    const table = tableScroll.querySelector("table");
+    if (table) observer.observe(table);
+    return () => observer.disconnect();
+  }, [view, pagedAccountItems.length]);
 
   useEffect(() => {
     setAccountPage((current) => Math.min(Math.max(1, current), accountPages));
@@ -553,7 +880,8 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
     try {
       const response = await api("/api/registration/jobs", { method: "POST", body: form });
       const submitted = response.items.filter((item) => item.status !== "failed").length;
-      toast(`已创建 ${response.items.length} 个邮箱，提交 ${submitted} 个注册任务`);
+      const effectiveConcurrency = submitted ? Math.min(Number(form.concurrency) || 1, submitted) : 0;
+      toast(`已创建 ${response.items.length} 个邮箱，提交 ${submitted} 个注册任务，并发 ${effectiveConcurrency}`);
       setView("tasks");
       await refreshRegistrationData();
     } catch (error) { toast(error.message, "error"); } finally { setStarting(false); }
@@ -604,6 +932,236 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
       setProxySaveFeedback({ type: "error", message });
       toast(message, "error");
     } finally { setSavingProxies(false); }
+  };
+
+  const savePaymentProxies = async () => {
+    const errorCount = paymentCheckoutProxyDraft.errors.length + paymentUpdateProxyDraft.errors.length;
+    if (errorCount) {
+      const message = `两个代理池共有 ${errorCount} 行格式错误，请按行修正后再保存`;
+      setPaymentProxySaveFeedback({ type: "error", message });
+      toast(message, "error");
+      return;
+    }
+    setSavingPaymentProxies(true);
+    try {
+      const result = await api("/api/registration/payment-links/proxies", {
+        method: "PUT",
+        body: {
+          checkout_proxies: paymentCheckoutProxyDraft.proxies,
+          update_proxies: paymentUpdateProxyDraft.proxies,
+          rotate_checkout_proxy: paymentProxyOptions.rotateCheckout,
+          rotate_update_proxy: paymentProxyOptions.rotateUpdate,
+          apply_checkout_update: paymentProxyOptions.applyCheckoutUpdate,
+          country: paymentLinkCountry || "DE",
+        },
+      });
+      const checkoutProxies = Array.isArray(result.checkout_proxies) ? result.checkout_proxies : [];
+      const updateProxies = Array.isArray(result.update_proxies) ? result.update_proxies : [];
+      setPaymentCheckoutProxyText(checkoutProxies.join("\n"));
+      setPaymentUpdateProxyText(updateProxies.join("\n"));
+      setPaymentLinkCountry(result.country || paymentLinkCountry || "DE");
+      setPaymentLinks((current) => ({
+        ...(current || {}),
+        proxy_count: checkoutProxies.length + updateProxies.length,
+        checkout_proxy_count: checkoutProxies.length,
+        update_proxy_count: updateProxies.length,
+        checkout_proxies: checkoutProxies,
+        update_proxies: updateProxies,
+        masked_checkout_proxies: result.masked_checkout_proxies || [],
+        masked_update_proxies: result.masked_update_proxies || [],
+        rotate_checkout_proxy: result.rotate_checkout_proxy,
+        rotate_update_proxy: result.rotate_update_proxy,
+        apply_checkout_update: result.apply_checkout_update,
+        country: result.country || paymentLinkCountry || "DE",
+        items: current?.items || [],
+      }));
+      const duplicateCount = paymentCheckoutProxyDraft.duplicateLines.length + paymentUpdateProxyDraft.duplicateLines.length;
+      const duplicateNote = duplicateCount
+        ? `；已忽略 ${duplicateCount} 条重复地址`
+        : "";
+      const message = `已保存 Checkout ${checkoutProxies.length} 条、Update ${updateProxies.length} 条代理${duplicateNote}`;
+      setPaymentProxySaveFeedback({ type: "success", message });
+      toast(message);
+    } catch (error) {
+      const message = error.message || "提链代理池保存失败";
+      setPaymentProxySaveFeedback({ type: "error", message });
+      toast(message, "error");
+    } finally {
+      setSavingPaymentProxies(false);
+    }
+  };
+
+  const savePaymentAgreementRuntime = async () => {
+    if (paymentAgreementProxyDraft.errors.length) {
+      const message = `协议代理池有 ${paymentAgreementProxyDraft.errors.length} 行格式错误，请按行修正后再保存`;
+      setPaymentAgreementSaveFeedback({ type: "error", message });
+      toast(message, "error");
+      return;
+    }
+    const country = String(paymentAgreementCountry || "").trim().toUpperCase();
+    if (!country) {
+      const message = "请选择协议国家";
+      setPaymentAgreementSaveFeedback({ type: "error", message });
+      toast(message, "error");
+      return;
+    }
+    if (!paymentAgreementProxyDraft.proxies.length) {
+      const message = "请至少填写一条协议代理";
+      setPaymentAgreementSaveFeedback({ type: "error", message });
+      toast(message, "error");
+      return;
+    }
+    setSavingPaymentAgreementRuntime(true);
+    try {
+      const result = await api("/api/registration/payment-agreements/runtime", {
+        method: "PUT",
+        body: { country, proxies: paymentAgreementProxyDraft.proxies },
+      });
+      const proxies = Array.isArray(result.proxies) ? result.proxies : paymentAgreementProxyDraft.proxies;
+      const savedCountry = String(result.country || country).toUpperCase();
+      const runtime = {
+        ...(paymentAgreementRuntime || {}),
+        ...result,
+        configured: result.configured !== false && proxies.length > 0 && Boolean(savedCountry),
+        country: savedCountry,
+        proxies,
+        proxy_count: Number(result.proxy_count ?? proxies.length) || 0,
+        countries: Array.isArray(result.countries) ? result.countries : (paymentAgreementRuntime?.countries || []),
+      };
+      setPaymentAgreementRuntime(runtime);
+      setPaymentAgreementCountry(savedCountry);
+      setPaymentAgreementProxyText(proxies.join("\n"));
+      const duplicateNote = paymentAgreementProxyDraft.duplicateLines.length
+        ? `；已忽略 ${paymentAgreementProxyDraft.duplicateLines.length} 条重复地址`
+        : "";
+      const message = `已保存 ${savedCountry} 协议配置和 ${runtime.proxy_count} 条代理${duplicateNote}`;
+      setPaymentAgreementSaveFeedback({ type: "success", message });
+      toast(message);
+    } catch (error) {
+      const message = error.message || "协议配置保存失败";
+      setPaymentAgreementSaveFeedback({ type: "error", message });
+      toast(message, "error");
+    } finally {
+      setSavingPaymentAgreementRuntime(false);
+    }
+  };
+
+  const refreshPaymentProxySource = async () => {
+    if (!paymentProxySourceUrl.trim() || refreshingPaymentProxySource) return;
+    setRefreshingPaymentProxySource(true);
+    setPaymentProxySourceStatus("正在读取…");
+    try {
+      const result = await api("/api/registration/payment-links/proxy-source", {
+        method: "POST",
+        body: { url: paymentProxySourceUrl.trim() },
+      });
+      const checkoutProxies = result.checkout_proxies || [];
+      const updateProxies = result.update_proxies || [];
+      setPaymentCheckoutProxyText(checkoutProxies.join("\n"));
+      setPaymentUpdateProxyText(updateProxies.join("\n"));
+      setPaymentLinks((current) => ({ ...current, ...result, items: current?.items || [] }));
+      setPaymentProxySourceStatus(`已读取并保存 ${result.imported || 0} 条（不同线路 ${result.unique_count || 0} 条）`);
+      setPaymentProxySaveFeedback(null);
+      toast(`IPRocket 代理已同步到两个代理池，共 ${result.imported || 0} 条`);
+    } catch (error) {
+      const message = error.message || "IPRocket 代理订阅读取失败";
+      setPaymentProxySourceStatus(message);
+      toast(message, "error");
+    } finally {
+      setRefreshingPaymentProxySource(false);
+    }
+  };
+
+  const extractSelectedPaymentLinks = async () => {
+    if (!selectedAccountIds.length || submittingPaymentLinks) return;
+    const updatePoolMissing = paymentProxyOptions.applyCheckoutUpdate && !paymentLinks?.update_proxy_count;
+    if (!paymentLinks?.checkout_proxy_count || updatePoolMissing) {
+      setView("payment-proxies");
+      toast(updatePoolMissing ? "Checkout Proxy 和 Update Proxy 两个代理池都必须先保存" : "Checkout Proxy 池必须先保存", "error");
+      return;
+    }
+    setSubmittingPaymentLinks(true);
+    try {
+      const result = await api("/api/registration/payment-links/tasks", {
+        method: "POST",
+        body: { ids: selectedAccountIds, country: paymentLinkCountry || "DE" },
+      });
+      await loadPaymentLinks();
+      const failed = Number(result.failed) || 0;
+      toast(
+        `已提交 ${result.started || 0} 个 PayPal 提链任务${failed ? `；${failed} 个未提交` : ""}`,
+        failed ? "error" : "success",
+      );
+    } catch (error) {
+      toast(error.message || "PayPal 提链任务提交失败", "error");
+    } finally {
+      setSubmittingPaymentLinks(false);
+    }
+  };
+
+  const openPaymentAgreement = async (account, link) => {
+    const requestCountry = paymentLinkRequestCountry(link);
+    const runtime = await loadPaymentAgreementRuntime();
+    const country = String(runtime?.country || "").trim().toUpperCase();
+    const proxies = Array.isArray(runtime?.proxies) ? runtime.proxies : [];
+    if (!runtime?.configured || !country || !proxies.length) {
+      setView("protocol-proxies");
+      const message = runtime
+        ? "请先保存协议国家和至少一条协议代理"
+        : "协议配置读取失败，请进入协议代理池重试";
+      setPaymentAgreementSaveFeedback({ type: "error", message });
+      toast(message, "error");
+      return;
+    }
+    try {
+      const saved = JSON.parse(sessionStorage.getItem("paypal-protocol-draft-v1") || "{}");
+      const draft = saved && typeof saved === "object" && !Array.isArray(saved) ? saved : {};
+      sessionStorage.setItem("paypal-protocol-draft-v1", JSON.stringify({
+        ...draft,
+        baToken: link.provider_url,
+        country,
+        proxies: proxies.join("\n"),
+        phone: "",
+        buyerMode: ["identity_elevation", "original"].includes(draft.buyerMode) ? draft.buyerMode : "identity_elevation",
+        autoStartToken: protocolAutoStartToken(),
+      }));
+    } catch {
+      try {
+        sessionStorage.setItem("paypal-protocol-draft-v1", JSON.stringify({
+          baToken: link.provider_url,
+          country,
+          proxies: proxies.join("\n"),
+          phone: "",
+          buyerMode: "identity_elevation",
+          autoStartToken: protocolAutoStartToken(),
+        }));
+      } catch {
+        toast("浏览器无法保存协议草稿，请检查隐私模式设置", "error");
+        return;
+      }
+    }
+    setPaymentAgreementTarget({
+      account,
+      paymentLink: link,
+      email: account?.email || link?.email || "",
+      request_country: requestCountry,
+      protocol_country: country,
+      protocol_proxy_count: Number(runtime.proxy_count || proxies.length),
+    });
+    setPaymentAgreementSettings(null);
+    setPaymentAgreementFrameKey((value) => value + 1);
+    try {
+      setPaymentAgreementSettings(await api("/api/registration/payment-agreements/settings"));
+    } catch (error) {
+      setPaymentAgreementSettings({ configured: false, error: error.message || "协议接码设置读取失败" });
+      toast(error.message || "协议接码设置读取失败", "error");
+    }
+  };
+
+  const openHeroSmsSettings = () => {
+    setPaymentAgreementTarget(null);
+    setOpenAiSmsOpen(false);
+    onNavigate?.("settings", { section: "herosms" });
   };
 
   const cancel = async (id) => {
@@ -718,7 +1276,12 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
         method: "POST",
         body: { content },
       });
-      toast(`已导入并重新关联 ${result.imported} 个本地账号`);
+      const externalCount = Number(result.external_imported) || 0;
+      const restoredCount = Number(result.restored) || 0;
+      const detail = externalCount && restoredCount
+        ? `（外部导入 ${externalCount}，历史恢复 ${restoredCount}）`
+        : externalCount ? `（外部导入 ${externalCount}）` : "";
+      toast(`已导入并关联 ${result.imported} 个本地账号${detail}`);
       setLocalImportOpen(false);
       setLocalImportContent("");
       setSelectedAccountIds([]);
@@ -748,7 +1311,11 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
   };
   const toggleAllAccounts = () => {
     if (importingNfapi) return;
-    setSelectedAccountIds(allAccountsSelected ? [] : accountIds);
+    setSelectedAccountIds((current) => toggleSelectedIds(current, accountIds));
+  };
+  const toggleAllGroupAccounts = () => {
+    if (importingNfapi) return;
+    setSelectedAccountIds((current) => toggleSelectedIds(current, groupAccountIds));
   };
   const changeAccountGroupFilter = (value) => {
     if (importingNfapi) return;
@@ -765,7 +1332,6 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
   const changeAccountPage = (value) => {
     if (importingNfapi) return;
     setAccountPage(Math.min(Math.max(1, Number(value) || 1), accountPages));
-    setSelectedAccountIds([]);
   };
   const changeAccountPageSize = (value) => {
     if (importingNfapi) return;
@@ -773,7 +1339,6 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
     if (!accountPageSizes.includes(size)) return;
     setAccountPageSize(size);
     setAccountPage(1);
-    setSelectedAccountIds([]);
   };
 
   const refreshAccountSignals = useCallback(async (ids, { notify = true } = {}) => {
@@ -801,8 +1366,10 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
         .join(" / ");
       const statusSummary = `可用 ${result.available || 0}，确认失效 ${result.unavailable || 0}，待检测 ${result.unchecked || 0}`;
       const failureSummary = result.failed ? `；${result.failed} 个检测失败，已保留原状态和类型` : "";
+      const nfapiSyncSummary = result.nfapi_sync?.failed
+        ? `；${result.nfapi_sync.failed} 个 NFapi 凭据未同步，状态检测已继续` : "";
       if (notify) {
-        toast(`检测完成：${statusSummary}${typeSummary ? `；类型 ${typeSummary}` : ""}${failureSummary}`, result.failed ? "error" : "success");
+        toast(`检测完成：${statusSummary}${typeSummary ? `；类型 ${typeSummary}` : ""}${failureSummary}${nfapiSyncSummary}`, result.failed ? "error" : "success");
       }
       return result;
     } catch (error) {
@@ -889,6 +1456,58 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
       setCheckingTrials(false);
     }
   }, [checkingTrials, pagedAccountItems, selectedAccountIds, toast]);
+
+  const checkAccountGbTrials = useCallback(async () => {
+    const ids = selectedAccountIds.length
+      ? selectedAccountIds
+      : pagedAccountItems.map((item) => item.id);
+    if (!ids.length || checkingGbTrials) return;
+    setCheckingGbTrials(true);
+    try {
+      const result = await api("/api/registration/accounts/check-gb-trial", {
+        method: "POST",
+        body: { ids },
+      });
+      if (!result.accounts || !Array.isArray(result.accounts.items)) {
+        throw new Error("英国 0 元 Checkout 检测服务未返回账号列表");
+      }
+      setAccounts(result.accounts);
+      toast(
+        `英国 0 元检测完成：0 元 ${result.eligible || 0}；非 0 元 ${result.ineligible || 0}${result.failed ? `；失败 ${result.failed}` : ""}${result.rate_limited ? `；限流 ${result.rate_limited}` : ""}${result.skipped ? `；跳过 ${result.skipped}` : ""}`,
+        result.failed || result.rate_limited ? "error" : "success",
+      );
+    } catch (error) {
+      toast(error.message || "英国 0 元 Checkout 检测失败", "error");
+    } finally {
+      setCheckingGbTrials(false);
+    }
+  }, [checkingGbTrials, pagedAccountItems, selectedAccountIds, toast]);
+
+  const checkAccountUsTrials = useCallback(async () => {
+    const ids = selectedAccountIds.length
+      ? selectedAccountIds
+      : pagedAccountItems.map((item) => item.id);
+    if (!ids.length || checkingUsTrials) return;
+    setCheckingUsTrials(true);
+    try {
+      const result = await api("/api/registration/accounts/check-us-trial", {
+        method: "POST",
+        body: { ids },
+      });
+      if (!result.accounts || !Array.isArray(result.accounts.items)) {
+        throw new Error("美国 0 元 Checkout 检测服务未返回账号列表");
+      }
+      setAccounts(result.accounts);
+      toast(
+        `美国 0 元检测完成：0 元 ${result.eligible || 0}；非 0 元 ${result.ineligible || 0}${result.failed ? `；失败 ${result.failed}` : ""}${result.rate_limited ? `；限流 ${result.rate_limited}` : ""}${result.skipped ? `；跳过 ${result.skipped}` : ""}`,
+        result.failed || result.rate_limited ? "error" : "success",
+      );
+    } catch (error) {
+      toast(error.message || "美国 0 元 Checkout 检测失败", "error");
+    } finally {
+      setCheckingUsTrials(false);
+    }
+  }, [checkingUsTrials, pagedAccountItems, selectedAccountIds, toast]);
 
   const checkAccountMomo = useCallback(async () => {
     const ids = selectedAccountIds.length
@@ -1513,16 +2132,33 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
     } catch (error) { toast(error.message, "error"); } finally { setCopyingTokenId(null); }
   };
 
-  const refreshAccessToken = async (item) => {
+  const openAccessTokenRefresh = (item) => {
+    if (!item?.id || refreshingAccessTokenId !== null) return;
+    setAccessTokenRefreshTarget(item);
+    setAccessTokenRefreshProxySelection("original");
+  };
+
+  const closeAccessTokenRefresh = () => {
+    if (refreshingAccessTokenId !== null) return;
+    setAccessTokenRefreshTarget(null);
+    setAccessTokenRefreshProxySelection("original");
+  };
+
+  const refreshAccessToken = async () => {
+    const item = accessTokenRefreshTarget;
     if (!item?.id || refreshingAccessTokenId !== null) return;
     setRefreshingAccessTokenId(item.id);
     try {
-      const result = await api(`/api/registration/accounts/${item.id}/refresh-at`, { method: "POST" });
+      const result = await api(`/api/registration/accounts/${item.id}/refresh-at`, {
+        method: "POST",
+        body: { proxy_selection: accessTokenRefreshProxySelection },
+      });
       if (!result.accounts || !Array.isArray(result.accounts.items)) {
         throw new Error("AT 刷新服务未返回账号列表");
       }
       setAccounts(result.accounts);
       setAccountsError("");
+      setAccessTokenRefreshTarget(null);
       const actionLabel = item.access_token_available ? "AT 刷新" : "邮箱 OTP 登录";
       toast(result.failed
         ? `${actionLabel}成功，但套餐检测暂未确认，请稍后再检测`
@@ -1700,7 +2336,7 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
     }
   };
 
-  if (!options || !jobs || !accounts) return <div className="page-stack"><LoadingBlock rows={8} /></div>;
+  if (!options || !jobs) return <div className="page-stack"><LoadingBlock rows={8} /></div>;
 
   const deletingAccounts = deleteTarget?.kind === "account" || deleteTarget?.kind === "accounts";
   const nfapiConnected = Boolean(nfapiOptions?.connection?.connected);
@@ -1734,6 +2370,14 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
   const isInboxLinkRegistration = form.mailboxMode === "inbox_link";
   const inboxLinkMailboxCount = Number(options.inboxLinkMailboxes?.available || 0);
   const isDirectRegistration = !isInboxLinkRegistration && selectedAccount?.registration_mode === "direct";
+  const directProvider = providerMeta(selectedAccount?.provider);
+  const directRegistrationDescription = directProvider.id === "icloud"
+    ? "可选择 iCloud 邮箱别名、隐藏邮箱或自定义域名邮箱；均直接注册，不生成 +tag 分裂地址"
+    : directProvider.id === "mailcom"
+      ? "可选择 mail.com 母号或官方分裂别名直接注册；不会生成 +tag 分裂地址"
+      : `可选择 ${directProvider.name} 地址直接注册；不会生成 +tag 分裂地址`;
+  const directAddressLabel = directProvider.id === "icloud" ? "iCloud 地址类型" : `${directProvider.name} 注册地址`;
+  const directSubmitLabel = `按顺序注册 ${directProvider.name} 地址`;
   const isBaseAddressRegistration = !isInboxLinkRegistration && !isDirectRegistration && form.addressMode === "base";
   const directAvailableCount = directAvailableBases.length;
   const registrationCount = Number(form.count);
@@ -1745,6 +2389,11 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
       : isDirectRegistration && registrationCount > directAvailableCount
         ? `从所选地址往下仅 ${directAvailableCount} 个可用`
         : "";
+  const registrationConcurrency = Number(form.concurrency);
+  const registrationConcurrencyInvalid = !Number.isSafeInteger(registrationConcurrency)
+    || registrationConcurrency < 1
+    || registrationConcurrency > 20;
+  const registrationConcurrencyError = registrationConcurrencyInvalid ? "请输入 1 到 20 的整数" : "";
   const deleteCount = deleteTarget?.ids?.length || 0;
   const deleteTitle = deletingAccounts
     ? (deleteCount > 1 ? `删除选中的 ${deleteCount} 个注册账号？` : "删除这个注册账号？")
@@ -1753,15 +2402,20 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
     ? "将从本地账号池删除账号、密码（如有）、AT、Cookie 等凭据；不会注销官方 ChatGPT 账号。注册记录、分裂邮箱、邮件和验证码都会保留。"
     : "只从注册记录列表中移除所选记录。已注册账号、账号凭据、分裂邮箱和验证码都会保留。";
   const queueCounts = queueControl?.counts || {};
+  const paymentLinkActiveCount = paymentLinks.items.filter((item) => ["queued", "running", "cancel_requested"].includes(item.status)).length;
+  const paymentLinkSuccessCount = paymentLinks.items.filter((item) => item.status === "succeeded" && item.provider_url).length;
 
   return (
     <div className="page-stack registration-page">
+      {optionsError && <div className="inline-alert error"><AlertTriangle size={15} /><span>{optionsError}</span><Button size="sm" icon={RefreshCw} onClick={loadOptions}>重新加载配置</Button></div>}
+      {jobsError && <div className="inline-alert error"><AlertTriangle size={15} /><span>{jobsError}</span><Button size="sm" icon={RefreshCw} onClick={loadJobs}>重新加载任务</Button></div>}
       <div className="registration-summary">
         <span><Server size={16} /><b>注册服务</b><StatusBadge status={options.service?.ok ? "active" : "failed"}>{options.service?.ok ? "运行中" : "未连接"}</StatusBadge></span>
         <span><LoaderCircle size={16} /><b>执行中</b><strong>{activeJobs}</strong></span>
-        <span><Check size={16} /><b>注册成功</b><strong>{accounts.total}</strong></span>
+        <span><Check size={16} /><b>注册成功</b><strong>{accountsLoaded ? accounts.total : "..."}</strong></span>
         <button className="registration-summary-failed" type="button" onClick={showFailedJobs} title="查看注册失败邮箱、原因和日志"><AlertTriangle size={16} /><b>注册失败</b><strong>{failedJobCount}</strong></button>
         <span><Network size={16} /><b>代理池</b><strong>{options.proxies.length}</strong></span>
+        <span><Link2 size={16} /><b>PayPal 提链</b><strong>{paymentLinkActiveCount ? `${paymentLinkActiveCount} 中` : paymentLinkSuccessCount}</strong></span>
       </div>
 
       <div className={`registration-queue-bar ${queueControl?.paused ? "paused" : ""}`}>
@@ -1774,15 +2428,43 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
       </div>
 
       <Segmented value={view} onChange={setView} ariaLabel="注册视图" items={[
+        { value: "pipelines", label: "流水线工作台", icon: Workflow },
         { value: "tasks", label: "注册任务", icon: ListChecks, count: jobs.length },
         { value: "accounts", label: "注册账号", icon: KeyRound, count: accounts.total },
         { value: "proxies", label: "IP 代理池", icon: Network, count: options.proxies.length },
+        { value: "payment-proxies", label: "提链代理池", icon: Link2, count: paymentLinks.proxy_count },
+        { value: "protocol-proxies", label: "协议代理池", icon: Cable, count: paymentAgreementRuntime?.proxy_count || 0 },
       ]} />
+
+      <div className="registration-pipeline-workbench" role="tabpanel" aria-label="流水线工作台" hidden={view !== "pipelines"}>
+        <IcRegistrationPipelineBar
+          options={options}
+          paymentLinks={paymentLinks}
+          paymentAgreementRuntime={paymentAgreementRuntime}
+          paymentAgreementSettings={paymentAgreementSettings}
+          paymentLinkCountry={paymentLinkCountry}
+          onPaymentLinkCountryChange={setPaymentLinkCountry}
+          onRefresh={refreshRegistrationData}
+          onNavigate={onNavigate}
+        />
+
+        <MailcomRegistrationPipelineBar
+          options={options}
+          paymentLinks={paymentLinks}
+          paymentAgreementRuntime={paymentAgreementRuntime}
+          paymentAgreementSettings={paymentAgreementSettings}
+          queueControl={queueControl}
+          paymentLinkCountry={paymentLinkCountry}
+          onPaymentLinkCountryChange={setPaymentLinkCountry}
+          onRefresh={refreshRegistrationData}
+          onNavigate={onNavigate}
+        />
+      </div>
 
       {view === "tasks" && <>
         <section className="registration-control-grid">
           <article className="panel registration-launch-panel">
-            <header className="panel-header"><div><h2>创建邮箱注册任务</h2><p>{isInboxLinkRegistration ? "从邮箱工作台已绑定的链接取件邮箱池中分配邮箱注册" : isDirectRegistration ? "可选择 iCloud 邮箱别名、隐藏邮箱或自定义域名邮箱；均直接注册，不生成 +tag 分裂地址" : "自动生成独立分裂邮箱，并使用全新随机指纹环境"}</p></div><Fingerprint size={20} /></header>
+            <header className="panel-header"><div><h2>创建邮箱注册任务</h2><p>{isInboxLinkRegistration ? "从邮箱工作台已绑定的链接取件邮箱池中分配邮箱注册" : isDirectRegistration ? directRegistrationDescription : "自动生成独立分裂邮箱，并使用全新随机指纹环境"}</p></div><Fingerprint size={20} /></header>
             <div className="registration-launch-form">
               <FormField label="注册邮箱来源"><select value={form.mailboxMode} onChange={(event) => {
                 const mailboxMode = event.target.value;
@@ -1796,7 +2478,7 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
               }}><option value="source">邮箱工作台地址</option><option value="inbox_link">链接取件邮箱池（可用 {inboxLinkMailboxCount}）</option></select></FormField>
               {!isInboxLinkRegistration && <div className="form-grid two">
                 <FormField label="源头邮箱"><select value={form.accountId} onChange={(event) => changeAccount(event.target.value)}><option value="">请选择</option>{options.accounts.map((item) => <option key={item.id} value={item.id}>{item.email}</option>)}</select></FormField>
-                <FormField label={isDirectRegistration ? "iCloud 地址类型" : "基础地址"}><select value={form.baseAddressId} onChange={(event) => {
+                <FormField label={isDirectRegistration ? directAddressLabel : "基础地址"}><select value={form.baseAddressId} onChange={(event) => {
                   const baseAddressId = event.target.value;
                   const available = directRegistrationBases(selectedAccount, baseAddressId).length;
                   setForm((current) => ({
@@ -1804,7 +2486,7 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
                     baseAddressId,
                     ...(isDirectRegistration ? { count: Math.max(1, Math.min(Number(current.count) || 1, available || 1)) } : {}),
                   }));
-                }}><option value="">请选择</option>{selectedAccount?.bases.map((item) => <option key={item.id} value={item.id} disabled={Boolean(item.registration_disabled)}>{baseOptionLabel(item)}</option>)}</select></FormField>
+                }}><option value="">请选择</option>{registrationBaseOptions(selectedAccount).map((item) => <option key={item.id} value={item.id}>{baseOptionLabel(item)}</option>)}</select></FormField>
               </div>}
               {!isInboxLinkRegistration && <OccupiedAliasNotice base={selectedBase} />}
               {!isInboxLinkRegistration && selectedBase?.registration_hint && <div className="inline-alert warning"><AlertTriangle size={16} /><span>{selectedBase.registration_hint}</span></div>}
@@ -1812,19 +2494,20 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
               {isInboxLinkRegistration && <div className={`inline-alert ${inboxLinkMailboxCount ? "success" : "warning"}`}><Link2 size={16} /><span>{inboxLinkMailboxCount ? `当前有 ${inboxLinkMailboxCount} 个已绑定链接邮箱可用；输入几个就分配几个。` : "没有可用的链接取件邮箱，请先到邮箱工作台绑定。"}<button type="button" className="bare-button registration-inline-link" onClick={() => onNavigate("inbox-link")}>管理链接邮箱</button></span></div>}
               <div className="form-grid two">
                 <FormField label="注册数量" error={registrationCountError} hint={isInboxLinkRegistration ? "从已绑定可用池按绑定时间依次分配；输入多少就提交多少" : isDirectRegistration ? `从所选地址开始按下拉顺序取可用邮箱；当前最多 ${directAvailableCount} 个` : isBaseAddressRegistration ? "当前模式直接使用基础地址，固定为 1 个任务" : form.suffix.trim() ? "批量注册会自动追加 -01、-02 编号" : "留空后缀时，每个账号生成随机分裂邮箱"}><input type="number" min="1" max={isInboxLinkRegistration ? 200 : isDirectRegistration ? Math.max(1, directAvailableCount) : 20} step="1" value={isBaseAddressRegistration ? 1 : form.count} disabled={isBaseAddressRegistration} onChange={(event) => setForm({ ...form, count: Number(event.target.value) })} /></FormField>
-                <FormField label="浏览器模式"><select value={form.browserMode} onChange={(event) => setForm({ ...form, browserMode: event.target.value })}><option value="headed">内嵌指纹浏览器</option><option value="headless">后台指纹浏览器</option></select></FormField>
+                <FormField label="注册并发数" error={registrationConcurrencyError} hint="同时运行的注册任务，最高 20；注册数量不足时按实际数量执行"><input type="number" min="1" max="20" step="1" value={form.concurrency} onChange={(event) => setForm({ ...form, concurrency: Number(event.target.value) })} /></FormField>
               </div>
               <div className="form-grid two">
-                {!isInboxLinkRegistration && !isDirectRegistration && !isBaseAddressRegistration && <FormField label="邮箱分裂后缀" hint="例如 campaign；不填写则随机生成"><input maxLength={24} value={form.suffix} onChange={(event) => setForm({ ...form, suffix: event.target.value })} placeholder="留空自动随机" /></FormField>}
+                <FormField label="浏览器模式"><select value={form.browserMode} onChange={(event) => setForm({ ...form, browserMode: event.target.value })}><option value="headed">内嵌指纹浏览器</option><option value="headless">后台指纹浏览器</option></select></FormField>
                 <FormField label="注册代理" hint="可固定使用某个已保存代理，也可自动轮换或直连"><select value={form.proxySelection} onChange={(event) => setForm({ ...form, proxySelection: event.target.value })}><option value="auto">自动轮换代理池（{options.proxies.length}）</option>{options.maskedProxies.map((item, index) => <option key={`${item}-${index}`} value={`proxy:${index}`}>固定使用：{proxySelectLabel(item, options.proxyMetadata?.[index])}</option>)}<option value="direct">直连（不使用代理）</option></select></FormField>
               </div>
+              {!isInboxLinkRegistration && !isDirectRegistration && !isBaseAddressRegistration && <FormField label="邮箱分裂后缀" hint="例如 campaign；不填写则随机生成"><input maxLength={24} value={form.suffix} onChange={(event) => setForm({ ...form, suffix: event.target.value })} placeholder="留空自动随机" /></FormField>}
               <div className="fresh-browser-note"><Fingerprint size={17} /><span><b>仅邮箱验证，每次全新地域指纹</b><small>清空 Cookie · 随机 OS/屏幕/Canvas/WebGL/设备参数 · 语言、时区和地理位置匹配实际出口 IP；官方强制要求手机号时任务停止</small></span></div>
               <div className="registration-option-stack">
                 <label className="registration-password-option"><input type="checkbox" checked={form.autoContinuePostSignup} onChange={(event) => setForm({ ...form, autoContinuePostSignup: event.target.checked })} /><span><b>自动点击准备完成页“继续”</b><small>取消勾选后，到达该页面即结束，不点击，也不等待人工操作。</small></span></label>
                 <label className="registration-password-option"><input type="checkbox" checked={form.setPasswordAfterRegistration} onChange={(event) => setForm({ ...form, setPasswordAfterRegistration: event.target.checked, ...(event.target.checked ? {} : { password: "" }) })} /><span><b>注册后设置密码</b><small>未勾选时，仅在官网注册流程强制要求密码时设置；勾选后会进入 ChatGPT 安全设置并再次读取邮箱验证码。</small></span></label>
               </div>
               <FormField label="指定密码（可选）" hint="填写后使用此密码；留空时由注册服务随机生成。长度 12-128 个字符，不能包含首尾空白。"><input type="password" autoComplete="new-password" minLength={12} maxLength={128} disabled={!form.setPasswordAfterRegistration} value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} placeholder={form.setPasswordAfterRegistration ? "留空自动生成随机密码" : "请先勾选注册后设置密码"} /></FormField>
-              <Button variant="primary" size="lg" icon={Play} loading={starting} disabled={!options.service?.ok || registrationCountInvalid || (isInboxLinkRegistration ? !inboxLinkMailboxCount || registrationCount > inboxLinkMailboxCount : !form.accountId || !form.baseAddressId || Boolean(selectedBase?.registration_disabled) || (isDirectRegistration && registrationCount > directAvailableCount))} onClick={start}>{isInboxLinkRegistration ? "使用链接邮箱池注册" : isDirectRegistration ? "按顺序注册 iCloud 地址" : isBaseAddressRegistration ? "使用此基础地址注册" : "开始注册"}</Button>
+              <Button variant="primary" size="lg" icon={Play} loading={starting} disabled={!options.service?.ok || registrationCountInvalid || registrationConcurrencyInvalid || (isInboxLinkRegistration ? !inboxLinkMailboxCount || registrationCount > inboxLinkMailboxCount : !form.accountId || !form.baseAddressId || Boolean(selectedBase?.registration_disabled) || (isDirectRegistration && registrationCount > directAvailableCount))} onClick={start}>{isInboxLinkRegistration ? "使用链接邮箱池注册" : isDirectRegistration ? directSubmitLabel : isBaseAddressRegistration ? "使用此基础地址注册" : "开始注册"}</Button>
             </div>
           </article>
 
@@ -1858,13 +2541,14 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
       </>}
 
       {view === "accounts" && <section className="table-panel registration-account-panel">
-        <header className="panel-header"><div><h2>已注册账号</h2><p>账号、凭据、状态与 NFapi 集中管理</p></div><div className="registration-account-bulk-actions"><Button size="sm" icon={Upload} disabled={importingNfapi || importingLocalAccounts} onClick={() => setLocalImportOpen(true)}>导入本地账号</Button><Button size="sm" icon={RefreshCw} disabled={!accounts.items.length || importingNfapi || importingLocalAccounts} title="重新加载账号列表和取件站状态，不触发账号状态检测" onClick={() => Promise.all([loadAccounts(), loadPickupStatuses()])}>刷新列表</Button></div></header>
-        {accounts.items.length ? <>
+        <header className="panel-header"><div><h2>已注册账号</h2><p>账号、凭据、状态、PayPal 提链与 NFapi 集中管理</p></div><div className="registration-account-bulk-actions"><Button size="sm" icon={Upload} disabled={importingNfapi || importingLocalAccounts} onClick={() => setLocalImportOpen(true)}>导入本地账号</Button><Button size="sm" icon={RefreshCw} disabled={!accounts.items.length || importingNfapi || importingLocalAccounts} title="重新加载账号列表、提链和取件站状态，不触发账号状态检测" onClick={() => Promise.all([loadAccounts(), loadPickupStatuses(), loadPaymentLinks()])}>刷新列表</Button></div></header>
+        {!accountsLoaded ? <LoadingBlock rows={8} /> : accounts.items.length ? <>
           {accountsError && <div className="inline-alert error"><AlertTriangle size={15} /><span>{accountsError}；当前保留上一次成功加载的账号列表。</span></div>}
           {pickupInventory.error && <div className="inline-alert warning"><AlertTriangle size={15} /><span>{pickupInventory.error}；取件站状态暂时显示为未知。</span></div>}
           <div className="registration-account-toolbar">
             <div className="registration-account-filters">
               <label className="registration-select-page"><input type="checkbox" checked={allAccountsSelected} disabled={!accountIds.length || importingNfapi} onChange={toggleAllAccounts} /><span>全选本页</span></label>
+              <label className="registration-select-page"><input type="checkbox" aria-label="选择当前分组全部注册账号" checked={allGroupAccountsSelected} disabled={!groupAccountIds.length || importingNfapi} onChange={toggleAllGroupAccounts} /><span>全选该分组</span></label>
               <label className="search-box registration-account-search"><Search size={16} /><input type="search" autoComplete="off" spellCheck="false" aria-label="按邮箱查询注册账号" value={accountSearch} disabled={importingNfapi} onChange={(event) => changeAccountSearch(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") changeAccountSearch(""); }} placeholder="输入邮箱查询账号" /></label>
               <select className="compact-select registration-group-filter" aria-label="按账号分组筛选" value={accountGroupFilter} disabled={importingNfapi} onChange={(event) => changeAccountGroupFilter(event.target.value)}>
                 <option value="all">全部分组（{accounts.items.length}）</option>
@@ -1874,10 +2558,15 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
               <span className="registration-selection-count">已选 <b>{selectedAccountIds.length}</b> 个</span>
             </div>
             <div className="registration-account-bulk-actions">
-              <Button size="sm" icon={ListChecks} loading={checkingAccountSignals} disabled={!visibleAccountItems.length || importingNfapi} title={selectedAccountIds.length ? "重新检测所选账号的当前状态和订阅类型" : "检测当前分组内全部账号的状态和订阅类型"} onClick={refreshSelectedAccountSignals}>{checkingAccountSignals ? `检测中 ${checkingAccountSignalCount}` : (selectedAccountIds.length ? "检测所选" : "检测筛选")}</Button>
-              <Button size="sm" icon={CreditCard} loading={checkingCheckouts} disabled={!pagedAccountItems.length || importingNfapi || checkingAccountSignals || checkingTrials || checkingMomo} title={selectedAccountIds.length ? "用 DE/EUR custom checkout 检测所选账号返回 cs_live 还是 oaics" : "用 DE/EUR custom checkout 检测本页账号返回 cs_live 还是 oaics"} onClick={checkAccountCheckouts}>检测 Checkout</Button>
-              <Button size="sm" icon={Gift} loading={checkingTrials} disabled={!pagedAccountItems.length || importingNfapi || checkingAccountSignals || checkingCheckouts || checkingMomo} title={selectedAccountIds.length ? "通过日本代理检测所选账号的 Plus Checkout 是否为 0 元" : "通过日本代理检测本页账号的 Plus Checkout 是否为 0 元"} onClick={checkAccountTrials}>检测日本0元</Button>
-              <Button size="sm" icon={WalletCards} loading={checkingMomo} disabled={!pagedAccountItems.length || importingNfapi || checkingAccountSignals || checkingCheckouts || checkingTrials} title={selectedAccountIds.length ? "通过越南代理检测所选账号的零金额免费试用最终结账页是否显示 MoMo" : "通过越南代理检测本页账号的零金额免费试用最终结账页是否显示 MoMo"} onClick={checkAccountMomo}>检测 MoMo</Button>
+              <Button size="sm" icon={ListChecks} loading={checkingAccountSignals} disabled={!visibleAccountItems.length || importingNfapi} title={selectedAccountIds.length ? "重新检测所选账号的状态、套餐，并确认 OpenAI 是否已删除或停用账号" : "检测当前筛选账号的状态、套餐，并确认 OpenAI 是否已删除或停用账号"} onClick={refreshSelectedAccountSignals}>{checkingAccountSignals ? `检测中 ${checkingAccountSignalCount}` : (selectedAccountIds.length ? "检测所选" : "检测筛选")}</Button>
+              <Button size="sm" icon={CreditCard} loading={checkingCheckouts} disabled={!pagedAccountItems.length || importingNfapi || checkingAccountSignals || checkingTrials || checkingGbTrials || checkingUsTrials || checkingMomo} title={selectedAccountIds.length ? "用 DE/EUR custom checkout 检测所选账号返回 cs_live 还是 oaics" : "用 DE/EUR custom checkout 检测本页账号返回 cs_live 还是 oaics"} onClick={checkAccountCheckouts}>检测 Checkout</Button>
+              <Button size="sm" icon={Gift} loading={checkingTrials} disabled={!pagedAccountItems.length || importingNfapi || checkingAccountSignals || checkingCheckouts || checkingGbTrials || checkingUsTrials || checkingMomo} title={selectedAccountIds.length ? "通过日本代理检测所选账号的 Plus Checkout 是否为 0 元" : "通过日本代理检测本页账号的 Plus Checkout 是否为 0 元"} onClick={checkAccountTrials}>检测日本0元</Button>
+              <Button size="sm" icon={Gift} loading={checkingGbTrials} disabled={!pagedAccountItems.length || importingNfapi || checkingAccountSignals || checkingCheckouts || checkingTrials || checkingUsTrials || checkingMomo} title={selectedAccountIds.length ? "通过英国代理检测所选账号的 Plus Checkout 是否为 0 元" : "通过英国代理检测本页账号的 Plus Checkout 是否为 0 元"} onClick={checkAccountGbTrials}>检测英国0元资格</Button>
+              <Button size="sm" icon={Gift} loading={checkingUsTrials} disabled={!pagedAccountItems.length || importingNfapi || checkingAccountSignals || checkingCheckouts || checkingTrials || checkingGbTrials || checkingMomo} title={selectedAccountIds.length ? "通过美国代理或服务器直连检测所选账号的 Plus Checkout 是否为 0 元" : "通过美国代理或服务器直连检测本页账号的 Plus Checkout 是否为 0 元"} onClick={checkAccountUsTrials}>检测美国0元资格</Button>
+              <Button size="sm" icon={WalletCards} loading={checkingMomo} disabled={!pagedAccountItems.length || importingNfapi || checkingAccountSignals || checkingCheckouts || checkingTrials || checkingGbTrials || checkingUsTrials} title={selectedAccountIds.length ? "通过越南代理检测所选账号的零金额免费试用最终结账页是否显示 MoMo" : "通过越南代理检测本页账号的零金额免费试用最终结账页是否显示 MoMo"} onClick={checkAccountMomo}>检测 MoMo</Button>
+              <Button size="sm" variant="primary" icon={Link2} loading={submittingPaymentLinks} disabled={!selectedAccountIds.length || importingNfapi} title="使用独立提链代理池，为所选账号直接生成 PayPal 支付链接" onClick={extractSelectedPaymentLinks}>直接提链</Button>
+              <Button size="sm" variant="primary" icon={Cable} disabled={!selectedPaymentAgreementReady || importingNfapi} title={selectedAccountIds.length !== 1 ? "请选择一个已提链账号" : selectedPaymentAgreementLink?.status !== "succeeded" || !selectedPaymentAgreementLink?.provider_url ? "所选账号需要先完成 PayPal 提链" : `提链国家 ${selectedPaymentAgreementCountry || "未记录"} 仅作记录；自动使用协议代理池配置接码并授权`} onClick={() => openPaymentAgreement(selectedPaymentAgreementAccount, selectedPaymentAgreementLink)}>自动协议</Button>
+              <Button size="sm" variant="primary" icon={Smartphone} disabled={!selectedAccountIds.length || importingNfapi} title={selectedAccountIds.length ? `为显式选择的 ${selectedAccountIds.length} 个账号自动购买 HeroSMS OpenAI 号码并接收验证码` : "请先显式选择要自动接码的账号"} onClick={() => setOpenAiSmsOpen(true)}>OpenAI 自动接码</Button>
               <Button size="sm" icon={Pencil} disabled={!selectedAccountIds.length || importingNfapi} title="统一修改所选账号的分组" onClick={openBulkGroupEditor}>编辑分组</Button>
               <Button size="sm" variant="primary" icon={Store} loading={publishingPickup} disabled={!selectedAccountIds.length || importingNfapi} title="只把所选账号的邮箱和取件链接上架到买家取件站" onClick={publishSelectedToPickup}>上架取件站</Button>
               <Button size="sm" icon={SlidersHorizontal} disabled={!selectedAccountIds.length || importingNfapi} title="为所选账号统一配置并批量导入 NFapi" onClick={() => openNfapiImporter(selectedAccountIds)}>批量导入</Button>
@@ -1889,7 +2578,8 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
             </div>
           </div>
           {visibleAccountItems.length ? <>
-            <div className="data-table-wrap registration-account-table-wrap"><table className="data-table registration-accounts-table"><thead><tr><th className="select-column"><input type="checkbox" aria-label="选择本页全部注册账号" checked={allAccountsSelected} disabled={!accountIds.length || importingNfapi} onChange={toggleAllAccounts} /></th><th>账号</th><th>凭据</th><th>身份 / 出口</th><th>状态 / 类型</th><th>Checkout</th><th>日本0元</th><th>MoMo</th><th>NFapi</th><th>取件站</th><th>创建时间</th><th className="registration-actions-column" aria-label="操作" /></tr></thead><tbody>{pagedAccountItems.map((item) => {
+            <div className="data-table-wrap registration-account-scroll-top" ref={accountScrollTopRef} onScroll={syncAccountTableScroll} role="region" aria-label="横向滚动账号表格" tabIndex={0}><div ref={accountScrollTrackRef} /></div>
+            <div className="data-table-wrap registration-account-table-wrap" ref={accountTableScrollRef} onScroll={syncAccountTableScroll}><table className="data-table registration-accounts-table"><thead><tr><th className="select-column"><input type="checkbox" aria-label="选择本页全部注册账号" checked={allAccountsSelected} disabled={!accountIds.length || importingNfapi} onChange={toggleAllAccounts} /></th><th>账号</th><th>凭据</th><th>身份 / 出口</th><th>状态 / 类型</th><th>Checkout</th><th>日本0元</th><th>英国0元</th><th>美国0元</th><th>MoMo</th><th>PayPal</th><th>NFapi</th><th>取件站</th><th>Plus时间</th><th className="registration-actions-column" aria-label="操作" /></tr></thead><tbody>{pagedAccountItems.map((item) => {
               const checked = selectedAccountIds.includes(item.id);
               const nfapiState = nfapiAccountState(item);
               return <tr className={checked ? "selected-row" : ""} key={item.id}>
@@ -1897,20 +2587,23 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
                 <td><div className="registration-account-primary"><button title="复制邮箱" onClick={() => copyText(item.email).then(() => toast("邮箱已复制"))}><b>{item.email}</b><Copy size={13} /></button><AccountNameGroup item={item} /></div></td>
                 <td><div className="registration-credential-stack"><div><span>密码</span><PasswordCell value={item.password} status={item.password_status} error={item.password_error} available={item.password_available} onCopy={() => copyText(item.password).then(() => toast("密码已复制"))} /></div><div><span>AT</span><AccessTokenCell available={item.access_token_available} loading={copyingTokenId === item.id} onCopy={() => copyAccessToken(item)} /></div></div></td>
                 <td><div className="registration-identity-network"><div className="registration-identity"><b>{item.display_name || "未记录姓名"}</b><small>{item.birth_date ? `${item.birth_date} · ${ageFromBirth(item.birth_date)} 岁` : "未记录年龄"}</small></div><div className="registration-exit-line"><Globe2 size={13} /><code>{item.exit_ip || "未记录出口"}</code></div></div></td>
-                <td><AccountSignalCell item={item} disabled={refreshingAccessTokenId !== null || importingNfapi} refreshingAccessToken={String(refreshingAccessTokenId) === String(item.id)} onRefreshAccessToken={refreshAccessToken} /></td>
+                <td><AccountSignalCell item={item} disabled={refreshingAccessTokenId !== null || importingNfapi} refreshingAccessToken={String(refreshingAccessTokenId) === String(item.id)} onRefreshAccessToken={openAccessTokenRefresh} /></td>
                 <td><CheckoutStatusCell item={item} /></td>
                 <td><TrialStatusCell item={item} /></td>
+                <td><GbTrialStatusCell item={item} /></td>
+                <td><UsTrialStatusCell item={item} /></td>
                 <td><MomoStatusCell item={item} /></td>
+                <td><PaymentLinkStatusCell item={paymentLinkByAccountId[String(item.id)]} onCopy={(value) => copyText(value).then(() => toast("PayPal 链接已复制"))} onAgreement={(link) => openPaymentAgreement(item, link)} /></td>
                 <td><div className="registration-nfapi-status" title={nfapiState.error || nfapiState.accountId || nfapiState.label}><StatusBadge status={nfapiState.badge}>{nfapiState.label}</StatusBadge>{nfapiState.shortLived && <small>短期凭据</small>}{nfapiState.accountId && <code>#{nfapiState.accountId}</code>}{nfapiState.error && <small className="error">{nfapiState.error}</small>}</div></td>
                 <td><PickupStatusCell inventory={pickupInventory} email={item.email} /></td>
-                <td><span className="muted-cell">{formatDate(item.created_at)}</span></td>
+                <td><span className="muted-cell" title={accountPlusDate(item) ? "Plus 开通时间" : "未找到准确的 Plus 开通时间"}>{formatDate(accountPlusDate(item))}</span></td>
                 <td><AccountCommands item={item} checking={checkingAccountSignals} busy={importingNfapi} onRefresh={refreshAccountSignals} onPassword={openPasswordSetup} onNfapi={openNfapiImporter} onMailbox={openAccountMailbox} onEdit={openAccountEditor} onCopy={copyRegisteredAccount} onDelete={(target) => setDeleteTarget({ kind: "account", ids: [target.id], item: target })} /></td>
               </tr>;
             })}</tbody></table></div>
             <div className="registration-mobile-list">{pagedAccountItems.map((item) => {
               const checked = selectedAccountIds.includes(item.id);
               const nfapiState = nfapiAccountState(item);
-              return <article className={checked ? "selected" : ""} key={item.id}><header><input type="checkbox" aria-label={`选择 ${item.email}`} checked={checked} disabled={importingNfapi} onChange={() => toggleAccount(item.id)} /><AccountSignalCell item={item} compact disabled={refreshingAccessTokenId !== null || importingNfapi} refreshingAccessToken={String(refreshingAccessTokenId) === String(item.id)} onRefreshAccessToken={refreshAccessToken} /><time>{formatDate(item.created_at)}</time></header><AccountNameGroup item={item} mobile /><button onClick={() => copyText(item.email).then(() => toast("邮箱已复制"))}>{item.email}<Copy size={14} /></button><div className="registration-mobile-credentials"><PasswordCell value={item.password} status={item.password_status} error={item.password_error} available={item.password_available} onCopy={() => copyText(item.password).then(() => toast("密码已复制"))} /><AccessTokenCell available={item.access_token_available} loading={copyingTokenId === item.id} onCopy={() => copyAccessToken(item)} /></div><div className="registration-mobile-facts"><div className="registration-account-exit"><Globe2 size={14} /><span><small>出口 IP</small><b>{item.exit_ip || "未记录"}</b></span></div><div className="registration-account-exit"><CreditCard size={14} /><span><small>Checkout</small><CheckoutStatusCell item={item} compact /></span></div><div className="registration-account-exit"><Gift size={14} /><span><small>日本0元</small><TrialStatusCell item={item} compact /></span></div><div className="registration-account-exit"><WalletCards size={14} /><span><small>MoMo</small><MomoStatusCell item={item} compact /></span></div><div className="registration-account-exit"><Database size={14} /><span><small>NFapi</small><b>{nfapiState.label}{nfapiState.shortLived ? " · 短期凭据" : ""}</b></span></div><div className="registration-account-exit registration-mobile-pickup"><Store size={14} /><span><small>取件站</small><PickupStatusCell inventory={pickupInventory} email={item.email} compact /></span></div></div>{nfapiState.error && <div className="inline-alert error"><AlertTriangle size={14} /><span>{nfapiState.error}</span></div>}<footer><span>{item.display_name || "未记录"}</span><AccountCommands item={item} checking={checkingAccountSignals} busy={importingNfapi} onRefresh={refreshAccountSignals} onPassword={openPasswordSetup} onNfapi={openNfapiImporter} onMailbox={openAccountMailbox} onEdit={openAccountEditor} onCopy={copyRegisteredAccount} onDelete={(target) => setDeleteTarget({ kind: "account", ids: [target.id], item: target })} /></footer></article>;
+              return <article className={checked ? "selected" : ""} key={item.id}><header><input type="checkbox" aria-label={`选择 ${item.email}`} checked={checked} disabled={importingNfapi} onChange={() => toggleAccount(item.id)} /><AccountSignalCell item={item} compact disabled={refreshingAccessTokenId !== null || importingNfapi} refreshingAccessToken={String(refreshingAccessTokenId) === String(item.id)} onRefreshAccessToken={openAccessTokenRefresh} /><time title={accountPlusDate(item) ? "Plus 开通时间" : "未找到准确的 Plus 开通时间"}>{formatDate(accountPlusDate(item))}</time></header><AccountNameGroup item={item} mobile /><button onClick={() => copyText(item.email).then(() => toast("邮箱已复制"))}>{item.email}<Copy size={14} /></button><div className="registration-mobile-credentials"><PasswordCell value={item.password} status={item.password_status} error={item.password_error} available={item.password_available} onCopy={() => copyText(item.password).then(() => toast("密码已复制"))} /><AccessTokenCell available={item.access_token_available} loading={copyingTokenId === item.id} onCopy={() => copyAccessToken(item)} /></div><div className="registration-mobile-facts"><div className="registration-account-exit"><Globe2 size={14} /><span><small>出口 IP</small><b>{item.exit_ip || "未记录"}</b></span></div><div className="registration-account-exit"><CreditCard size={14} /><span><small>Checkout</small><CheckoutStatusCell item={item} compact /></span></div><div className="registration-account-exit"><Gift size={14} /><span><small>日本0元</small><TrialStatusCell item={item} compact /></span></div><div className="registration-account-exit"><Gift size={14} /><span><small>英国0元</small><GbTrialStatusCell item={item} compact /></span></div><div className="registration-account-exit"><Gift size={14} /><span><small>美国0元</small><UsTrialStatusCell item={item} compact /></span></div><div className="registration-account-exit"><WalletCards size={14} /><span><small>MoMo</small><MomoStatusCell item={item} compact /></span></div><div className="registration-account-exit"><Link2 size={14} /><span><small>PayPal 提链</small><PaymentLinkStatusCell item={paymentLinkByAccountId[String(item.id)]} compact onCopy={(value) => copyText(value).then(() => toast("PayPal 链接已复制"))} onAgreement={(link) => openPaymentAgreement(item, link)} /></span></div><div className="registration-account-exit"><Database size={14} /><span><small>NFapi</small><b>{nfapiState.label}{nfapiState.shortLived ? " · 短期凭据" : ""}</b></span></div><div className="registration-account-exit registration-mobile-pickup"><Store size={14} /><span><small>取件站</small><PickupStatusCell inventory={pickupInventory} email={item.email} compact /></span></div></div>{nfapiState.error && <div className="inline-alert error"><AlertTriangle size={14} /><span>{nfapiState.error}</span></div>}<footer><span>{item.display_name || "未记录"}</span><AccountCommands item={item} checking={checkingAccountSignals} busy={importingNfapi} onRefresh={refreshAccountSignals} onPassword={openPasswordSetup} onNfapi={openNfapiImporter} onMailbox={openAccountMailbox} onEdit={openAccountEditor} onCopy={copyRegisteredAccount} onDelete={(target) => setDeleteTarget({ kind: "account", ids: [target.id], item: target })} /></footer></article>;
             })}</div>
           </> : <EmptyState icon={KeyRound} title={accountSearch.trim() ? "没有匹配的账号" : "这个分组还没有账号"} description={accountSearch.trim() ? `没有找到邮箱包含“${accountSearch.trim()}”的账号` : undefined} action={accountSearch.trim() ? <Button onClick={() => changeAccountSearch("")}>清除查询</Button> : <Button onClick={() => changeAccountGroupFilter("all")}>查看全部账号</Button>} />}
           <div className="table-footer registration-account-footer">
@@ -1923,6 +2616,43 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
           </div>
         </> : <EmptyState icon={KeyRound} title={accountsError ? "注册账号暂时无法加载" : "还没有注册成功的账号"} description={accountsError || undefined} action={accountsError ? <Button icon={RefreshCw} onClick={loadAccounts}>重新加载</Button> : undefined} />}
       </section>}
+
+      <PaymentAgreementModal
+        open={Boolean(paymentAgreementTarget)}
+        onClose={() => setPaymentAgreementTarget(null)}
+        target={paymentAgreementTarget}
+        settings={paymentAgreementSettings}
+        onOpenSettings={openHeroSmsSettings}
+        iframeKey={paymentAgreementFrameKey}
+      />
+
+      <OpenAiSmsModal
+        open={openAiSmsOpen}
+        onClose={() => setOpenAiSmsOpen(false)}
+        accounts={accounts.items.filter((item) => selectedAccountIds.includes(item.id))}
+        onOpenSettings={openHeroSmsSettings}
+        onAccountsChanged={loadAccounts}
+      />
+
+      <Modal
+        open={Boolean(accessTokenRefreshTarget)}
+        onClose={closeAccessTokenRefresh}
+        title={accessTokenRefreshTarget?.access_token_available ? "刷新 Access Token" : "邮箱登录获取 Access Token"}
+        description={accessTokenRefreshTarget?.email}
+        size="sm"
+        footer={<><Button disabled={refreshingAccessTokenId !== null} onClick={closeAccessTokenRefresh}>取消</Button><Button variant="primary" icon={KeyRound} loading={refreshingAccessTokenId !== null} onClick={refreshAccessToken}>开始刷新</Button></>}
+      >
+        <div className="form-stack registration-refresh-at-form">
+          <div className="inline-alert"><Globe2 size={16} /><span>默认沿用注册线路；原代理无法还原时，可从代理池指定其他国家或地区的线路。</span></div>
+          <FormField label="刷新代理" hint="列表中的国家代码来自代理配置；本次选择只影响当前 AT 刷新任务。">
+            <select value={accessTokenRefreshProxySelection} disabled={refreshingAccessTokenId !== null} onChange={(event) => setAccessTokenRefreshProxySelection(event.target.value)}>
+              <option value="original">原注册代理（保持原地区）</option>
+              {(options?.maskedProxies || []).map((item, index) => <option key={`${item}-${index}`} value={`proxy:${index}`}>其他地区：{proxySelectLabel(item, options.proxyMetadata?.[index])}</option>)}
+            </select>
+          </FormField>
+          {!options?.maskedProxies?.length && <div className="inline-alert error"><AlertTriangle size={15} /><span>代理池为空，请先在“IP 代理池”中保存其他地区代理。</span></div>}
+        </div>
+      </Modal>
 
       <Modal open={Boolean(accountMailboxTarget)} onClose={closeAccountMailbox} title="账号邮箱" description={accountMailboxTarget?.email} size="md">
         {accountMailboxTarget && <OAuthMailboxPanel
@@ -1960,6 +2690,44 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
             })}</div>
           </div>}</div></article>
           <article className="settings-section"><header><span><Globe2 size={19} /></span><div><h2>使用规则</h2><p>代理与指纹在每个任务启动时独立应用</p></div></header><div className="proxy-rule-list"><div><Check size={16} /><span><b>可选代理</b><small>创建任务时可选择自动轮换、固定某个已保存代理或直连。</small></span></div><div><Fingerprint size={16} /><span><b>随机指纹</b><small>每次启动新的 Camoufox 环境，随机 OS、屏幕、Canvas、WebGL 和设备参数，不复用 Cookie 或本地存储。</small></span></div><div><Globe2 size={16} /><span><b>地域一致</b><small>每次任务按当次实际出口 IP 重新识别国家、语言、时区和地理位置，动态代理不会沿用上次结果。</small></span></div></div></article>
+        </div>
+      </section>}
+
+      {view === "payment-proxies" && <section className="registration-proxy-layout payment-proxy-layout">
+        <article className="settings-section"><header><span><Link2 size={19} /></span><div><h2>PayPal 提链代理池</h2><p>Checkout Proxy 与 Update Proxy 分开保存、分开轮换</p></div></header><div className="settings-form payment-proxy-settings"><FormField label={`Checkout Proxy（${paymentLinks.checkout_proxy_count || 0} 条）`} hint="用于 Checkout、Stripe 和 PayPal 请求；对应原项目第一个代理框"><textarea className="proxy-pool-editor payment-proxy-pool-editor" aria-invalid={Boolean(paymentCheckoutProxyDraft.errors.length)} value={paymentCheckoutProxyText} onChange={(event) => { setPaymentCheckoutProxyText(event.target.value); setPaymentProxySaveFeedback(null); }} placeholder={"http://checkout-user:password@host:port\nhost:port:user:password"} /></FormField>
+          <PaymentProxyDraftMessages draft={paymentCheckoutProxyDraft} label="Checkout Proxy" />
+          <FormField label={`Update Proxy（${paymentLinks.update_proxy_count || 0} 条）`} hint="用于 Checkout Update；对应原项目第二个代理框"><textarea className="proxy-pool-editor payment-proxy-pool-editor" aria-invalid={Boolean(paymentUpdateProxyDraft.errors.length)} value={paymentUpdateProxyText} onChange={(event) => { setPaymentUpdateProxyText(event.target.value); setPaymentProxySaveFeedback(null); }} placeholder={"http://update-user:password@host:port\nhost:port:user:password"} /></FormField>
+          <PaymentProxyDraftMessages draft={paymentUpdateProxyDraft} label="Update Proxy" />
+          <div className="form-grid two"><FormField label="提链国家" hint="只影响本次提链，不决定协议国家或号码；DE 使用 EUR，TR/US/TH 使用 USD，GB 使用 GBP，BR 使用 BRL，JP 使用 JPY"><select value={paymentLinkCountry || "DE"} onChange={(event) => setPaymentLinkCountry(event.target.value)}>{paymentLinks.countries.map((item) => <option key={item.code} value={item.code}>{item.code}（{item.currency}）</option>)}</select></FormField><FormField label="支付方式" hint="直接提链固定生成 PayPal 链接"><select value="paypal" disabled><option value="paypal">PayPal</option></select></FormField></div>
+          <FormField label="IPRocket 代理订阅" hint="读取后会像原项目一样，同时覆盖并保存 Checkout 与 Update 两个代理池"><input type="url" value={paymentProxySourceUrl} onChange={(event) => { setPaymentProxySourceUrl(event.target.value); setPaymentProxySourceStatus(""); }} placeholder="粘贴 getLink 订阅地址" /></FormField>
+          <Button icon={Download} loading={refreshingPaymentProxySource} disabled={!paymentProxySourceUrl.trim()} onClick={refreshPaymentProxySource}>读取并保存代理</Button>
+          {paymentProxySourceStatus && <div className={`inline-alert ${/^已读取/.test(paymentProxySourceStatus) ? "success" : "warning"}`}><span>{paymentProxySourceStatus}</span></div>}
+          <div className="registration-option-stack payment-proxy-options">
+            <label className="registration-password-option"><input type="checkbox" checked={paymentProxyOptions.rotateCheckout} onChange={(event) => setPaymentProxyOptions((current) => ({ ...current, initialized: true, rotateCheckout: event.target.checked }))} /><span><b>自动轮换 Checkout Proxy IP</b><small>为每个任务刷新受支持代理的 Session；保存后生效。</small></span></label>
+            <label className="registration-password-option"><input type="checkbox" checked={paymentProxyOptions.rotateUpdate} disabled={!paymentProxyOptions.applyCheckoutUpdate} onChange={(event) => setPaymentProxyOptions((current) => ({ ...current, initialized: true, rotateUpdate: event.target.checked }))} /><span><b>自动轮换 Update Proxy IP</b><small>为 Checkout Update 独立选择并轮换代理；保存后生效。</small></span></label>
+            <label className="registration-password-option"><input type="checkbox" checked={paymentProxyOptions.applyCheckoutUpdate} onChange={(event) => setPaymentProxyOptions((current) => ({ ...current, initialized: true, applyCheckoutUpdate: event.target.checked }))} /><span><b>执行 Checkout Update</b><small>关闭后提链任务不执行 Checkout Update，也不要求 Update Proxy 池非空。</small></span></label>
+          </div>
+          {paymentProxySaveFeedback && <div className={`inline-alert ${paymentProxySaveFeedback.type === "error" ? "error" : "success"}`}><span>{paymentProxySaveFeedback.message}</span></div>}
+          <Button variant="primary" icon={Save} loading={savingPaymentProxies} onClick={savePaymentProxies}>保存 Checkout {paymentCheckoutProxyDraft.proxies.length} 条 / Update {paymentUpdateProxyDraft.proxies.length} 条</Button>
+        </div></article>
+        <div className="registration-proxy-side">
+          <article className="settings-section"><header><span><Server size={19} /></span><div><h2>融合状态</h2><p>注册工作站通过内网 API 调用独立提链服务</p></div></header><div className="payment-link-integration-state"><div><StatusBadge status={paymentLinks.configured ? "active" : "failed"}>{paymentLinks.configured ? "已连接" : "未配置"}</StatusBadge><span><b>提链服务</b><small>原项目文件、页面和任务接口保持不变</small></span></div><div><StatusBadge status={paymentLinks.checkout_proxy_count ? "active" : "warning"}>{paymentLinks.checkout_proxy_count || 0} 条</StatusBadge><span><b>Checkout Proxy 池</b><small>Checkout、Stripe 与 PayPal 请求独立轮换</small></span></div><div><StatusBadge status={paymentLinks.update_proxy_count ? "active" : "warning"}>{paymentLinks.update_proxy_count || 0} 条</StatusBadge><span><b>Update Proxy 池</b><small>Checkout Update 请求独立轮换</small></span></div><div><StatusBadge status={paymentLinkActiveCount ? "queued" : "active"}>{paymentLinkActiveCount ? `${paymentLinkActiveCount} 执行中` : "空闲"}</StatusBadge><span><b>提链任务</b><small>账号列表自动刷新进度和结果</small></span></div></div></article>
+          <article className="settings-section"><header><span><Check size={19} /></span><div><h2>使用流程</h2><p>两个代理池都保存后回到注册账号列表操作</p></div></header><div className="proxy-rule-list"><div><Network size={16} /><span><b>1. 保存两组代理</b><small>Checkout 与 Update 分开保存，不写入独立提链项目。</small></span></div><div><ListChecks size={16} /><span><b>2. 选择账号</b><small>在“注册账号”中勾选一个或多个已具备 AT 的账号。</small></span></div><div><Link2 size={16} /><span><b>3. 直接提链</b><small>每个任务分别从两组池中取代理，成功后可打开或复制链接。</small></span></div></div></article>
+        </div>
+      </section>}
+
+      {view === "protocol-proxies" && <section className="registration-proxy-layout protocol-proxy-layout">
+        <article className="settings-section"><header><span><Cable size={19} /></span><div><h2>PayPal 协议配置</h2><p>协议国家与运行代理池保存一次，后续直接自动接码并完成授权</p></div></header><div className="settings-form payment-proxy-settings">
+          <FormField label="协议国家" hint="HeroSMS 会购买该国家的号码；协议注册资料和地址也使用该国家，与账单国家、提链国家无关"><select value={paymentAgreementCountry} disabled={!paymentAgreementCountryOptions.length} onChange={(event) => { setPaymentAgreementCountry(event.target.value); setPaymentAgreementSaveFeedback(null); }}>{paymentAgreementCountryOptions.length ? paymentAgreementCountryOptions.map((item) => <option key={item.code} value={item.code}>{item.label}</option>) : <option value="">暂无可用国家</option>}</select></FormField>
+          <FormField label={`Protocol Proxy（${paymentAgreementRuntime?.proxy_count || 0} 条）`} hint="每行一条；协议任务自动从这里选择代理，不读取注册代理池或提链代理池"><textarea className="proxy-pool-editor protocol-proxy-pool-editor" aria-invalid={Boolean(paymentAgreementProxyDraft.errors.length)} value={paymentAgreementProxyText} onChange={(event) => { setPaymentAgreementProxyText(event.target.value); setPaymentAgreementSaveFeedback(null); }} placeholder={"http://protocol-user:password@host:port\nhost:port:user:password\nsocks5://user:password@host:port"} /></FormField>
+          <PaymentProxyDraftMessages draft={paymentAgreementProxyDraft} label="Protocol Proxy" />
+          {paymentAgreementRuntime?.error && <div className="inline-alert warning"><AlertTriangle size={15} /><span>{paymentAgreementRuntime.error}</span></div>}
+          {paymentAgreementSaveFeedback && <div className={`inline-alert ${paymentAgreementSaveFeedback.type === "error" ? "error" : "success"}`}><span>{paymentAgreementSaveFeedback.message}</span></div>}
+          <Button variant="primary" icon={Save} loading={savingPaymentAgreementRuntime} disabled={!paymentAgreementCountryOptions.length} onClick={savePaymentAgreementRuntime}>保存 {paymentAgreementCountry || "--"} / {paymentAgreementProxyDraft.proxies.length} 条协议代理</Button>
+        </div></article>
+        <div className="registration-proxy-side">
+          <article className="settings-section"><header><span><Server size={19} /></span><div><h2>融合状态</h2><p>保存后的配置由注册工作站和协议工作台自动使用</p></div></header><div className="payment-link-integration-state"><div><StatusBadge status={paymentAgreementRuntime?.configured ? "active" : "warning"}>{paymentAgreementRuntime?.configured ? "已配置" : "待配置"}</StatusBadge><span><b>自动协议服务</b><small>点击账号的“协议”后，无需再次填写参数</small></span></div><div><StatusBadge status={paymentAgreementRuntime?.country ? "active" : "warning"}>{paymentAgreementRuntime?.country || "未选"}</StatusBadge><span><b>已保存的协议与号码国家</b><small>PayPal 资料、HeroSMS 号码严格跟随此国家</small></span></div><div><StatusBadge status={paymentAgreementRuntime?.proxy_count ? "active" : "warning"}>{paymentAgreementRuntime?.proxy_count || 0} 条</StatusBadge><span><b>Protocol Proxy 池</b><small>与 Checkout、Update 和注册代理池完全独立</small></span></div></div></article>
+          <article className="settings-section"><header><span><Check size={19} /></span><div><h2>使用流程</h2><p>配置一次，之后从账号列表直接启动</p></div></header><div className="proxy-rule-list"><div><Globe2 size={16} /><span><b>1. 选择国家并保存代理</b><small>协议国家决定注册资料、地址以及 HeroSMS 号码国家。</small></span></div><div><Link2 size={16} /><span><b>2. 完成 PayPal 提链</b><small>提链使用什么国家都可以，仅保留为来源记录。</small></span></div><div><Cable size={16} /><span><b>3. 点击“协议”自动执行</b><small>系统自动取代理、购买号码、接收验证码并提交 PayPal 授权。</small></span></div></div></article>
         </div>
       </section>}
 
@@ -2047,7 +2815,7 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
               />
             </section>
             {nfapiImportMode === "agent_identity" ? <>
-              <div className="inline-alert"><Fingerprint size={15} /><span>{isBatchNfapiImport ? "使用每个账号已保存的 Access Token 自动生成 Agent Identity，并将下方设置统一导入 NFapi。" : "使用 AliasHub 已保存的 Access Token 自动生成 Agent Identity 并导入 NFapi；NFapi 不保存 OAuth access token 或 refresh token，每次上游请求动态签名。"}</span></div>
+              <div className="inline-alert"><Fingerprint size={15} /><span>{isBatchNfapiImport ? "使用每个账号已保存的 Access Token 自动生成 Agent Identity，并将下方设置统一导入 NFapi。" : "使用注册工作站已保存的 Access Token 自动生成 Agent Identity 并导入 NFapi；NFapi 不保存 OAuth access token 或 refresh token，每次上游请求动态签名。"}</span></div>
               {!isBatchNfapiImport && nfapiSelectedAccount && !nfapiSelectedAccount.access_token_available && <div className="inline-alert error"><AlertTriangle size={15} /><span>当前账号没有可用 Access Token，请切换到 OAuth 授权。</span></div>}
             </> : <div className="inline-alert"><ShieldCheck size={15} /><span>通过 OpenAI OAuth 登录并授权；完成后将回调地址提交到 NFapi 兑换凭据。</span></div>}
           </>}
@@ -2073,7 +2841,7 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
           </div>}
 
           {!nfapiRefreshTokenMode && <>
-          {!nfapiOAuthSession && !nfapiImportResult && !nfapiBatchResult && <><section className="nfapi-import-section"><header><SlidersHorizontal size={17} /><div><h3>基本与调度</h3><p>这些设置会在导入完成后应用到 NFapi 账号</p></div></header><div className={`form-grid ${nfapiImportIds.length === 1 ? "four" : "three"}`}>{nfapiImportIds.length === 1 && <FormField label="账号名称" hint="留空时使用本地名称"><input maxLength={120} value={nfapiForm.account_name} onChange={(event) => setNfapiForm({ ...nfapiForm, account_name: event.target.value })} placeholder="此账号在 NFapi 中的名称" /></FormField>}<FormField label="名称前缀" hint="添加到 NFapi 账号名称前"><input maxLength={80} value={nfapiForm.name_prefix} onChange={(event) => setNfapiForm({ ...nfapiForm, name_prefix: event.target.value })} placeholder="例如：AliasHub-日本" /></FormField><FormField label="账号状态"><select value={nfapiForm.status} onChange={(event) => setNfapiForm({ ...nfapiForm, status: event.target.value })}><option value="active">启用</option><option value="inactive">停用</option><option value="error">错误</option></select></FormField><FormField label="NFapi 代理"><select value={nfapiForm.proxy_id} onChange={(event) => setNfapiForm({ ...nfapiForm, proxy_id: event.target.value })}><option value="">不绑定代理</option>{nfapiProxies.map((item) => { const id = item.id ?? item.value; return <option key={id} value={id}>{item.name || item.label || item.url || `代理 #${id}`}</option>; })}</select></FormField></div><FormField label="备注"><textarea rows="2" maxLength={2000} value={nfapiForm.notes} onChange={(event) => setNfapiForm({ ...nfapiForm, notes: event.target.value })} placeholder="写入 NFapi 账号备注" /></FormField><div className="form-grid four"><FormField label="并发数"><input type="number" min="1" max="1000" step="1" value={nfapiForm.concurrency} onChange={(event) => setNfapiForm({ ...nfapiForm, concurrency: event.target.value })} /></FormField><FormField label="负载系数"><input type="number" min="0" max="10000" step="1" value={nfapiForm.load_factor} onChange={(event) => setNfapiForm({ ...nfapiForm, load_factor: event.target.value })} /></FormField><FormField label="优先级"><input type="number" min="0" max="10000" step="1" value={nfapiForm.priority} onChange={(event) => setNfapiForm({ ...nfapiForm, priority: event.target.value })} /></FormField><FormField label="计费倍率"><input type="number" min="0" max="1000" step="0.01" value={nfapiForm.rate_multiplier} onChange={(event) => setNfapiForm({ ...nfapiForm, rate_multiplier: event.target.value })} /></FormField></div>{nfapiImportMode === "oauth" ? <div className="form-grid two"><FormField label="凭据过期时间" hint="留空时使用 Token 自带过期时间"><input type="datetime-local" value={nfapiForm.expires_at} onChange={(event) => setNfapiForm({ ...nfapiForm, expires_at: event.target.value })} /></FormField><div className="nfapi-toggle-grid compact"><label><input type="checkbox" checked={nfapiForm.auto_pause_on_expired} onChange={(event) => setNfapiForm({ ...nfapiForm, auto_pause_on_expired: event.target.checked })} /><span><b>过期自动暂停</b><small>凭据过期后退出调度</small></span></label></div></div> : <div className="inline-alert"><Fingerprint size={15} /><span>Agent Identity 不使用 OAuth Token 过期时间；NFapi 会在每次上游请求时动态签名。</span></div>}</section>
+          {!nfapiOAuthSession && !nfapiImportResult && !nfapiBatchResult && <><section className="nfapi-import-section"><header><SlidersHorizontal size={17} /><div><h3>基本与调度</h3><p>这些设置会在导入完成后应用到 NFapi 账号</p></div></header><div className={`form-grid ${nfapiImportIds.length === 1 ? "four" : "three"}`}>{nfapiImportIds.length === 1 && <FormField label="账号名称" hint="留空时使用本地名称"><input maxLength={120} value={nfapiForm.account_name} onChange={(event) => setNfapiForm({ ...nfapiForm, account_name: event.target.value })} placeholder="此账号在 NFapi 中的名称" /></FormField>}<FormField label="名称前缀" hint="添加到 NFapi 账号名称前"><input maxLength={80} value={nfapiForm.name_prefix} onChange={(event) => setNfapiForm({ ...nfapiForm, name_prefix: event.target.value })} placeholder="例如：注册工作站-日本" /></FormField><FormField label="账号状态"><select value={nfapiForm.status} onChange={(event) => setNfapiForm({ ...nfapiForm, status: event.target.value })}><option value="active">启用</option><option value="inactive">停用</option><option value="error">错误</option></select></FormField><FormField label="NFapi 代理"><select value={nfapiForm.proxy_id} onChange={(event) => setNfapiForm({ ...nfapiForm, proxy_id: event.target.value })}><option value="">不绑定代理</option>{nfapiProxies.map((item) => { const id = item.id ?? item.value; return <option key={id} value={id}>{item.name || item.label || item.url || `代理 #${id}`}</option>; })}</select></FormField></div><FormField label="备注"><textarea rows="2" maxLength={2000} value={nfapiForm.notes} onChange={(event) => setNfapiForm({ ...nfapiForm, notes: event.target.value })} placeholder="写入 NFapi 账号备注" /></FormField><div className="form-grid four"><FormField label="并发数"><input type="number" min="1" max="1000" step="1" value={nfapiForm.concurrency} onChange={(event) => setNfapiForm({ ...nfapiForm, concurrency: event.target.value })} /></FormField><FormField label="负载系数"><input type="number" min="0" max="10000" step="1" value={nfapiForm.load_factor} onChange={(event) => setNfapiForm({ ...nfapiForm, load_factor: event.target.value })} /></FormField><FormField label="优先级"><input type="number" min="0" max="10000" step="1" value={nfapiForm.priority} onChange={(event) => setNfapiForm({ ...nfapiForm, priority: event.target.value })} /></FormField><FormField label="计费倍率"><input type="number" min="0" max="1000" step="0.01" value={nfapiForm.rate_multiplier} onChange={(event) => setNfapiForm({ ...nfapiForm, rate_multiplier: event.target.value })} /></FormField></div>{nfapiImportMode === "oauth" ? <div className="form-grid two"><FormField label="凭据过期时间" hint="留空时使用 Token 自带过期时间"><input type="datetime-local" value={nfapiForm.expires_at} onChange={(event) => setNfapiForm({ ...nfapiForm, expires_at: event.target.value })} /></FormField><div className="nfapi-toggle-grid compact"><label><input type="checkbox" checked={nfapiForm.auto_pause_on_expired} onChange={(event) => setNfapiForm({ ...nfapiForm, auto_pause_on_expired: event.target.checked })} /><span><b>过期自动暂停</b><small>凭据过期后退出调度</small></span></label></div></div> : <div className="inline-alert"><Fingerprint size={15} /><span>Agent Identity 不使用 OAuth Token 过期时间；NFapi 会在每次上游请求时动态签名。</span></div>}</section>
 
           <section className="nfapi-import-section"><header><Network size={17} /><div><h3>协议与客户端</h3><p>控制 OpenAI 请求转发及 Codex 客户端范围</p></div></header><div className="form-grid three"><FormField label="WebSocket 模式"><select value={nfapiForm.ws_mode} onChange={(event) => setNfapiForm({ ...nfapiForm, ws_mode: event.target.value })}><option value="off">关闭</option><option value="ctx_pool">Context Pool</option><option value="passthrough">透传</option><option value="http_bridge">HTTP Bridge</option></select></FormField><FormField label="Compact 模式"><select value={nfapiForm.compact_mode} onChange={(event) => setNfapiForm({ ...nfapiForm, compact_mode: event.target.value })}><option value="auto">自动</option><option value="force_on">强制开启</option><option value="force_off">强制关闭</option></select></FormField><FormField label="图片桥接"><select value={nfapiForm.image_bridge_mode} onChange={(event) => setNfapiForm({ ...nfapiForm, image_bridge_mode: event.target.value })}><option value="inherit">跟随 NFapi 默认值</option><option value="enabled">启用</option><option value="disabled">禁用</option></select></FormField></div><div className="nfapi-toggle-grid"><label><input type="checkbox" checked={nfapiForm.openai_passthrough} onChange={(event) => setNfapiForm({ ...nfapiForm, openai_passthrough: event.target.checked })} /><span><b>OpenAI 请求透传</b><small>原样转发兼容字段</small></span></label><label><input type="checkbox" checked={nfapiForm.codex_cli_only} onChange={(event) => setNfapiForm({ ...nfapiForm, codex_cli_only: event.target.checked, ...(event.target.checked ? {} : { allow_app_server: false }) })} /><span><b>仅 Codex 官方客户端</b><small>限制非 Codex 客户端使用</small></span></label><label className={!nfapiForm.codex_cli_only ? "disabled" : ""}><input type="checkbox" disabled={!nfapiForm.codex_cli_only} checked={nfapiForm.allow_app_server} onChange={(event) => setNfapiForm({ ...nfapiForm, allow_app_server: event.target.checked })} /><span><b>允许 app-server</b><small>纳入 Codex app-server 客户端</small></span></label></div></section>
 
@@ -2090,14 +2858,14 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
         open={localImportOpen}
         onClose={() => { if (!importingLocalAccounts) setLocalImportOpen(false); }}
         title="导入本地账号"
-        description="恢复从注册机本地账号池删除、但仍保留注册记录的账号"
+        description="恢复本机历史账号，或用邮箱和 HTTPS 取件链接导入外部账号"
         size="lg"
-        footer={<><Button disabled={importingLocalAccounts} onClick={() => setLocalImportOpen(false)}>取消</Button><Button variant="primary" icon={Upload} loading={importingLocalAccounts} disabled={!localImportContent.trim()} onClick={importLocalAccounts}>导入并重新关联</Button></>}
+        footer={<><Button disabled={importingLocalAccounts} onClick={() => setLocalImportOpen(false)}>取消</Button><Button variant="primary" icon={Upload} loading={importingLocalAccounts} disabled={!localImportContent.trim()} onClick={importLocalAccounts}>导入并关联</Button></>}
       >
         <div className="form-stack">
-          <div className="inline-alert"><Mail size={15} /><span>没有密码时每行只填一个邮箱；系统会把 AliasHub 接码资源重新绑定到注册机本地账号库，并关联原成功注册记录。</span></div>
+          <div className="inline-alert"><Mail size={15} /><span>历史账号可每行只填邮箱；外部账号请填写“邮箱----HTTPS 取件链接”。取件链接只在注册工作站加密保存，并自动绑定邮件中心。</span></div>
           <FormField label="选择账号文件" hint="支持 Frcibly JSON 导出、CSV、JSONL 或 TXT"><input type="file" accept=".json,.jsonl,.csv,.txt,application/json,text/csv,text/plain" disabled={importingLocalAccounts} onChange={loadLocalAccountFile} /></FormField>
-          <FormField label="邮箱 / 账号内容" hint='接码模式每行只填邮箱；有密码或 Token 时也可追加：email password {"access_token":"..."}'><textarea className="nfapi-json-editor" rows="12" spellCheck="false" value={localImportContent} disabled={importingLocalAccounts} onChange={(event) => setLocalImportContent(event.target.value)} placeholder={'name1@example.com\nname2@example.com\n\n或：\nname3@example.com password'} /></FormField>
+          <FormField label="邮箱 / 账号内容" hint='外部账号：email----https://...；历史账号也支持 email password {"access_token":"..."}'><textarea className="nfapi-json-editor" rows="12" spellCheck="false" value={localImportContent} disabled={importingLocalAccounts} onChange={(event) => setLocalImportContent(event.target.value)} placeholder={'someone@example.com----https://dispose.lol/ib/your-link-key\n\n或恢复历史账号：\nname@example.com\nname2@example.com password'} /></FormField>
         </div>
       </Modal>
 

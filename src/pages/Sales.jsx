@@ -38,7 +38,9 @@ function saleState(item, inventory) {
     return {
       key: "blocked",
       badge: item.chatgpt_registered ? "failed" : "warning",
-      label: item.chatgpt_registered ? "ChatGPT 禁售" : "源头未连接",
+      label: item.chatgpt_registered
+        ? "ChatGPT 禁售"
+        : item.mailcom_recycling_reserved ? "别名轮换中" : "源头未连接",
       item: null,
     };
   }
@@ -242,8 +244,9 @@ export default function SalesPage({ refreshKey, onNavigate }) {
           })}</tbody></table></div>
           <div className="sales-mobile-list">{filteredAddresses.map((item) => {
             const checked = selectedIds.includes(Number(item.id));
+            const state = saleState(item, inventory);
             return <article className={`${checked ? "selected" : ""}${!item.eligible ? " blocked" : ""}`} key={item.id}>
-              <header><input type="checkbox" checked={checked} disabled={!item.eligible} aria-label={`选择 ${item.email}`} onChange={() => toggleAddress(item)} /><StatusBadge status={item.chatgpt_registered ? "failed" : "active"}>{item.chatgpt_registered ? "ChatGPT 禁售" : "可售"}</StatusBadge></header>
+              <header><input type="checkbox" checked={checked} disabled={!item.eligible} aria-label={`选择 ${item.email}`} onChange={() => toggleAddress(item)} /><StatusBadge status={state.badge}>{state.label}</StatusBadge></header>
               <button onClick={() => copyText(item.email).then(() => toast("邮箱已复制"))}>{item.email}<Copy size={13} /></button>
               <div className="sales-mobile-meta"><span><small>类型</small><b>{item.type_label}</b></span><span><small>源头邮箱</small><b>{item.source_email}</b></span></div>
               <footer><PickupCell inventory={inventory} item={item} /></footer>

@@ -173,6 +173,20 @@ const schema = `
     credential_updated_at TEXT NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS mailcom_credentials (
+    account_id INTEGER PRIMARY KEY REFERENCES source_accounts(id) ON DELETE CASCADE,
+    username TEXT NOT NULL,
+    password_encrypted TEXT NOT NULL,
+    credential_updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS netease_credentials (
+    account_id INTEGER PRIMARY KEY REFERENCES source_accounts(id) ON DELETE CASCADE,
+    username TEXT NOT NULL,
+    auth_code_encrypted TEXT NOT NULL,
+    credential_updated_at TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS oauth_code_sessions (
     id TEXT PRIMARY KEY,
     expected_account_id INTEGER REFERENCES source_accounts(id) ON DELETE SET NULL,
@@ -327,6 +341,36 @@ const schema = `
   CREATE INDEX IF NOT EXISTS idx_registered_account_trial_checks_email
     ON registered_account_trial_checks(email COLLATE NOCASE, updated_at DESC);
 
+  CREATE TABLE IF NOT EXISTS registered_account_gb_trial_checks (
+    external_account_id TEXT PRIMARY KEY,
+    email TEXT NOT NULL COLLATE NOCASE,
+    status TEXT NOT NULL DEFAULT 'unchecked',
+    eligible INTEGER,
+    evidence TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    checked_at TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_registered_account_gb_trial_checks_email
+    ON registered_account_gb_trial_checks(email COLLATE NOCASE, updated_at DESC);
+
+  CREATE TABLE IF NOT EXISTS registered_account_us_trial_checks (
+    external_account_id TEXT PRIMARY KEY,
+    email TEXT NOT NULL COLLATE NOCASE,
+    status TEXT NOT NULL DEFAULT 'unchecked',
+    eligible INTEGER,
+    evidence TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    checked_at TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_registered_account_us_trial_checks_email
+    ON registered_account_us_trial_checks(email COLLATE NOCASE, updated_at DESC);
+
   CREATE TABLE IF NOT EXISTS registered_account_momo_checks (
     external_account_id TEXT PRIMARY KEY,
     email TEXT NOT NULL COLLATE NOCASE,
@@ -342,6 +386,300 @@ const schema = `
 
   CREATE INDEX IF NOT EXISTS idx_registered_account_momo_checks_email
     ON registered_account_momo_checks(email COLLATE NOCASE, updated_at DESC);
+
+  CREATE TABLE IF NOT EXISTS registered_account_payment_links (
+    external_account_id TEXT PRIMARY KEY,
+    email TEXT NOT NULL,
+    task_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'queued',
+    stage TEXT NOT NULL DEFAULT 'queued',
+    progress INTEGER NOT NULL DEFAULT 0,
+    provider_url TEXT NOT NULL DEFAULT '',
+    proxy_label TEXT NOT NULL DEFAULT '',
+    checkout_proxy_label TEXT NOT NULL DEFAULT '',
+    update_proxy_label TEXT NOT NULL DEFAULT '',
+    session_kind TEXT NOT NULL DEFAULT '',
+    request_country TEXT NOT NULL DEFAULT '',
+    billing_country TEXT NOT NULL DEFAULT '',
+    currency TEXT NOT NULL DEFAULT '',
+    amount_due REAL,
+    error TEXT NOT NULL DEFAULT '',
+    started_at TEXT,
+    finished_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_registered_account_payment_links_status
+    ON registered_account_payment_links(status, updated_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_registered_account_payment_links_email
+    ON registered_account_payment_links(email COLLATE NOCASE, updated_at DESC);
+
+  CREATE TABLE IF NOT EXISTS ic_registration_pipelines (
+    id TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL UNIQUE,
+    request_fingerprint TEXT NOT NULL,
+    account_id INTEGER REFERENCES source_accounts(id) ON DELETE SET NULL,
+    base_address_id INTEGER REFERENCES addresses(id) ON DELETE SET NULL,
+    mailbox_mode TEXT NOT NULL DEFAULT 'existing'
+      CHECK(mailbox_mode IN ('existing', 'auto_create')),
+    privacy_account_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'queued'
+      CHECK(status IN ('queued', 'running', 'cancel_requested', 'completed', 'partial_failed', 'failed', 'cancelled', 'interrupted')),
+    stage TEXT NOT NULL DEFAULT 'queued',
+    requested_count INTEGER NOT NULL,
+    concurrency INTEGER NOT NULL,
+    browser_mode TEXT NOT NULL,
+    proxy_selection TEXT NOT NULL,
+    payment_link_country TEXT NOT NULL,
+    progress_current INTEGER NOT NULL DEFAULT 0,
+    progress_total INTEGER NOT NULL DEFAULT 0,
+    success_count INTEGER NOT NULL DEFAULT 0,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    cancelled_count INTEGER NOT NULL DEFAULT 0,
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    finished_at TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_ic_registration_pipelines_status
+    ON ic_registration_pipelines(status, created_at DESC);
+
+  CREATE TABLE IF NOT EXISTS ic_registration_pipeline_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pipeline_id TEXT NOT NULL REFERENCES ic_registration_pipelines(id) ON DELETE CASCADE,
+    address_id INTEGER REFERENCES addresses(id) ON DELETE SET NULL,
+    email TEXT NOT NULL COLLATE NOCASE,
+    mailbox_id TEXT NOT NULL DEFAULT '',
+    registration_job_id INTEGER REFERENCES registration_jobs(id) ON DELETE SET NULL,
+    external_account_id TEXT NOT NULL DEFAULT '',
+    payment_link_task_id TEXT NOT NULL DEFAULT '',
+    payment_link_url TEXT NOT NULL DEFAULT '',
+    agreement_job_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'queued'
+      CHECK(status IN ('queued', 'running', 'cancel_requested', 'completed', 'failed', 'cancelled', 'interrupted')),
+    stage TEXT NOT NULL DEFAULT 'queued',
+    failure_stage TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    finished_at TEXT,
+    UNIQUE(pipeline_id, address_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_ic_registration_pipeline_items_task
+    ON ic_registration_pipeline_items(pipeline_id, id);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_ic_registration_pipeline_active_address
+    ON ic_registration_pipeline_items(address_id)
+    WHERE address_id IS NOT NULL AND status IN ('queued', 'running', 'cancel_requested');
+
+  CREATE TABLE IF NOT EXISTS mailcom_registration_pipelines (
+    id TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL UNIQUE,
+    request_fingerprint TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued'
+      CHECK(status IN ('queued', 'running', 'cancel_requested', 'completed', 'partial_failed', 'failed', 'cancelled', 'interrupted')),
+    stage TEXT NOT NULL DEFAULT 'queued',
+    concurrency INTEGER NOT NULL,
+    browser_mode TEXT NOT NULL,
+    proxy_selection TEXT NOT NULL,
+    payment_link_country TEXT NOT NULL,
+    link_attempts INTEGER NOT NULL DEFAULT 3
+      CHECK(link_attempts BETWEEN 1 AND 10),
+    recycle_succeeded INTEGER NOT NULL DEFAULT 0,
+    account_count INTEGER NOT NULL DEFAULT 0,
+    slot_count INTEGER NOT NULL DEFAULT 0,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    registration_success_count INTEGER NOT NULL DEFAULT 0,
+    link_success_count INTEGER NOT NULL DEFAULT 0,
+    agreement_success_count INTEGER NOT NULL DEFAULT 0,
+    agreement_failure_count INTEGER NOT NULL DEFAULT 0,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    recycled_count INTEGER NOT NULL DEFAULT 0,
+    created_count INTEGER NOT NULL DEFAULT 0,
+    cancelled_count INTEGER NOT NULL DEFAULT 0,
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    finished_at TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_mailcom_registration_pipelines_status
+    ON mailcom_registration_pipelines(status, created_at DESC);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_mailcom_registration_pipeline_active
+    ON mailcom_registration_pipelines((1))
+    WHERE status IN ('queued', 'running', 'cancel_requested');
+
+  CREATE TABLE IF NOT EXISTS mailcom_registration_pipeline_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pipeline_id TEXT NOT NULL REFERENCES mailcom_registration_pipelines(id) ON DELETE CASCADE,
+    account_id INTEGER REFERENCES source_accounts(id) ON DELETE SET NULL,
+    source_email TEXT NOT NULL COLLATE NOCASE,
+    slot_key TEXT NOT NULL,
+    slot_kind TEXT NOT NULL CHECK(slot_kind IN ('primary', 'official')),
+    initial_address_id INTEGER REFERENCES addresses(id) ON DELETE SET NULL,
+    initial_email TEXT NOT NULL COLLATE NOCASE,
+    current_address_id INTEGER REFERENCES addresses(id) ON DELETE SET NULL,
+    current_email TEXT NOT NULL COLLATE NOCASE,
+    replacement_email TEXT NOT NULL DEFAULT '' COLLATE NOCASE,
+    current_attempt_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'queued'
+      CHECK(status IN ('queued', 'running', 'retry_wait', 'cancel_requested', 'completed', 'failed', 'cancelled', 'interrupted')),
+    stage TEXT NOT NULL DEFAULT 'prepare_queued',
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    registration_success_count INTEGER NOT NULL DEFAULT 0,
+    link_success_count INTEGER NOT NULL DEFAULT 0,
+    agreement_success_count INTEGER NOT NULL DEFAULT 0,
+    agreement_failure_count INTEGER NOT NULL DEFAULT 0,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    recycled_count INTEGER NOT NULL DEFAULT 0,
+    created_count INTEGER NOT NULL DEFAULT 0,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    recycle_retry_count INTEGER NOT NULL DEFAULT 0,
+    next_retry_at TEXT,
+    prepare_error TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    finished_at TEXT,
+    UNIQUE(pipeline_id, slot_key)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_mailcom_registration_pipeline_items_task
+    ON mailcom_registration_pipeline_items(pipeline_id, account_id, id);
+
+  CREATE TABLE IF NOT EXISTS mailcom_registration_pipeline_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pipeline_id TEXT NOT NULL REFERENCES mailcom_registration_pipelines(id) ON DELETE CASCADE,
+    item_id INTEGER NOT NULL REFERENCES mailcom_registration_pipeline_items(id) ON DELETE CASCADE,
+    attempt_number INTEGER NOT NULL,
+    address_id INTEGER REFERENCES addresses(id) ON DELETE SET NULL,
+    email TEXT NOT NULL COLLATE NOCASE,
+    registration_job_id INTEGER REFERENCES registration_jobs(id) ON DELETE SET NULL,
+    external_account_id TEXT NOT NULL DEFAULT '',
+    payment_link_task_id TEXT NOT NULL DEFAULT '',
+    agreement_job_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'queued'
+      CHECK(status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled', 'interrupted')),
+    stage TEXT NOT NULL DEFAULT 'registration_queued',
+    outcome TEXT NOT NULL DEFAULT '',
+    registration_status TEXT NOT NULL DEFAULT 'queued',
+    link_status TEXT NOT NULL DEFAULT 'pending',
+    link_attempt_count INTEGER NOT NULL DEFAULT 0
+      CHECK(link_attempt_count >= 0),
+    agreement_status TEXT NOT NULL DEFAULT 'pending'
+      CHECK(agreement_status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled', 'skipped', 'uncertain')),
+    agreement_country TEXT NOT NULL DEFAULT '',
+    agreement_error TEXT NOT NULL DEFAULT '',
+    failure_reason TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    recycle_status TEXT NOT NULL DEFAULT 'pending'
+      CHECK(recycle_status IN ('pending', 'running', 'retry_wait', 'succeeded', 'failed', 'skipped')),
+    recycle_attempts INTEGER NOT NULL DEFAULT 0,
+    recycle_error TEXT NOT NULL DEFAULT '',
+    replacement_address_id INTEGER REFERENCES addresses(id) ON DELETE SET NULL,
+    replacement_email TEXT NOT NULL DEFAULT '' COLLATE NOCASE,
+    next_retry_at TEXT,
+    registration_finished_at TEXT,
+    link_finished_at TEXT,
+    agreement_started_at TEXT,
+    agreement_finished_at TEXT,
+    finished_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(item_id, attempt_number)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_mailcom_registration_pipeline_attempts_task
+    ON mailcom_registration_pipeline_attempts(pipeline_id, item_id, id);
+  CREATE INDEX IF NOT EXISTS idx_mailcom_registration_pipeline_attempts_children
+    ON mailcom_registration_pipeline_attempts(registration_job_id, payment_link_task_id);
+  CREATE INDEX IF NOT EXISTS idx_mailcom_registration_pipeline_attempts_successes
+    ON mailcom_registration_pipeline_attempts(pipeline_id, link_status, id DESC);
+
+  CREATE TABLE IF NOT EXISTS openai_sms_tasks (
+    id TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'queued'
+      CHECK(status IN ('queued', 'running', 'cancel_requested', 'completed', 'failed', 'cancelled', 'interrupted')),
+    stage TEXT NOT NULL DEFAULT 'queued',
+    country TEXT NOT NULL,
+    hero_sms_country_id INTEGER NOT NULL,
+    max_price REAL NOT NULL,
+    claim_timeout_seconds INTEGER NOT NULL,
+    claim_interval_seconds INTEGER NOT NULL,
+    wait_seconds INTEGER NOT NULL,
+    concurrency INTEGER NOT NULL,
+    browser_mode TEXT NOT NULL,
+    progress_current INTEGER NOT NULL DEFAULT 0,
+    progress_total INTEGER NOT NULL DEFAULT 0,
+    success_count INTEGER NOT NULL DEFAULT 0,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    cancelled_count INTEGER NOT NULL DEFAULT 0,
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    finished_at TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_openai_sms_tasks_status
+    ON openai_sms_tasks(status, created_at DESC);
+
+  CREATE TABLE IF NOT EXISTS openai_sms_task_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL REFERENCES openai_sms_tasks(id) ON DELETE CASCADE,
+    external_account_id TEXT NOT NULL,
+    email TEXT NOT NULL COLLATE NOCASE,
+    remote_task_id TEXT NOT NULL DEFAULT '',
+    remote_event_cursor INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'queued'
+      CHECK(status IN ('queued', 'running', 'cancel_requested', 'completed', 'failed', 'cancelled', 'interrupted')),
+    stage TEXT NOT NULL DEFAULT 'queued',
+    activation_id_encrypted TEXT NOT NULL DEFAULT '',
+    relay_token_hash TEXT NOT NULL DEFAULT '',
+    phone_mask TEXT NOT NULL DEFAULT '',
+    price REAL,
+    claim_attempts INTEGER NOT NULL DEFAULT 0,
+    relay_started_at TEXT,
+    code_delivered_at TEXT,
+    code_hash TEXT NOT NULL DEFAULT '',
+    resend_requested_at TEXT,
+    activation_released_at TEXT,
+    activation_outcome TEXT NOT NULL DEFAULT '',
+    cleanup_error TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    finished_at TEXT,
+    UNIQUE(task_id, external_account_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_openai_sms_items_task
+    ON openai_sms_task_items(task_id, id);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_openai_sms_items_relay
+    ON openai_sms_task_items(relay_token_hash)
+    WHERE relay_token_hash <> '';
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_openai_sms_items_active_account
+    ON openai_sms_task_items(external_account_id)
+    WHERE status IN ('queued', 'running', 'cancel_requested');
+
+  CREATE TABLE IF NOT EXISTS openai_sms_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL REFERENCES openai_sms_tasks(id) ON DELETE CASCADE,
+    item_id INTEGER REFERENCES openai_sms_task_items(id) ON DELETE CASCADE,
+    source_event_id TEXT NOT NULL DEFAULT '',
+    event_type TEXT NOT NULL DEFAULT 'log',
+    level TEXT NOT NULL DEFAULT 'info',
+    message TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+  );
+
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_openai_sms_events_remote
+    ON openai_sms_events(item_id, source_event_id)
+    WHERE item_id IS NOT NULL AND source_event_id <> '';
+  CREATE INDEX IF NOT EXISTS idx_openai_sms_events_task
+    ON openai_sms_events(task_id, id);
 
   CREATE TABLE IF NOT EXISTS registered_account_nfapi_links (
     external_account_id TEXT NOT NULL,
@@ -574,7 +912,7 @@ export function createSourceAccount(db, {
   email,
   displayName = "",
   provider = "microsoft",
-  officialLimit = provider === "microsoft" ? 10 : 1,
+  officialLimit = ["microsoft", "mailcom"].includes(provider) ? 10 : 1,
 } = {}) {
   const now = nowIso();
   const recoveryEmail = getSetting(db, "default_recovery_email", "");
@@ -731,6 +1069,113 @@ export function createDatabase({ filename, seedDemo = false } = {}) {
   if (!registrationColumns.includes("failure_reason")) {
     db.exec("ALTER TABLE registration_jobs ADD COLUMN failure_reason TEXT NOT NULL DEFAULT ''");
   }
+  const icPipelineColumns = db.pragma("table_info(ic_registration_pipelines)").map((column) => column.name);
+  if (!icPipelineColumns.includes("mailbox_mode")) {
+    db.exec("ALTER TABLE ic_registration_pipelines ADD COLUMN mailbox_mode TEXT NOT NULL DEFAULT 'existing'");
+  }
+  if (!icPipelineColumns.includes("privacy_account_id")) {
+    db.exec("ALTER TABLE ic_registration_pipelines ADD COLUMN privacy_account_id TEXT NOT NULL DEFAULT ''");
+  }
+  const icPipelineItemColumns = db.pragma("table_info(ic_registration_pipeline_items)")
+    .map((column) => column.name);
+  if (!icPipelineItemColumns.includes("mailbox_id")) {
+    db.exec("ALTER TABLE ic_registration_pipeline_items ADD COLUMN mailbox_id TEXT NOT NULL DEFAULT ''");
+  }
+  if (!icPipelineItemColumns.includes("failure_stage")) {
+    db.exec("ALTER TABLE ic_registration_pipeline_items ADD COLUMN failure_stage TEXT NOT NULL DEFAULT ''");
+  }
+  db.exec(`
+    UPDATE ic_registration_pipeline_items AS items
+    SET failure_stage = CASE
+      WHEN items.address_id IS NULL OR trim(items.email) = '' THEN 'mailbox_submitting'
+      WHEN trim(items.external_account_id) = '' THEN 'registration_wait'
+      WHEN trim(items.agreement_job_id) <> '' THEN 'agreement_wait'
+      WHEN trim(items.payment_link_task_id) <> '' AND EXISTS (
+        SELECT 1 FROM registered_account_payment_links AS links
+        WHERE links.external_account_id = items.external_account_id
+          AND links.task_id = items.payment_link_task_id
+          AND links.status = 'succeeded'
+          AND trim(links.provider_url) <> ''
+      ) THEN 'agreement_submitting'
+      ELSE 'link_wait'
+    END
+    WHERE items.status IN ('failed', 'interrupted') AND trim(items.failure_stage) = ''
+  `);
+  const mailcomPipelineColumns = db.pragma("table_info(mailcom_registration_pipelines)")
+    .map((column) => column.name);
+  if (!mailcomPipelineColumns.includes("agreement_success_count")) {
+    db.exec("ALTER TABLE mailcom_registration_pipelines ADD COLUMN agreement_success_count INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!mailcomPipelineColumns.includes("agreement_failure_count")) {
+    db.exec("ALTER TABLE mailcom_registration_pipelines ADD COLUMN agreement_failure_count INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!mailcomPipelineColumns.includes("link_attempts")) {
+    db.exec("ALTER TABLE mailcom_registration_pipelines ADD COLUMN link_attempts INTEGER NOT NULL DEFAULT 3");
+  }
+  const mailcomItemColumns = db.pragma("table_info(mailcom_registration_pipeline_items)")
+    .map((column) => column.name);
+  if (!mailcomItemColumns.includes("agreement_success_count")) {
+    db.exec("ALTER TABLE mailcom_registration_pipeline_items ADD COLUMN agreement_success_count INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!mailcomItemColumns.includes("agreement_failure_count")) {
+    db.exec("ALTER TABLE mailcom_registration_pipeline_items ADD COLUMN agreement_failure_count INTEGER NOT NULL DEFAULT 0");
+  }
+  const mailcomAttemptColumns = db.pragma("table_info(mailcom_registration_pipeline_attempts)")
+    .map((column) => column.name);
+  const legacyMailcomAttempts = !mailcomAttemptColumns.includes("agreement_status");
+  if (!mailcomAttemptColumns.includes("payment_link_url")) {
+    db.exec("ALTER TABLE mailcom_registration_pipeline_attempts ADD COLUMN payment_link_url TEXT NOT NULL DEFAULT ''");
+  }
+  if (!mailcomAttemptColumns.includes("link_attempt_count")) {
+    db.exec("ALTER TABLE mailcom_registration_pipeline_attempts ADD COLUMN link_attempt_count INTEGER NOT NULL DEFAULT 0");
+    db.exec(`
+      UPDATE mailcom_registration_pipeline_attempts
+      SET link_attempt_count = 1
+      WHERE trim(payment_link_task_id) <> ''
+        OR link_status IN ('submitting', 'running', 'succeeded', 'failed')
+    `);
+  }
+  if (!mailcomAttemptColumns.includes("agreement_job_id")) {
+    db.exec("ALTER TABLE mailcom_registration_pipeline_attempts ADD COLUMN agreement_job_id TEXT NOT NULL DEFAULT ''");
+  }
+  if (!mailcomAttemptColumns.includes("agreement_status")) {
+    db.exec("ALTER TABLE mailcom_registration_pipeline_attempts ADD COLUMN agreement_status TEXT NOT NULL DEFAULT 'pending'");
+  }
+  if (!mailcomAttemptColumns.includes("agreement_country")) {
+    db.exec("ALTER TABLE mailcom_registration_pipeline_attempts ADD COLUMN agreement_country TEXT NOT NULL DEFAULT ''");
+  }
+  if (!mailcomAttemptColumns.includes("agreement_error")) {
+    db.exec("ALTER TABLE mailcom_registration_pipeline_attempts ADD COLUMN agreement_error TEXT NOT NULL DEFAULT ''");
+  }
+  if (!mailcomAttemptColumns.includes("agreement_started_at")) {
+    db.exec("ALTER TABLE mailcom_registration_pipeline_attempts ADD COLUMN agreement_started_at TEXT");
+  }
+  if (!mailcomAttemptColumns.includes("agreement_finished_at")) {
+    db.exec("ALTER TABLE mailcom_registration_pipeline_attempts ADD COLUMN agreement_finished_at TEXT");
+  }
+  if (legacyMailcomAttempts) {
+    db.exec(`
+      UPDATE mailcom_registration_pipeline_attempts
+      SET agreement_status = 'skipped',
+        agreement_finished_at = COALESCE(link_finished_at, finished_at, updated_at)
+    `);
+    db.exec(`
+      UPDATE mailcom_registration_pipeline_attempts
+      SET payment_link_url = COALESCE((
+        SELECT links.provider_url
+        FROM registered_account_payment_links AS links
+        WHERE links.external_account_id = mailcom_registration_pipeline_attempts.external_account_id
+          AND links.task_id = mailcom_registration_pipeline_attempts.payment_link_task_id
+          AND links.status = 'succeeded'
+        LIMIT 1
+      ), '')
+      WHERE link_status = 'succeeded' AND trim(payment_link_url) = ''
+    `);
+  }
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_mailcom_registration_pipeline_attempts_agreement
+    ON mailcom_registration_pipeline_attempts(agreement_job_id, agreement_status)
+  `);
   const inboxLinkColumns = db.pragma("table_info(inbox_link_mailboxes)").map((column) => column.name);
   if (!inboxLinkColumns.includes("source_account_id")) {
     db.exec("ALTER TABLE inbox_link_mailboxes ADD COLUMN source_account_id INTEGER REFERENCES source_accounts(id) ON DELETE SET NULL");
@@ -758,6 +1203,22 @@ export function createDatabase({ filename, seedDemo = false } = {}) {
   if (!accountStatusCheckColumns.includes("evidence_path")) {
     db.exec("ALTER TABLE registered_account_status_checks ADD COLUMN evidence_path TEXT NOT NULL DEFAULT ''");
   }
+  const paymentLinkColumns = db.pragma("table_info(registered_account_payment_links)")
+    .map((column) => column.name);
+  if (!paymentLinkColumns.includes("checkout_proxy_label")) {
+    db.exec("ALTER TABLE registered_account_payment_links ADD COLUMN checkout_proxy_label TEXT NOT NULL DEFAULT ''");
+  }
+  if (!paymentLinkColumns.includes("update_proxy_label")) {
+    db.exec("ALTER TABLE registered_account_payment_links ADD COLUMN update_proxy_label TEXT NOT NULL DEFAULT ''");
+  }
+  if (!paymentLinkColumns.includes("request_country")) {
+    db.exec("ALTER TABLE registered_account_payment_links ADD COLUMN request_country TEXT NOT NULL DEFAULT ''");
+  }
+  db.exec(`
+    UPDATE registered_account_payment_links
+    SET request_country = upper(trim(billing_country))
+    WHERE trim(request_country) = '' AND trim(billing_country) <> ''
+  `);
   const nfapiOAuthColumns = db.pragma("table_info(nfapi_oauth_import_sessions)").map((column) => column.name);
   if (!nfapiOAuthColumns.includes("external_account_id")) {
     db.exec("ALTER TABLE nfapi_oauth_import_sessions ADD COLUMN external_account_id INTEGER NOT NULL DEFAULT 0");
@@ -787,7 +1248,32 @@ export function createDatabase({ filename, seedDemo = false } = {}) {
     extension_api_key: "",
     registration_connector_key: "",
     registration_proxy_pool: "[]",
-    nfapi_base_url: "https://nfapi.naturalflower.cn",
+    registration_proxy_cursor: "0",
+    payment_link_proxy_pool: "[]",
+    payment_link_proxy_cursor: "0",
+    payment_link_checkout_proxy_pool: "[]",
+    payment_link_update_proxy_pool: "[]",
+    payment_link_checkout_proxy_cursor: "0",
+    payment_link_update_proxy_cursor: "0",
+    payment_link_proxy_source_url: "",
+    payment_link_country: "DE",
+    payment_link_rotate_checkout_proxy: "true",
+    payment_link_rotate_update_proxy: "true",
+    payment_link_apply_checkout_update: "true",
+    payment_agreement_herosms_api_key_encrypted: "",
+    payment_agreement_herosms_max_price: "1",
+    payment_agreement_herosms_change_retries: "2",
+    payment_agreement_herosms_wait_seconds: "120",
+    payment_agreement_country: "",
+    payment_agreement_proxy_pool: "[]",
+    openai_sms_country: "TH",
+    openai_sms_max_price: "1",
+    openai_sms_claim_timeout_seconds: "120",
+    openai_sms_claim_interval_seconds: "2",
+    openai_sms_wait_seconds: "180",
+    openai_sms_concurrency: "1",
+    openai_sms_browser_mode: "camoufox_headed",
+    nfapi_base_url: "",
     nfapi_admin_api_key_encrypted: "",
     nfapi_import_defaults: "{}",
     nfapi_last_connected_at: "",

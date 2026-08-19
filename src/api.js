@@ -1,8 +1,25 @@
 export class ApiError extends Error {
-  constructor(message, status, code) {
+  constructor(message, status, code, details = null) {
     super(message);
     this.status = status;
     this.code = code;
+    this.details = details && typeof details === "object" ? details : null;
+    if (this.details) {
+      for (const key of [
+        "partial",
+        "existing",
+        "existing_count",
+        "created",
+        "created_count",
+        "total",
+        "total_count",
+        "remaining",
+        "items",
+        "account",
+      ]) {
+        if (Object.hasOwn(this.details, key)) this[key] = this.details[key];
+      }
+    }
   }
 }
 
@@ -27,7 +44,7 @@ export async function api(path, options = {}) {
   const contentType = response.headers.get("content-type") || "";
   const data = contentType.includes("application/json") ? await response.json() : await response.text();
   if (!response.ok) {
-    throw new ApiError(data?.error || data?.message || data || "请求失败", response.status, data?.code);
+    throw new ApiError(data?.error || data?.message || data || "请求失败", response.status, data?.code, data);
   }
   return data;
 }

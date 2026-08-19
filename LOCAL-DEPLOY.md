@@ -11,8 +11,8 @@ Recommended:
 - Linux with Docker Engine and Docker Compose v2.24 or newer
 - Internet access while the container image and dependencies are built
 - For full mode, enough disk and memory for Chromium, Playwright, Camoufox, and
-  the headed browser and Pickup storefront runtimes; the images are
-  substantially larger than core mode
+  the headed browser, Pickup storefront, and payment-link extractor runtimes;
+  the images are substantially larger than core mode
 
 Native alternative:
 
@@ -50,10 +50,23 @@ Core mode deliberately leaves `REGISTRATION_SERVICE_URL` and
 mailbox, alias, address, verification-code, and connector features remain
 available.
 
+The AliasHub image installs Debian Chromium and its setuid sandbox for the
+Mail.com official-alias workflow. Compose pins
+`MAILCOM_BROWSER_EXECUTABLE=/usr/bin/chromium`, runs AliasHub as the configured
+non-root UID/GID, enables an init process to reap browser children, and assigns
+a 1 GiB `/dev/shm`. A native installation that uses Google Chrome instead must
+set `MAILCOM_BROWSER_EXECUTABLE=/usr/bin/google-chrome` in `.env`.
+
+Chromium is intentionally part of the core runtime image so Mail.com alias
+creation works without mounting a host browser. This adds roughly 100--150 MB
+of compressed download and several hundred MB to the unpacked image; deployments
+that do not use this feature still pay that image-size cost.
+
 ## Full suite Docker Compose
 
-The repository includes the complete registration worker, browser runtime, and
-Mail Pickup source. Start all three services with the full override:
+The repository includes the complete registration worker, browser runtime, Mail
+Pickup source, and payment-link extractor. Start all four services with the full
+override:
 
 ```bash
 ./scripts/setup-local.sh --full
@@ -68,13 +81,15 @@ build because it installs multiple browser engines. The local endpoints are:
 - Registration worker UI/API: `http://127.0.0.1:8000`
 - Registration browser/noVNC: `http://127.0.0.1:6080/vnc.html`
 - Mail Pickup buyer/admin service: `http://127.0.0.1:4190`
+- Payment-link extractor workbench/API: `http://127.0.0.1:18794`
 
 The worker UI uses `REGISTRATION_SERVICE_TOKEN` as its login password. The full
 Compose override passes that exact value as worker `APP_PASSWORD`, so the worker
 and AliasHub cannot accidentally use different tokens. noVNC uses the separate
 `REGISTRATION_VNC_PASSWORD`. Pickup uses generated `PICKUP_INBOUND_TOKEN` and
 `PICKUP_TOKEN_SECRET` values and defaults to the AliasHub administrator login.
-All of these values are stored only in `.env`.
+The extractor uses a separate generated `PAYMENT_LINK_SERVICE_PASSWORD`. All of
+these values are stored only in `.env`.
 
 Use the same two Compose files for every lifecycle command:
 
@@ -99,10 +114,10 @@ and browser runtime are required.
 
 ## Remote server
 
-The supplied Compose files publish AliasHub, the worker UI/API, noVNC, and Mail
-Pickup only on the server's loopback interface. Keep those bindings and place
-Caddy, Nginx, Traefik, or another HTTPS reverse proxy in front of only the
-endpoints that must be reachable remotely.
+The supplied Compose files publish AliasHub, the worker UI/API, noVNC, Mail
+Pickup, and the payment-link workbench only on the server's loopback interface.
+Keep those bindings and place Caddy, Nginx, Traefik, or another HTTPS reverse
+proxy in front of only the endpoints that must be reachable remotely.
 
 Before starting the service, set the public HTTPS URL in `.env`:
 
@@ -142,8 +157,10 @@ service name must be supplied explicitly. Docker Compose users do not need it.
 - AliasHub SQLite database and attachments: `data/`
 - Full-mode worker SQLite database: `data/registration-worker/`
 - Full-mode Mail Pickup database and browser profile: `data/mail-pickup/`
+- Full-mode payment-link extractor logs: `data/payment-link-extractor/`
 - Default bind addresses: `127.0.0.1:4180`, and in full mode also
-  `127.0.0.1:8000`, `127.0.0.1:6080`, and `127.0.0.1:4190`
+  `127.0.0.1:8000`, `127.0.0.1:6080`, `127.0.0.1:4190`, and
+  `127.0.0.1:18794`
 - Demo data: disabled
 
 Keep `.env` and `data/` together in every backup. Changing or losing
@@ -208,6 +225,28 @@ or CDP endpoint through the documented `PICKUP_LDXP_*` and `LDXP_*` environment
 variables, or connect the storefront from the Pickup administrator page. These
 values and the Playwright browser profile are runtime data and must not be
 committed. Native setup details are in `mail-pickup/README.md`.
+
+## Payment-link extractor configuration
+
+Full Compose supplies the internal service URL automatically:
+
+```dotenv
+PAYMENT_LINK_SERVICE_URL=http://payment-link-extractor:18794
+```
+
+`setup-local.sh --full` generates one `PAYMENT_LINK_SERVICE_PASSWORD` and passes
+the same value to AliasHub and the extractor. Do not set the container-network
+URL manually in the root `.env`; the Compose override owns it. Change
+`PAYMENT_LINK_SERVICE_PORT` only when the loopback host port conflicts with
+another local service.
+
+AliasHub sends each selected account's Access Token and the independently chosen
+Checkout and Update proxies over the private Compose network. The extractor
+keeps tasks in memory and writes only configured logs to
+`data/payment-link-extractor/`. Proxy subscriptions, proxy credentials, task
+inputs, and Access Tokens must remain in local configuration and must not be
+added to the repository. Standalone Web/CLI setup is documented in
+`payment-link-extractor/README.md`.
 
 ## Optional SUB2-compatible service
 
@@ -295,7 +334,8 @@ timestamped backup under `deploy-backups/` containing:
 
 - the root `.env` and optional `registration-worker/.env`;
 - the complete `data/` tree, including AliasHub SQLite, attachments, and the
-  full-mode worker and Mail Pickup databases, browser profiles, and state;
+  full-mode worker and Mail Pickup databases, browser profiles, extractor logs,
+  and state;
 - SHA-256 manifests captured before and after the source replacement.
 
 The command refuses to continue if the local environment or data paths are not

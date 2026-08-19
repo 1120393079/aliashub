@@ -6,6 +6,7 @@ import test from "node:test";
 import Database from "better-sqlite3";
 import { createDatabase, createSourceAccount, getSetting, nowIso, setSetting } from "../db.js";
 import { createApp } from "../index.js";
+import { RegistrationService } from "../registration-service.js";
 import { jsonRequest } from "./http-harness.js";
 
 class FakeRegistrationClient {
@@ -19,6 +20,7 @@ class FakeRegistrationClient {
     this.proxyInspectionError = null;
     this.proxyInspectionHandler = null;
     this.createError = null;
+    this.accountCreateError = null;
     this.accountActions = [];
     this.actionTasks = new Map();
   }
@@ -123,6 +125,11 @@ class FakeRegistrationClient {
   }
 
   async createAccount(payload) {
+    if (this.accountCreateError) {
+      throw typeof this.accountCreateError === "function"
+        ? this.accountCreateError(payload)
+        : this.accountCreateError;
+    }
     const account = {
       id: 2_000 + this.importedAccounts.length,
       ...payload,
@@ -241,6 +248,166 @@ test("registration job migration preserves legacy occupied alias history", () =>
   }
 });
 
+test("RegistrationService createJobs preserves exact addressIds and rejects invalid selections", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "aliashub-registration-address-ids-test-"));
+  const db = createDatabase({ filename: path.join(directory, "test.db"), seedDemo: false });
+  const client = new FakeRegistrationClient();
+  const registration = new RegistrationService({
+    db,
+    graph: {},
+    client,
+    publicBaseUrl: "https://alias.test/alias-hub",
+    pickup: { registrationProtectionEnabled: () => false },
+  });
+
+  try {
+    const account = createSourceAccount(db, { email: "exact-owner@icloud.com", provider: "icloud" });
+    const otherAccount = createSourceAccount(db, { email: "other-owner@icloud.com", provider: "icloud" });
+    db.prepare("UPDATE source_accounts SET status = 'connected', updated_at = ? WHERE id IN (?, ?)")
+      .run(nowIso(), account.id, otherAccount.id);
+    const insertAddress = db.prepare(`
+      INSERT INTO addresses (
+        account_id, address, kind, status, strategy, label, purpose, remote_confirmed, created_at, updated_at
+      ) VALUES (?, ?, 'official', ?, 'icloud_hide_my_email', '精确注册地址测试', 'ChatGPT 注册', 1, ?, ?)
+    `);
+    const addAddress = (ownerId, email, status = "active") => Number(insertAddress.run(
+      ownerId,
+      email,
+      status,
+      nowIso(),
+      nowIso(),
+    ).lastInsertRowid);
+    const firstId = addAddress(account.id, "exact-first@icloud.com");
+    const secondId = addAddress(account.id, "exact-second@icloud.com");
+    const thirdId = addAddress(account.id, "exact-third@icloud.com");
+    const foreignId = addAddress(otherAccount.id, "exact-foreign@icloud.com");
+    const disabledId = addAddress(account.id, "exact-disabled@icloud.com", "disabled");
+    const requestedIds = [thirdId, firstId, secondId];
+
+    const jobs = await registration.createJobs({
+      accountId: account.id,
+      addressIds: requestedIds,
+      count: requestedIds.length,
+      concurrency: 20,
+      browserMode: "headless",
+      proxySelection: "direct",
+    });
+
+    assert.deepEqual(jobs.map((item) => item.address_id), requestedIds);
+    assert.deepEqual(jobs.map((item) => item.email), [
+      "exact-third@icloud.com",
+      "exact-first@icloud.com",
+      "exact-second@icloud.com",
+    ]);
+    assert.deepEqual(client.created.map((item) => item.email), jobs.map((item) => item.email));
+    assert.ok(client.created.every((item) => item.extra.registration_batch_concurrency === 3));
+
+    const createdBeforeRejections = client.created.length;
+    await assert.rejects(
+      registration.createJobs({
+        accountId: account.id,
+        addressIds: [firstId],
+        count: 1,
+        concurrency: 21,
+      }),
+      (error) => error?.status === 400 && /1 到 20/.test(error.message),
+    );
+    await assert.rejects(
+      registration.createJobs({ accountId: account.id, addressIds: [firstId, firstId], count: 2 }),
+      (error) => error?.status === 400 && /无效或重复/.test(error.message),
+    );
+    await assert.rejects(
+      registration.createJobs({ accountId: account.id, addressIds: [foreignId], count: 1 }),
+      (error) => error?.status === 409 && /不可用/.test(error.message),
+    );
+    await assert.rejects(
+      registration.createJobs({ accountId: account.id, addressIds: [disabledId], count: 1 }),
+      (error) => error?.status === 409 && /不可用/.test(error.message),
+    );
+    assert.equal(client.created.length, createdBeforeRejections);
+  } finally {
+    db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("registered account deletion accepts more than 500 accounts", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "aliashub-registration-bulk-delete-test-"));
+  const db = createDatabase({ filename: path.join(directory, "test.db"), seedDemo: false });
+  const deletedIds = new Set();
+
+  try {
+    const source = createSourceAccount(db, { email: "bulk-delete-owner@outlook.com" });
+    const base = db.prepare("SELECT * FROM addresses WHERE account_id = ? AND kind = 'primary'").get(source.id);
+    const timestamp = nowIso();
+    const accounts = new Map();
+    const accountIds = Array.from({ length: 802 }, (_, index) => 50_000 + index);
+    const jobIds = [];
+    const insertJob = db.prepare(`
+      INSERT INTO registration_jobs (
+        account_id, address_id, base_address_id, email, external_account_id, status, stage,
+        browser_mode, proxy_label, progress_current, progress_total, message,
+        created_at, updated_at, finished_at
+      ) VALUES (?, ?, ?, ?, ?, 'completed', 'completed', 'headless', '直连', 1, 1,
+        '批量删除测试', ?, ?, ?)
+    `);
+    const insertMetadata = db.prepare(`
+      INSERT INTO registered_account_metadata (
+        external_account_id, email, custom_name, group_name, created_at, updated_at
+      ) VALUES (?, ?, '', '批量删除测试', ?, ?)
+    `);
+    db.transaction(() => {
+      accountIds.forEach((id, index) => {
+        const email = `bulk-delete-${index + 1}@example.com`;
+        accounts.set(id, { id, email, platform: "chatgpt" });
+        jobIds.push(Number(insertJob.run(
+          source.id,
+          base.id,
+          base.id,
+          email,
+          String(id),
+          timestamp,
+          timestamp,
+          timestamp,
+        ).lastInsertRowid));
+        insertMetadata.run(String(id), email, timestamp, timestamp);
+      });
+    })();
+
+    const registration = new RegistrationService({
+      db,
+      graph: {},
+      client: {
+        async getAccount(id) {
+          return accounts.get(Number(id)) || null;
+        },
+        async deleteAccount(id) {
+          deletedIds.add(Number(id));
+          return { ok: true };
+        },
+      },
+      pickup: { registrationProtectionEnabled: () => false },
+    });
+
+    assert.throws(
+      () => registration.deleteJobs({ ids: jobIds.slice(0, 501) }),
+      (error) => error?.status === 400 && /单次最多删除 500 个注册记录/.test(error.message),
+    );
+
+    const result = await registration.deleteRegisteredAccounts({ ids: accountIds });
+    assert.equal(result.requested, 802);
+    assert.equal(result.deleted, 802);
+    assert.deepEqual(result.deleted_ids, accountIds);
+    assert.deepEqual(result.failed, []);
+    assert.equal(deletedIds.size, 802);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM registered_account_metadata").get().count, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM registration_jobs").get().count, 802);
+  } finally {
+    db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("registration integration generates isolated addresses and exposes mailbox messages", async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "aliashub-registration-api-test-"));
   const db = createDatabase({ filename: path.join(directory, "test.db"), seedDemo: false });
@@ -257,6 +424,7 @@ test("registration integration generates isolated addresses and exposes mailbox 
       return scanResult;
     },
   };
+  const inboxLinkFetchUrls = [];
   const checkoutProbeCalls = [];
   const checkoutProxy = "http://de-user:de-password@de-proxy.example:8080";
   const trialProbeCalls = [];
@@ -268,6 +436,14 @@ test("registration integration generates isolated addresses and exposes mailbox 
     graph,
     registrationClient: client,
     publicBaseUrl: "https://alias.test/alias-hub",
+    dataEncryptionKey: "registration-api-test-encryption-key",
+    inboxLinkFetchFn: async (input) => {
+      inboxLinkFetchUrls.push(String(input));
+      return new Response(JSON.stringify({ messages: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
     checkoutProxyResolver: async () => checkoutProxy,
     checkoutProbe: async ({ accessToken, proxy }) => {
       checkoutProbeCalls.push({ accessToken, proxy });
@@ -405,7 +581,7 @@ test("registration integration generates isolated addresses and exposes mailbox 
         "https://proxy.example:8443",
         "socks5://127.0.0.1:1080",
         "plain-proxy.example:3128",
-        "gate-us.kookeey.info:1000:5465911-root1234:base-secret-TR-50663419-30m",
+        "gate-us.kookeey.info:1000:kookeey-user:base-secret-TR-50663419-30m",
         "[2001:db8::2]:8081:ipv6-user:ipv6-password",
       ];
       const saved = await jsonRequest(runtime.app, "/api/registration/proxies", {
@@ -419,7 +595,7 @@ test("registration integration generates isolated addresses and exposes mailbox 
         accepted[1],
         accepted[2],
         "http://plain-proxy.example:3128",
-        "http://5465911-root1234:base-secret-TR-50663419-30m@gate-us.kookeey.info:1000",
+        "http://kookeey-user:base-secret-TR-50663419-30m@gate-us.kookeey.info:1000",
         "http://ipv6-user:ipv6-password@[2001:db8::2]:8081",
       ]);
       assert.deepEqual(saved.body.proxyMetadata, [
@@ -436,12 +612,12 @@ test("registration integration generates isolated addresses and exposes mailbox 
         null,
       ]);
       const serializedMetadata = JSON.stringify(saved.body.proxyMetadata);
-      assert.doesNotMatch(serializedMetadata, /5465911-root1234|base-secret|50663419|gate-us/i);
+      assert.doesNotMatch(serializedMetadata, /kookeey-user|base-secret|50663419|gate-us/i);
 
       const options = await jsonRequest(runtime.app, "/api/registration/options");
       assert.equal(options.response.status, 200);
       assert.deepEqual(options.body.proxyMetadata, saved.body.proxyMetadata);
-      assert.doesNotMatch(JSON.stringify(options.body.proxyMetadata), /5465911-root1234|base-secret|50663419|gate-us/i);
+      assert.doesNotMatch(JSON.stringify(options.body.proxyMetadata), /kookeey-user|base-secret|50663419|gate-us/i);
     });
 
     await t.test("encodes credentials from host-port-user-password proxy syntax before forwarding", async () => {
@@ -2374,6 +2550,186 @@ test("registration integration generates isolated addresses and exposes mailbox 
       });
       assert.equal(unrelated.response.status, 409);
       assert.match(unrelated.body.error, /没有可关联的已完成注册记录/);
+    });
+
+    await t.test("imports external accounts with encrypted inbox links and rolls back partial failures", async () => {
+      const email = "external-owner@example.com";
+      const inboxLink = "https://dispose.lol/ib/ExternalCaseSensitiveKey";
+      const imported = await jsonRequest(runtime.app, "/api/registration/accounts/import-local", {
+        method: "POST",
+        body: JSON.stringify({ content: `${email}----${inboxLink}` }),
+      });
+      assert.equal(imported.response.status, 201);
+      assert.equal(imported.body.imported, 1);
+      assert.equal(imported.body.restored, 0);
+      assert.equal(imported.body.external_imported, 1);
+      assert.equal(imported.body.items[0].import_source, "external");
+      assert.equal(imported.body.items[0].previous_account_id, 0);
+
+      const remote = client.importedAccounts.find((item) => item.email === email);
+      assert.ok(remote);
+      assert.equal(remote.password, "");
+      assert.ok(remote.provider_accounts.some((item) => (
+        item.provider_name === "outlook_email_api" && item.login_identifier === email
+      )));
+      assert.ok(remote.provider_resources.some((item) => (
+        item.provider_name === "outlook_email_api" && item.handle === email
+      )));
+      assert.doesNotMatch(JSON.stringify(remote), /ExternalCaseSensitiveKey/);
+
+      const job = db.prepare("SELECT * FROM registration_jobs WHERE id = ?")
+        .get(imported.body.items[0].registration_job_id);
+      assert.equal(job.email, email);
+      assert.equal(job.external_account_id, String(imported.body.items[0].id));
+      assert.equal(job.status, "completed");
+      assert.equal(job.stage, "external_import");
+      assert.equal(job.proxy_label, "直连");
+      assert.ok(job.account_id && job.address_id && job.base_address_id);
+
+      const mailbox = db.prepare(`
+        SELECT inbox_link_mailboxes.*, source_accounts.provider, source_accounts.status AS source_status,
+          addresses.address, addresses.kind
+        FROM inbox_link_mailboxes
+        JOIN source_accounts ON source_accounts.id = inbox_link_mailboxes.source_account_id
+        JOIN addresses ON addresses.id = ?
+        WHERE inbox_link_mailboxes.email = ? COLLATE NOCASE
+      `).get(job.address_id, email);
+      assert.equal(mailbox.provider, "inbox_link");
+      assert.equal(mailbox.source_status, "connected");
+      assert.equal(mailbox.address, email);
+      assert.equal(mailbox.kind, "primary");
+      assert.match(mailbox.inbox_key_encrypted, /^v1\./);
+      assert.doesNotMatch(mailbox.inbox_key_encrypted, /ExternalCaseSensitiveKey/);
+
+      const accounts = await jsonRequest(runtime.app, "/api/registration/accounts");
+      assert.equal(accounts.body.items.some((item) => (
+        Number(item.id) === Number(imported.body.items[0].id) && item.email === email
+      )), true);
+
+      const duplicate = await jsonRequest(runtime.app, "/api/registration/accounts/import-local", {
+        method: "POST",
+        body: JSON.stringify({ content: `${email}----${inboxLink}` }),
+      });
+      assert.equal(duplicate.response.status, 409);
+      assert.match(duplicate.body.error, /已在本地账号池/);
+
+      const conflictingEmail = "conflicting-owner@example.com";
+      const remoteCountBeforeConflict = client.importedAccounts.length;
+      const conflict = await jsonRequest(runtime.app, "/api/registration/accounts/import-local", {
+        method: "POST",
+        body: JSON.stringify({ content: `${conflictingEmail}----${inboxLink}` }),
+      });
+      assert.equal(conflict.response.status, 409);
+      assert.match(conflict.body.error, /取件链接已绑定到其他邮箱/);
+      assert.equal(client.importedAccounts.length, remoteCountBeforeConflict);
+      assert.equal(client.importedAccounts.some((item) => item.email === conflictingEmail), false);
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM registration_jobs WHERE email = ? COLLATE NOCASE")
+        .get(conflictingEmail).count, 0);
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM inbox_link_mailboxes WHERE email = ? COLLATE NOCASE")
+        .get(conflictingEmail).count, 0);
+
+      const restoredLinkEmail = "restored-with-link@example.com";
+      const mappedAt = nowIso();
+      const legacyAddress = db.prepare(`
+        INSERT INTO addresses (
+          account_id, parent_address_id, address, kind, status, strategy, created_at, updated_at
+        ) VALUES (?, ?, ?, 'split', 'active', 'manual', ?, ?)
+      `).run(account.id, base.id, restoredLinkEmail, mappedAt, mappedAt);
+      const legacyJob = db.prepare(`
+        INSERT INTO registration_jobs (
+          account_id, address_id, base_address_id, email, external_account_id, status, stage,
+          browser_mode, proxy_label, progress_current, progress_total, message,
+          created_at, updated_at, finished_at
+        ) VALUES (?, ?, ?, ?, '1888', 'completed', 'completed', 'headless', '直连', 1, 1,
+          '历史注册完成', ?, ?, ?)
+      `).run(
+        account.id,
+        Number(legacyAddress.lastInsertRowid),
+        base.id,
+        restoredLinkEmail,
+        mappedAt,
+        mappedAt,
+        mappedAt,
+      );
+      const restoredWithLink = await jsonRequest(runtime.app, "/api/registration/accounts/import-local", {
+        method: "POST",
+        body: JSON.stringify({
+          content: `${restoredLinkEmail}----https://dispose.lol/ib/RestoredLinkKey`,
+        }),
+      });
+      assert.equal(restoredWithLink.response.status, 201);
+      assert.equal(restoredWithLink.body.restored, 1);
+      assert.equal(restoredWithLink.body.external_imported, 0);
+      assert.equal(restoredWithLink.body.items[0].registration_job_id, Number(legacyJob.lastInsertRowid));
+      const remappedJob = db.prepare(`
+        SELECT registration_jobs.*, source_accounts.provider, addresses.address AS mapped_address
+        FROM registration_jobs
+        JOIN source_accounts ON source_accounts.id = registration_jobs.account_id
+        JOIN addresses ON addresses.id = registration_jobs.address_id
+        WHERE registration_jobs.id = ?
+      `).get(Number(legacyJob.lastInsertRowid));
+      assert.equal(remappedJob.provider, "inbox_link");
+      assert.equal(remappedJob.mapped_address, restoredLinkEmail);
+      assert.notEqual(remappedJob.address_id, Number(legacyAddress.lastInsertRowid));
+      assert.equal(remappedJob.address_id, remappedJob.base_address_id);
+      const fetchCountBeforeMailboxRead = inboxLinkFetchUrls.length;
+      const restoredMailbox = await jsonRequest(
+        runtime.app,
+        `/api/registration/accounts/${restoredWithLink.body.items[0].id}/emails`,
+      );
+      assert.equal(restoredMailbox.response.status, 200);
+      assert.equal(restoredMailbox.body.email, restoredLinkEmail);
+      assert.equal(inboxLinkFetchUrls.slice(fetchCountBeforeMailboxRead)
+        .some((url) => url.includes("RestoredLinkKey")), true);
+
+      const failedEmail = "remote-failure@example.com";
+      client.accountCreateError = Object.assign(new Error("remote create failed"), { status: 502 });
+      const failed = await jsonRequest(runtime.app, "/api/registration/accounts/import-local", {
+        method: "POST",
+        body: JSON.stringify({
+          content: `${failedEmail}----https://dispose.lol/ib/RemoteFailureKey`,
+        }),
+      });
+      client.accountCreateError = null;
+      assert.equal(failed.response.status, 502);
+      assert.equal(failed.body.error, "服务器处理请求失败");
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM registration_jobs WHERE email = ? COLLATE NOCASE")
+        .get(failedEmail).count, 0);
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM inbox_link_mailboxes WHERE email = ? COLLATE NOCASE")
+        .get(failedEmail).count, 0);
+
+      const concurrentEmail = "concurrent-external@example.com";
+      const concurrentLink = "https://dispose.lol/ib/ConcurrentExternalKey";
+      const originalCreateAccount = client.createAccount.bind(client);
+      let signalCreateStarted;
+      let releaseCreate;
+      const createStarted = new Promise((resolve) => { signalCreateStarted = resolve; });
+      const createGate = new Promise((resolve) => { releaseCreate = resolve; });
+      client.createAccount = async (payload) => {
+        if (payload.email === concurrentEmail) {
+          signalCreateStarted();
+          await createGate;
+        }
+        return originalCreateAccount(payload);
+      };
+      const firstImportPromise = jsonRequest(runtime.app, "/api/registration/accounts/import-local", {
+        method: "POST",
+        body: JSON.stringify({ content: `${concurrentEmail}----${concurrentLink}` }),
+      });
+      await createStarted;
+      const busyImport = await jsonRequest(runtime.app, "/api/registration/accounts/import-local", {
+        method: "POST",
+        body: JSON.stringify({ content: `${concurrentEmail}----${concurrentLink}` }),
+      });
+      releaseCreate();
+      const firstImport = await firstImportPromise;
+      client.createAccount = originalCreateAccount;
+      assert.equal(firstImport.response.status, 201);
+      assert.equal(busyImport.response.status, 409);
+      assert.match(busyImport.body.error, /正在导入/);
+      assert.equal(client.importedAccounts.filter((item) => item.email === concurrentEmail).length, 1);
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM registration_jobs WHERE email = ? COLLATE NOCASE")
+        .get(concurrentEmail).count, 1);
     });
   } finally {
     await new Promise((resolve) => setImmediate(resolve));

@@ -9,17 +9,17 @@ import { createApp, inboxLinkChatgptStatus } from "../index.js";
 import { jsonRequest } from "./http-harness.js";
 
 const poolText = [
-  "fuchsia.show.4f@icloud.com https://dispose.lol/ib/rtuFbD4cPhNyWr0B",
-  "viols.kiln-8t@icloud.com https://dispose.lol/ib/CtZAKXOthrHrFxcp",
-  "lay_cluster_4f@icloud.com https://dispose.lol/ib/wztOs7KshVrCaJ0H",
+  "fixture-one@icloud.com https://dispose.lol/ib/test-mailbox-key-0001",
+  "fixture-two@icloud.com https://dispose.lol/ib/test-mailbox-key-0002",
+  "fixture-three@icloud.com https://dispose.lol/ib/test-mailbox-key-0003",
 ].join("\r\n");
 
 test("parses arbitrary HTTPS inbox links and deduplicates exact rows", () => {
   const entries = parseInboxLinkPool(`${poolText}\n${poolText.split(/\r?\n/)[0]}`);
   assert.equal(entries.length, 3);
-  assert.equal(entries[0].email, "fuchsia.show.4f@icloud.com");
-  assert.equal(entries[0].inboxLink, "https://dispose.lol/ib/rtuFbD4cPhNyWr0B");
-  assert.equal(entries[0].maskedLink, "https://dispose.lol/ib/rtuF...Wr0B");
+  assert.equal(entries[0].email, "fixture-one@icloud.com");
+  assert.equal(entries[0].inboxLink, "https://dispose.lol/ib/test-mailbox-key-0001");
+  assert.equal(entries[0].maskedLink, "https://dispose.lol/ib/test...0001");
 
   const generic = parseInboxLinkPool(
     "buyer@custom-domain.example https://pickup.example.net/p/signed-token-1234?view=mail#latest",
@@ -31,21 +31,21 @@ test("parses arbitrary HTTPS inbox links and deduplicates exact rows", () => {
 
 test("rejects invalid or conflicting inbox-link rows without echoing the key", () => {
   const invalidRows = [
-    "not-an-email https://dispose.lol/ib/rtuFbD4cPhNyWr0B",
-    "one@example.com http://dispose.lol/ib/rtuFbD4cPhNyWr0B",
-    "one@example.com ftp://example.com/mailbox/rtuFbD4cPhNyWr0B",
-    "one@example.com https://user:password@example.com/mailbox/rtuFbD4cPhNyWr0B",
+    "not-an-email https://dispose.lol/ib/test-mailbox-key-0001",
+    "one@example.com http://dispose.lol/ib/test-mailbox-key-0001",
+    "one@example.com ftp://example.com/mailbox/test-mailbox-key-0001",
+    "one@example.com https://user:password@example.com/mailbox/test-mailbox-key-0001",
   ];
   for (const row of invalidRows) {
     assert.throws(() => parseInboxLinkPool(row), (error) => {
       assert.equal(error.status, 400);
-      assert.doesNotMatch(error.message, /rtuFbD4cPhNyWr0B/);
+      assert.doesNotMatch(error.message, /test-mailbox-key-0001/);
       return true;
     });
   }
   assert.throws(() => parseInboxLinkPool([
-    "same@example.com https://dispose.lol/ib/rtuFbD4cPhNyWr0B",
-    "same@example.com https://dispose.lol/ib/CtZAKXOthrHrFxcp",
+    "same@example.com https://dispose.lol/ib/test-mailbox-key-0001",
+    "same@example.com https://dispose.lol/ib/test-mailbox-key-0002",
   ].join("\n")), /邮箱.*重复/);
 });
 
@@ -75,7 +75,7 @@ test("binds links encrypted and creates registration tasks from the saved mailbo
     assert.equal(imported.body.created, 3);
     assert.equal(imported.body.available, 3);
     assert.equal(imported.body.items.every((item) => item.mail_center_bound && item.source_account_id), true);
-    assert.doesNotMatch(JSON.stringify(imported.body), /rtuFbD4cPhNyWr0B|CtZAKXOthrHrFxcp/);
+    assert.doesNotMatch(JSON.stringify(imported.body), /test-mailbox-key-0001|test-mailbox-key-0002/);
     assert.equal(imported.body.items[0].masked_link.includes("..."), true);
 
     const storedBindings = db.prepare(`
@@ -84,15 +84,33 @@ test("binds links encrypted and creates registration tasks from the saved mailbo
     `).all();
     assert.equal(storedBindings.length, 3);
     assert.match(storedBindings[0].inbox_key_encrypted, /^v1\./);
-    assert.equal(storedBindings[0].inbox_key_encrypted.includes("rtuFbD4cPhNyWr0B"), false);
-    assert.equal(storedBindings[0].inbox_key_hash.includes("rtuFbD4cPhNyWr0B"), false);
-    assert.equal(storedBindings[0].inbox_key_preview, "https://dispose.lol/ib/rtuF...Wr0B");
+    assert.equal(storedBindings[0].inbox_key_encrypted.includes("test-mailbox-key-0001"), false);
+    assert.equal(storedBindings[0].inbox_key_hash.includes("test-mailbox-key-0001"), false);
+    assert.equal(storedBindings[0].inbox_key_preview, "https://dispose.lol/ib/test...0001");
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM source_accounts WHERE provider = 'inbox_link'").get().count, 3);
     assert.equal(db.prepare(`
       SELECT COUNT(*) AS count FROM addresses
       JOIN source_accounts ON source_accounts.id = addresses.account_id
       WHERE source_accounts.provider = 'inbox_link' AND addresses.kind = 'primary'
     `).get().count, 3);
+
+    const originalBinding = db.prepare(`
+      SELECT inbox_key_hash, inbox_key_encrypted FROM inbox_link_mailboxes
+      WHERE email = ? COLLATE NOCASE
+    `).get("fixture-one@icloud.com");
+    const blockedReplacement = await jsonRequest(runtime.app, "/api/inbox-link-mailboxes/import", {
+      method: "POST",
+      body: JSON.stringify({
+        poolText: "fixture-one@icloud.com https://dispose.lol/ib/replacement-key",
+        replaceExisting: false,
+      }),
+    });
+    assert.equal(blockedReplacement.response.status, 409);
+    assert.match(blockedReplacement.body.error, /已绑定其他取件链接/);
+    assert.deepEqual(db.prepare(`
+      SELECT inbox_key_hash, inbox_key_encrypted FROM inbox_link_mailboxes
+      WHERE email = ? COLLATE NOCASE
+    `).get("fixture-one@icloud.com"), originalBinding);
 
     const defaultAccounts = await jsonRequest(runtime.app, "/api/accounts");
     const mailCenterAccounts = await jsonRequest(runtime.app, "/api/accounts?includeInboxLinks=true");
@@ -120,18 +138,18 @@ test("binds links encrypted and creates registration tasks from the saved mailbo
     assert.equal(response.response.status, 202);
     assert.equal(response.body.items.length, 2);
     assert.deepEqual(response.body.items.map((item) => item.email), [
-      "fuchsia.show.4f@icloud.com",
-      "viols.kiln-8t@icloud.com",
+      "fixture-one@icloud.com",
+      "fixture-two@icloud.com",
     ]);
     assert.equal(client.created.length, 2);
-    assert.equal(client.created[0].email, "fuchsia.show.4f@icloud.com");
+    assert.equal(client.created[0].email, "fixture-one@icloud.com");
     assert.equal(client.created[0].extra.mail_provider, "dispose_inbox_link");
     assert.equal(
       client.created[0].extra.dispose_inbox_link_pool_text,
-      "fuchsia.show.4f@icloud.com https://dispose.lol/ib/rtuFbD4cPhNyWr0B",
+      "fixture-one@icloud.com https://dispose.lol/ib/test-mailbox-key-0001",
     );
-    assert.equal(client.created[1].extra.dispose_inbox_link_pool_text.includes("rtuFbD4cPhNyWr0B"), false);
-    assert.doesNotMatch(JSON.stringify(response.body), /rtuFbD4cPhNyWr0B|CtZAKXOthrHrFxcp/);
+    assert.equal(client.created[1].extra.dispose_inbox_link_pool_text.includes("test-mailbox-key-0001"), false);
+    assert.doesNotMatch(JSON.stringify(response.body), /test-mailbox-key-0001|test-mailbox-key-0002/);
 
     const boundAfterSubmit = await jsonRequest(runtime.app, "/api/inbox-link-mailboxes");
     assert.equal(boundAfterSubmit.body.available, 1);
@@ -160,8 +178,8 @@ test("binds links encrypted and creates registration tasks from the saved mailbo
       ...item,
       bound: Boolean(item.account_id && item.address_id && item.base_address_id),
     })), [
-      { account_id: 1, address_id: 1, base_address_id: 1, email: "fuchsia.show.4f@icloud.com", bound: true },
-      { account_id: 2, address_id: 2, base_address_id: 2, email: "viols.kiln-8t@icloud.com", bound: true },
+      { account_id: 1, address_id: 1, base_address_id: 1, email: "fixture-one@icloud.com", bound: true },
+      { account_id: 2, address_id: 2, base_address_id: 2, email: "fixture-two@icloud.com", bound: true },
     ]);
 
     const completedAt = new Date().toISOString();
@@ -169,13 +187,13 @@ test("binds links encrypted and creates registration tasks from the saved mailbo
       UPDATE registration_jobs
       SET status = 'completed', deleted_at = ?, finished_at = ?, updated_at = ?
       WHERE email = ? COLLATE NOCASE
-    `).run(completedAt, completedAt, completedAt, "fuchsia.show.4f@icloud.com");
+    `).run(completedAt, completedAt, completedAt, "fixture-one@icloud.com");
     const afterHistoryDeletion = await jsonRequest(runtime.app, "/api/inbox-link-mailboxes");
     assert.equal(afterHistoryDeletion.body.available, 0);
     assert.equal(afterHistoryDeletion.body.used, 1);
     assert.equal(afterHistoryDeletion.body.in_progress, 1);
     assert.equal(
-      afterHistoryDeletion.body.items.find((item) => item.email === "fuchsia.show.4f@icloud.com").registration_state,
+      afterHistoryDeletion.body.items.find((item) => item.email === "fixture-one@icloud.com").registration_state,
       "used",
     );
   } finally {
@@ -188,7 +206,7 @@ test("binds links encrypted and creates registration tasks from the saved mailbo
 test("marks GPT Free mailboxes with revoked access tokens for one-click bulk unbinding", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "aliashub-inbox-link-free-invalid-test-"));
   const db = createDatabase({ filename: path.join(directory, "test.db"), seedDemo: false });
-  const email = "fuchsia.show.4f@icloud.com";
+  const email = "fixture-one@icloud.com";
   const client = {
     deleted: [],
     deleteFails: false,
@@ -317,7 +335,7 @@ test("scans a bound inbox-link mailbox into the independent mail center account"
     const url = new URL(input);
     const payload = !url.pathname.includes("/messages/")
       ? {
-          email: "fuchsia.show.4f@icloud.com",
+          email: "fixture-one@icloud.com",
           messages: [{ id: "message-1", sender_name: "OpenAI", sender_address: "noreply@openai.com", subject: "Your code", received_at: "2026-08-03T08:00:00.000Z" }],
         }
       : {
@@ -325,7 +343,7 @@ test("scans a bound inbox-link mailbox into the independent mail center account"
           external_message_id: "external-1",
           sender_name: "OpenAI",
           sender_address: "noreply@openai.com",
-          recipient: "fuchsia.show.4f@icloud.com",
+          recipient: "fixture-one@icloud.com",
           subject: "Your code",
           text_body: "Use 804219 to continue.",
           received_at: "2026-08-03T08:00:00.000Z",
@@ -341,7 +359,7 @@ test("scans a bound inbox-link mailbox into the independent mail center account"
     const imported = await jsonRequest(runtime.app, "/api/inbox-link-mailboxes/import", {
       method: "POST",
       body: JSON.stringify({
-        poolText: "fuchsia.show.4f@icloud.com https://pickup.example.test/?token=signed-mailbox-token",
+        poolText: "fixture-one@icloud.com https://pickup.example.test/?token=signed-mailbox-token",
       }),
     });
     const accountId = imported.body.items[0].source_account_id;
@@ -355,7 +373,7 @@ test("scans a bound inbox-link mailbox into the independent mail center account"
     const message = db.prepare("SELECT * FROM mail_messages WHERE account_id = ?").get(accountId);
     const code = db.prepare("SELECT * FROM verification_codes WHERE account_id = ?").get(accountId);
     assert.equal(message.subject, "Your code");
-    assert.equal(message.recipient_address, "fuchsia.show.4f@icloud.com");
+    assert.equal(message.recipient_address, "fixture-one@icloud.com");
     assert.equal(message.body, "Use 804219 to continue.");
     assert.equal(code.code, "804219");
   } finally {

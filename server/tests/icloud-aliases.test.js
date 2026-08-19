@@ -62,7 +62,7 @@ test("iCloud aliases, Hide My Email, and custom-domain addresses import, receive
     fs.rmSync(directory, { recursive: true, force: true });
   });
 
-  const account = createConnectedAccount(db, "apple-account@qq.com");
+  const account = createConnectedAccount(db, "icloud-owner@example.com");
   const wrongType = await request(runtime.app, `/api/accounts/${account.id}/icloud-aliases/import`, {
     aliases: ["relay-abc@privaterelay.appleid.com"],
     type: "mail_alias",
@@ -75,25 +75,25 @@ test("iCloud aliases, Hide My Email, and custom-domain addresses import, receive
   assert.equal(mailAliases.response.status, 200);
   assert.equal(mailAliases.body.account.icloud_mail_aliases, 1);
   const imported = await request(runtime.app, `/api/accounts/${account.id}/icloud-aliases/import`, {
-    aliases: ["Life-Corers-77@icloud.com", "relay-abc@privaterelay.appleid.com"],
+    aliases: ["fixture-hidden@icloud.com", "fixture-relay@privaterelay.appleid.com"],
     type: "hide_my_email",
   });
   assert.equal(imported.response.status, 200);
   assert.equal(imported.body.account.icloud_hide_my_emails, 2);
   const mailAlias = imported.body.items.find((item) => item.address === "work@me.com");
-  const hidden = imported.body.items.find((item) => item.address === "life-corers-77@icloud.com");
-  const relay = imported.body.items.find((item) => item.address === "relay-abc@privaterelay.appleid.com");
+  const hidden = imported.body.items.find((item) => item.address === "fixture-hidden@icloud.com");
+  const relay = imported.body.items.find((item) => item.address === "fixture-relay@privaterelay.appleid.com");
   assert.equal(mailAlias.strategy, "icloud_mail_alias");
   assert.equal(hidden.strategy, "icloud_hide_my_email");
   assert.equal(relay.strategy, "icloud_hide_my_email");
 
   const customDomains = await request(runtime.app, `/api/accounts/${account.id}/icloud-aliases/import`, {
-    aliases: ["Apple@Ningdabbs.cn"],
+    aliases: ["Alias@Custom.Example"],
     type: "custom_domain",
   });
   assert.equal(customDomains.response.status, 200);
   assert.equal(customDomains.body.account.icloud_custom_domain_emails, 1);
-  const customDomain = customDomains.body.items.find((item) => item.address === "apple@ningdabbs.cn");
+  const customDomain = customDomains.body.items.find((item) => item.address === "alias@custom.example");
   assert.equal(customDomain.strategy, "icloud_custom_domain");
 
   const wrongCustomType = await request(runtime.app, `/api/accounts/${account.id}/icloud-aliases/import`, {
@@ -193,12 +193,25 @@ test("iCloud aliases, Hide My Email, and custom-domain addresses import, receive
   assert.equal(customDomainEmails.response.status, 200);
   assert.equal(customDomainEmails.body.emails[0].verification_code, "739251");
 
+  const failedAt = "2026-07-22T12:01:30.000Z";
+  db.prepare(`
+    INSERT INTO registration_jobs (
+      account_id, address_id, base_address_id, email, status, stage, browser_mode,
+      message, failure_reason, created_at, updated_at, finished_at
+    ) VALUES (?, ?, ?, ?, 'failed', 'about_you', 'headed', '注册失败',
+      'registration_disallowed', ?, ?, ?)
+  `).run(account.id, hidden.id, hidden.id, hidden.address, failedAt, failedAt, failedAt);
+
   const options = await jsonRequest(runtime.app, "/api/registration/options");
   assert.equal(options.response.status, 200);
   const optionAccount = options.body.accounts.find((item) => item.id === account.id);
   assert.equal(optionAccount.registration_mode, "direct");
   assert.equal(optionAccount.max_registration_count, 5);
-  assert.equal(optionAccount.bases.find((item) => item.id === hidden.id).registration_state, "available");
+  const failedOption = optionAccount.bases.find((item) => item.id === hidden.id);
+  assert.equal(failedOption.registration_state, "available");
+  assert.equal(failedOption.registration_failure_count, 1);
+  assert.equal(failedOption.last_registration_failure_at, failedAt);
+  assert.equal(failedOption.registration_disabled, false);
   assert.equal(optionAccount.bases.find((item) => item.id === customDomain.id).registration_state, "available");
 
   const listedAddress = optionAccount.bases[3];
@@ -305,6 +318,123 @@ test("iCloud aliases, Hide My Email, and custom-domain addresses import, receive
   const primary = db.prepare("SELECT id FROM addresses WHERE account_id = ? AND kind = 'primary'").get(account.id);
   const primaryDelete = await jsonRequest(runtime.app, `/api/addresses/${primary.id}`, { method: "DELETE" });
   assert.equal(primaryDelete.response.status, 409);
+});
+
+test("address warehouse selects current registration failures and bulk deletes local iCloud mappings", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "aliashub-failed-addresses-test-"));
+  const db = createDatabase({ filename: path.join(directory, "test.db"), seedDemo: false });
+  let pickupItems = [];
+  const runtime = createApp({
+    db,
+    registrationClient: new RegistrationClientStub(),
+    graph: { async scanInbox() { return { stage: "completed", messages: [], items: [] }; } },
+    pickup: {
+      registrationProtectionEnabled() { return true; },
+      async listStatuses() { return { items: pickupItems }; },
+    },
+  });
+  t.after(async () => {
+    await new Promise((resolve) => setImmediate(resolve));
+    db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  const account = createConnectedAccount(db, "warehouse-owner@icloud.com");
+  const imported = await request(runtime.app, `/api/accounts/${account.id}/icloud-aliases/import`, {
+    aliases: [
+      "failed-delete@icloud.com",
+      "recovered-keep@icloud.com",
+      "listed-keep@icloud.com",
+      "active-keep@icloud.com",
+    ],
+    type: "hide_my_email",
+  });
+  assert.equal(imported.response.status, 200);
+  const byAddress = new Map(imported.body.items.map((item) => [item.address, item]));
+  const insertJob = db.prepare(`
+    INSERT INTO registration_jobs (
+      account_id, address_id, base_address_id, email, status, stage, browser_mode,
+      message, failure_reason, created_at, updated_at, finished_at
+    ) VALUES (?, ?, ?, ?, ?, 'register', 'headed', ?, ?, ?, ?, ?)
+  `);
+  const addJob = (address, status, createdAt) => insertJob.run(
+    account.id,
+    address.id,
+    address.id,
+    address.address,
+    status,
+    status,
+    status === "failed" ? "registration_disallowed" : "",
+    createdAt,
+    createdAt,
+    ["queued", "running"].includes(status) ? null : createdAt,
+  );
+  const failed = byAddress.get("failed-delete@icloud.com");
+  const recovered = byAddress.get("recovered-keep@icloud.com");
+  const listed = byAddress.get("listed-keep@icloud.com");
+  const active = byAddress.get("active-keep@icloud.com");
+  addJob(failed, "failed", "2026-08-15T01:00:00.000Z");
+  addJob(recovered, "failed", "2026-08-15T01:00:01.000Z");
+  addJob(recovered, "completed", "2026-08-15T01:00:02.000Z");
+  addJob(listed, "failed", "2026-08-15T01:00:03.000Z");
+  addJob(active, "failed", "2026-08-15T01:00:04.000Z");
+  addJob(active, "running", "2026-08-15T01:00:05.000Z");
+
+  const addresses = await jsonRequest(
+    runtime.app,
+    `/api/addresses?accountId=${account.id}&kind=official&strategy=icloud_hide_my_email`,
+  );
+  assert.equal(addresses.response.status, 200);
+  const listedByAddress = new Map(addresses.body.items.map((item) => [item.address, item]));
+  assert.equal(listedByAddress.get(failed.address).registration_failed, true);
+  assert.equal(listedByAddress.get(failed.address).registration_failure_count, 1);
+  assert.equal(listedByAddress.get(recovered.address).registration_failed, false);
+  assert.equal(listedByAddress.get(recovered.address).registration_failure_count, 1);
+  assert.equal(listedByAddress.get(active.address).registration_failed, false);
+
+  const selectable = await jsonRequest(
+    runtime.app,
+    `/api/addresses/registration-failures?accountId=${account.id}&kind=official&strategy=icloud_hide_my_email`,
+  );
+  assert.equal(selectable.response.status, 200);
+  assert.equal(selectable.body.count, 2);
+  assert.deepEqual(new Set(selectable.body.ids), new Set([failed.id, listed.id]));
+
+  const activeDelete = await jsonRequest(runtime.app, "/api/addresses/bulk-delete", {
+    method: "POST",
+    body: JSON.stringify({ ids: [active.id], accountId: account.id }),
+  });
+  assert.equal(activeDelete.response.status, 409);
+  assert.match(activeDelete.body.error, /正在注册/);
+
+  pickupItems = [{ email: listed.address, status: "ready" }];
+  const blocked = await jsonRequest(runtime.app, "/api/addresses/bulk-delete", {
+    method: "POST",
+    body: JSON.stringify({ ids: selectable.body.ids, accountId: account.id }),
+  });
+  assert.equal(blocked.response.status, 409);
+  assert.match(blocked.body.error, /售卖库存/);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM addresses WHERE id IN (?, ?)").get(failed.id, listed.id).count, 2);
+
+  pickupItems = [];
+  const removed = await jsonRequest(runtime.app, "/api/addresses/bulk-delete", {
+    method: "POST",
+    body: JSON.stringify({ ids: selectable.body.ids, accountId: account.id }),
+  });
+  assert.equal(removed.response.status, 200);
+  assert.equal(removed.body.deleted, 2);
+  assert.equal(removed.body.imported_icloud_deleted, 2);
+  assert.equal(removed.body.split_deleted, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM addresses WHERE id IN (?, ?)").get(failed.id, listed.id).count, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM addresses WHERE id IN (?, ?)").get(recovered.id, active.id).count, 2);
+
+  const primary = db.prepare("SELECT id FROM addresses WHERE account_id = ? AND kind = 'primary'").get(account.id);
+  const invalid = await jsonRequest(runtime.app, "/api/addresses/bulk-delete", {
+    method: "POST",
+    body: JSON.stringify({ ids: [primary.id], accountId: account.id }),
+  });
+  assert.equal(invalid.response.status, 409);
+  assert.match(invalid.body.error, /不能从本地删除/);
 });
 
 test("iCloud privacy internal API imports and removes generated hidden mailboxes", async (t) => {

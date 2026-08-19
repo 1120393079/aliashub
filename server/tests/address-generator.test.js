@@ -36,7 +36,7 @@ test("splits primary and official aliases independently", () => {
 });
 
 test("accepts iCloud custom-domain addresses as imported direct-registration addresses", () => {
-  assert.equal(normalizeIcloudCustomDomainEmail("Apple@Ningdabbs.cn"), "apple@ningdabbs.cn");
+  assert.equal(normalizeIcloudCustomDomainEmail("Alias@Custom.Example"), "alias@custom.example");
   assert.equal(normalizeIcloudCustomDomainEmail("name@icloud.com"), "");
   assert.equal(normalizeIcloudCustomDomainEmail("relay@privaterelay.appleid.com"), "");
   assert.equal(isIcloudImportedStrategy("icloud_custom_domain"), true);

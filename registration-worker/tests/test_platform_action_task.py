@@ -275,6 +275,7 @@ def test_phone_bind_task_passes_logger_and_browser_mode(monkeypatch):
             "browser_mode": "camoufox_headed",
             "bit_profile_id": "profile-1",
             "concurrency": 7,
+            "sms_wait_seconds": 900,
         },
         logger,
     )
@@ -283,10 +284,44 @@ def test_phone_bind_task_passes_logger_and_browser_mode(monkeypatch):
     assert seen["browser_mode"] == "camoufox_headed"
     assert seen["bit_profile_id"] == "profile-1"
     assert seen["concurrency"] == 7
+    assert seen["sms_wait_seconds"] == 900
     assert getattr(seen["log_fn"], "__self__", None) is logger
+    assert getattr(seen["cancel_check"], "__self__", None) is logger
+    assert seen["cancel_check"]() is False
     assert ("log", "phone bind step", {}) in logger.events
     assert logger.result_data == {"success_count": 1, "failure_count": 0, "phones": []}
     assert logger.finished == (tasks_module.TASK_STATUS_SUCCEEDED, "")
+
+
+def test_phone_bind_task_finishes_cancelled_after_service_observes_cancel(monkeypatch):
+    class FakePhoneBindingService:
+        def bind(self, **kwargs):
+            assert kwargs["cancel_check"]() is False
+            logger.cancel_requested = True
+            return {
+                "total": 1,
+                "success_count": 0,
+                "failure_count": 1,
+                "phones": [],
+                "results": [],
+                "cancelled": True,
+                "skipped_count": 2,
+            }
+
+    monkeypatch.setattr(tasks_module, "PhoneBindingService", FakePhoneBindingService, raising=False)
+    logger = _FakeLogger()
+
+    tasks_module._execute_phone_bind_task(
+        {
+            "platform": "chatgpt",
+            "ids": [123, 124, 125],
+            "phone_lines": "2025550104----https://relay.example.invalid/sms",
+        },
+        logger,
+    )
+
+    assert logger.result_data["cancelled"] is True
+    assert logger.finished == (tasks_module.TASK_STATUS_CANCELLED, "任务已取消")
 
 
 def test_codex_oauth_task_passes_logger_and_browser_mode(monkeypatch):

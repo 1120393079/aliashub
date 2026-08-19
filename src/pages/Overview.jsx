@@ -16,7 +16,7 @@ export default function OverviewPage({ overview, onNavigate, onAddAccount }) {
       </div>
       <section className="metric-grid">
         <article className="metric-card"><span className="metric-icon blue"><Mail size={19} /></span><div><span>源头邮箱</span><strong>{metrics.accounts}</strong><small>{metrics.connectedAccounts} 个已连接</small></div></article>
-        <article className="metric-card"><span className="metric-icon green"><AtSign size={19} /></span><div><span>Microsoft 官方别名</span><strong>{metrics.officialAliases}</strong><small>不含源头地址</small></div></article>
+        <article className="metric-card"><span className="metric-icon green"><AtSign size={19} /></span><div><span>官方邮箱别名</span><strong>{metrics.officialAliases}</strong><small>不含源头地址</small></div></article>
         <article className="metric-card"><span className="metric-icon amber"><Sparkles size={19} /></span><div><span>分裂地址</span><strong>{metrics.splitAddresses}</strong><small>可持续批量生成</small></div></article>
         <article className="metric-card"><span className="metric-icon coral"><KeyRound size={19} /></span><div><span>未使用验证码</span><strong>{metrics.unusedCodes}</strong><small>累计识别 {metrics.codes} 条</small></div></article>
       </section>
@@ -28,12 +28,14 @@ export default function OverviewPage({ overview, onNavigate, onAddAccount }) {
             const supportsOfficial = accountSupportsOfficialAliases(account);
             const supportsPlus = accountSupportsPlusAliases(account);
             const meta = providerMeta(account.provider);
+            const isMailcom = meta.id === "mailcom";
+            const isNetease = meta.id === "netease";
             const canGenerateAliases = supportsOfficial || supportsPlus;
-            return <button key={account.id} className="source-summary-row" onClick={() => onNavigate(canGenerateAliases ? "factory" : "inbox", { accountId: account.id, mode: supportsOfficial ? undefined : "split" })}>
+            return <button key={account.id} className="source-summary-row" onClick={() => onNavigate(isMailcom ? "sources" : canGenerateAliases ? "factory" : "inbox", { accountId: account.id, mode: supportsOfficial ? undefined : "split" })}>
               <ProviderMark provider={meta.id} size={34} />
               <span className="source-summary-copy"><b>{account.display_name || account.email.split("@")[0]}</b><small>{meta.name} · {account.email}</small></span>
-              <span className="source-alias-mini"><b>{supportsOfficial ? `${account.official_used}/${account.official_limit}` : supportsPlus ? "Plus" : "IMAP"}</b><small>{supportsOfficial ? "基础地址" : supportsPlus ? "分裂可用" : "收件扫描"}</small></span>
-              <span className="source-alias-mini"><b>{supportsPlus ? account.split_count : "-"}</b><small>{supportsPlus ? "分裂" : "只读"}</small></span>
+              <span className="source-alias-mini"><b>{isMailcom ? `${account.official_used || 1}/${account.official_limit || 10}` : isNetease ? account.netease_aliases || 0 : supportsOfficial ? `${account.official_used}/${account.official_limit}` : supportsPlus ? "Plus" : "IMAP"}</b><small>{isMailcom ? "母号 / 别名" : isNetease ? "替身邮箱" : supportsOfficial ? "基础地址" : supportsPlus ? "分裂可用" : "收件扫描"}</small></span>
+              <span className="source-alias-mini"><b>{isMailcom ? account.mailcom_aliases ?? account.official_aliases ?? 0 : isNetease ? (account.netease_aliases || 0) + 1 : supportsPlus ? account.split_count : "-"}</b><small>{isMailcom ? "官方别名" : isNetease ? "可直接注册" : supportsPlus ? "分裂" : "只读"}</small></span>
               <StatusBadge status={account.status}>{accountStatus[account.status]}</StatusBadge>
             </button>;
           })}</div> : <EmptyState icon={Mail} title="还没有源头邮箱" action={<Button variant="primary" icon={Plus} onClick={onAddAccount}>添加第一个邮箱</Button>} />}

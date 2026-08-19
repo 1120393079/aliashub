@@ -320,8 +320,41 @@ export class InboxLinkMailboxService {
     };
   }
 
+  preflightImport(input) {
+    const entries = parseInboxLinkPool(input?.poolText);
+    const replaceExisting = input?.replaceExisting !== false;
+    this.requireEncryption();
+    const selectEmail = this.db.prepare("SELECT * FROM inbox_link_mailboxes WHERE lower(email) = lower(?)");
+    const selectSource = this.db.prepare("SELECT * FROM source_accounts WHERE email = ? COLLATE NOCASE");
+    const storedRows = this.db.prepare("SELECT * FROM inbox_link_mailboxes ORDER BY id").all();
+    for (const entry of entries) {
+      const hash = this.keyHash(entry.inboxLink);
+      const sameEmail = selectEmail.get(entry.email);
+      const source = selectSource.get(entry.email);
+      if (source && source.provider !== "inbox_link") {
+        throw serviceError(`${entry.email} 已作为源头邮箱存在，不能重复绑定到邮件中心`, 409, "INBOX_LINK_SOURCE_CONFLICT");
+      }
+      if (sameEmail && sameEmail.inbox_key_hash !== hash && !replaceExisting) {
+        throw serviceError(`${entry.email} 已绑定其他取件链接`, 409, "INBOX_LINK_REPLACEMENT_REQUIRED");
+      }
+      const sameLink = storedRows.find((row) => {
+        if (row.inbox_key_hash === hash) return true;
+        try {
+          return storedInboxLink(this.decrypt(row.inbox_key_encrypted)) === entry.inboxLink;
+        } catch {
+          return false;
+        }
+      });
+      if (sameLink && Number(sameLink.id) !== Number(sameEmail?.id || 0)) {
+        throw serviceError(`取件链接已绑定到其他邮箱：${sameLink.email}`, 409, "INBOX_LINK_ALREADY_BOUND");
+      }
+    }
+    return entries;
+  }
+
   import(input) {
     const entries = parseInboxLinkPool(input?.poolText);
+    const replaceExisting = input?.replaceExisting !== false;
     this.requireEncryption();
     const selectEmail = this.db.prepare("SELECT * FROM inbox_link_mailboxes WHERE lower(email) = lower(?)");
     const storedRows = this.db.prepare("SELECT * FROM inbox_link_mailboxes ORDER BY id").all();
@@ -341,6 +374,9 @@ export class InboxLinkMailboxService {
       for (const entry of entries) {
         const hash = this.keyHash(entry.inboxLink);
         const sameEmail = selectEmail.get(entry.email);
+        if (sameEmail && sameEmail.inbox_key_hash !== hash && !replaceExisting) {
+          throw serviceError(`${entry.email} 已绑定其他取件链接`, 409, "INBOX_LINK_REPLACEMENT_REQUIRED");
+        }
         const sameLink = storedRows.find((row) => {
           try {
             return storedInboxLink(this.decrypt(row.inbox_key_encrypted)) === entry.inboxLink;

@@ -1,6 +1,14 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="AliasHub">
-  <rect width="64" height="64" rx="14" fill="#20b47a"/>
-  <path d="M14 20.5 32 33l18-12.5v22A5.5 5.5 0 0 1 44.5 48h-25a5.5 5.5 0 0 1-5.5-5.5v-22Z" fill="#f5fffb"/>
-  <path d="m15.5 19 14.1-8.2a5 5 0 0 1 4.9 0L48.5 19 32 30.4 15.5 19Z" fill="#d7f8e9"/>
-  <path d="M38 39h12M44 33v12" stroke="#147b58" stroke-width="4" stroke-linecap="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="自然花注册工作站">
+  <rect x="1" y="1" width="62" height="62" rx="14" fill="#fff" stroke="#dce3df" stroke-width="2"/>
+  <path d="M13 53c9.5-6.2 16.1-15.4 26.5-29" fill="none" stroke="#557a68" stroke-width="3.8" stroke-linecap="round"/>
+  <path d="M25.5 39.5c-6.6.2-9.5-2.4-10.8-6.8 6.3-1.1 10.2.7 12.2 4.7" fill="#789887" stroke="#557a68" stroke-width="1.2" stroke-linejoin="round"/>
+  <path d="M30.2 33.2c.3-5.5 3.1-8.6 7.5-9.6.6 5.2-1.1 8.5-5.5 10.8" fill="#88a797" stroke="#557a68" stroke-width="1.2" stroke-linejoin="round"/>
+  <path d="M32.6 13.8c2.9-5.5 10.1-7.8 15.4-4.5 6.2 3.8 6.9 12.3 2 17.2-4.4 4.4-12.6 4-16.7-.8-3-3.5-2.7-8.1-.7-11.9Z" fill="#e85d67" stroke="#a7464d" stroke-width="1.5"/>
+  <path d="M36.4 13.7c3.9-2.2 9.3-1 11.5 2.5M34.8 18.3c4.5-1.7 10.7-.2 13.3 3.2M36.5 23.1c3.7 1.7 7.2 1.7 10.4.2" fill="none" stroke="#f58b91" stroke-width="1.5" stroke-linecap="round" opacity=".8"/>
+  <circle cx="49" cy="49" r="12" fill="#174e3a" stroke="#fff" stroke-width="2"/>
+  <g transform="translate(38.2 38.2) scale(.9)" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="8"/>
+    <circle cx="12" cy="12" r="2"/>
+    <path d="M12 2v2M12 22v-2M17 20.66l-1-1.73M7 3.34l1 1.73M20.66 17l-1.73-1M3.34 7l1.73 1M22 12h-2M2 12h2M20.66 7l-1.73 1M3.34 17l1.73-1M17 3.34l-1 1.73M7 20.66l1-1.73"/>
+  </g>
 </svg>

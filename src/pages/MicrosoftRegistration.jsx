@@ -394,6 +394,6 @@ export default function MicrosoftRegistrationPage({ refreshKey, onDataChange, on
     </section>
 
     <CredentialModal credentials={credentials} onClose={() => setCredentials(null)} onCopy={(value) => copy(value, "凭据已复制")} />
-    <ConfirmDialog open={Boolean(pendingDelete)} onClose={() => setPendingDelete(null)} onConfirm={remove} loading={deleting} danger title="删除微软注册记录？" description="只删除 AliasHub 中的回传记录，不会删除 Windows 注册机中的账号，也不会删除已加入的源头邮箱。" confirmText="确认删除" />
+    <ConfirmDialog open={Boolean(pendingDelete)} onClose={() => setPendingDelete(null)} onConfirm={remove} loading={deleting} danger title="删除微软注册记录？" description="只删除注册工作站中的回传记录，不会删除 Windows 注册机中的账号，也不会删除已加入的源头邮箱。" confirmText="确认删除" />
   </div>;
 }

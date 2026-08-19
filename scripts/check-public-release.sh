@@ -5,6 +5,7 @@ SCRIPT_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 SCAN_ROOT=${1:-$SCRIPT_ROOT}
 REQUIRE_LICENSE=${REQUIRE_LICENSE:-0}
 CHECK_GIT_HISTORY=${CHECK_GIT_HISTORY:-0}
+DENYLIST_FILE=${PUBLIC_RELEASE_DENYLIST_FILE:-}
 
 for command in find grep; do
   command -v "$command" >/dev/null || {
@@ -15,6 +16,19 @@ done
 
 [[ -d "$SCAN_ROOT" ]] || { printf 'Scan directory not found: %s\n' "$SCAN_ROOT" >&2; exit 1; }
 SCAN_ROOT=$(cd "$SCAN_ROOT" && pwd)
+
+declare -a private_identifiers=()
+if [[ -n "$DENYLIST_FILE" ]]; then
+  [[ -f "$DENYLIST_FILE" ]] || {
+    printf 'Private-identifier denylist not found: %s\n' "$DENYLIST_FILE" >&2
+    exit 1
+  }
+  while IFS= read -r identifier || [[ -n "$identifier" ]]; do
+    identifier=${identifier%$'\r'}
+    [[ -z "$identifier" || "$identifier" == \#* ]] && continue
+    private_identifiers+=("$identifier")
+  done <"$DENYLIST_FILE"
+fi
 
 declare -a files=()
 IS_GIT_REPOSITORY=false
@@ -100,19 +114,22 @@ for file in "${files[@]}"; do
   fi
 done
 
-# Split the project-private identifier so this scanner does not match itself.
-private_identifier_pattern='nfapi[.]natural''flower[.]cn|pickup[.]natural''flower[.]cn|hsxhome[.]com|mail-api[.]yue''cheng[.]shop'
 secret_pattern='-----BEGIN ([A-Z0-9 ]+)?PRIVATE KEY-----|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|sk-(proj-)?[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{30,}|npm_[A-Za-z0-9]{20,}|sk_live_[A-Za-z0-9]{16,}|eca_tr_[A-Za-z0-9_-]{12,}'
-content_pattern="${private_identifier_pattern}|${secret_pattern}"
 
 for file in "${files[@]}"; do
   relative=${file#"$SCAN_ROOT/"}
   [[ "$relative" == "scripts/check-public-release.sh" ]] && continue
   [[ -f "$file" ]] || continue
-  if matches=$(grep -nIH -E "$content_pattern" -- "$file" 2>/dev/null); then
+  if matches=$(grep -nIH -E "$secret_pattern" -- "$file" 2>/dev/null); then
     printf '%s\n' "$matches" >&2
-    report_failure "private deployment identifier or secret-like value found in $relative"
+    report_failure "secret-like value found in $relative"
   fi
+  for identifier in "${private_identifiers[@]}"; do
+    if matches=$(grep -nIH -F -- "$identifier" "$file" 2>/dev/null); then
+      printf '%s\n' "$matches" >&2
+      report_failure "private deployment identifier found in $relative"
+    fi
+  done
 done
 
 license_file=""
@@ -141,11 +158,18 @@ if [[ "$CHECK_GIT_HISTORY" == "1" ]]; then
           report_failure "forbidden file exists in Git commit $commit: $historical_path"
         fi
       done < <(git -C "$SCAN_ROOT" ls-tree -r --name-only -z "$commit")
-      if matches=$(git -C "$SCAN_ROOT" grep -nI -E "$content_pattern" "$commit" -- . \
+      if matches=$(git -C "$SCAN_ROOT" grep -nI -E "$secret_pattern" "$commit" -- . \
         ':(exclude)scripts/check-public-release.sh' 2>/dev/null); then
         printf '%s\n' "$matches" >&2
-        report_failure "private deployment identifier or secret-like value exists in Git commit $commit"
+        report_failure "secret-like value exists in Git commit $commit"
       fi
+      for identifier in "${private_identifiers[@]}"; do
+        if matches=$(git -C "$SCAN_ROOT" grep -nI -F "$identifier" "$commit" -- . \
+          ':(exclude)scripts/check-public-release.sh' 2>/dev/null); then
+          printf '%s\n' "$matches" >&2
+          report_failure "private deployment identifier exists in Git commit $commit"
+        fi
+      done
     done < <(git -C "$SCAN_ROOT" rev-list --all)
   fi
 fi

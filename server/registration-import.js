@@ -1,5 +1,8 @@
+import { parseInboxLinkPool } from "./inbox-link-pool.js";
+
 const MAX_IMPORT_ACCOUNTS = 100;
 const MAX_IMPORT_CONTENT_BYTES = 900_000;
+const EMAIL_PATTERN = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/i;
 
 const FLAT_CREDENTIAL_KEYS = [
   "access_token",
@@ -107,7 +110,7 @@ function normalizedImportAccount(raw, lineNumber) {
   const platform = String(raw.platform || "chatgpt").trim().toLowerCase();
   if (platform !== "chatgpt") throw badRequest(`第 ${lineNumber} 条账号只支持 chatgpt 平台`);
   const email = String(raw.email || "").trim().toLowerCase();
-  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) || email.length > 320) {
+  if (!EMAIL_PATTERN.test(email) || email.length > 320) {
     throw badRequest(`第 ${lineNumber} 条账号邮箱无效`);
   }
   if (raw.password !== undefined && raw.password !== null && typeof raw.password !== "string") {
@@ -127,8 +130,19 @@ function normalizedImportAccount(raw, lineNumber) {
     }
   }
   const originalId = Number(raw.id || raw.original_account_id || 0);
+  const suppliedInboxLink = raw.inbox_link ?? raw.inboxLink
+    ?? raw.mail_link ?? raw.mailLink
+    ?? raw.pickup_link ?? raw.pickupLink
+    ?? "";
+  if (typeof suppliedInboxLink !== "string") {
+    throw badRequest(`第 ${lineNumber} 条账号取件链接必须是字符串`);
+  }
+  const inboxLink = suppliedInboxLink.trim()
+    ? parseInboxLinkPool(`${email} ${suppliedInboxLink.trim()}`, { maximum: 1 })[0].inboxLink
+    : "";
   return {
     originalId: Number.isSafeInteger(originalId) && originalId > 0 ? originalId : 0,
+    inboxLink,
     payload: {
       platform: "chatgpt",
       email,
@@ -171,6 +185,27 @@ function parsePlainLines(content) {
       const raw = {};
       csvHeader.forEach((key, column) => { raw[key] = values[column] ?? ""; });
       accounts.push(normalizedImportAccount(raw, lineNumber));
+      continue;
+    }
+    const inboxLinkSeparator = lines[index].indexOf("----");
+    const delimitedEmail = inboxLinkSeparator >= 0
+      ? lines[index].slice(0, inboxLinkSeparator).trim()
+      : "";
+    if (delimitedEmail && EMAIL_PATTERN.test(delimitedEmail)) {
+      accounts.push(normalizedImportAccount({
+        email: delimitedEmail,
+        password: "",
+        inbox_link: lines[index].slice(inboxLinkSeparator + 4).trim(),
+      }, lineNumber));
+      continue;
+    }
+    const bareInboxLink = lines[index].match(/^(\S+)\s+(https:\/\/\S+)$/i);
+    if (bareInboxLink && EMAIL_PATTERN.test(bareInboxLink[1])) {
+      accounts.push(normalizedImportAccount({
+        email: bareInboxLink[1],
+        password: "",
+        inbox_link: bareInboxLink[2],
+      }, lineNumber));
       continue;
     }
     const email = readPlainToken(lines[index], 0);
@@ -234,5 +269,9 @@ export function parseLocalAccountImport(input = {}) {
   if (accounts.length > MAX_IMPORT_ACCOUNTS) throw badRequest(`单次最多导入 ${MAX_IMPORT_ACCOUNTS} 个账号`);
   const emails = accounts.map((item) => item.payload.email);
   if (new Set(emails).size !== emails.length) throw badRequest("导入内容中存在重复邮箱");
+  const inboxLinks = accounts.map((item) => item.inboxLink).filter(Boolean);
+  if (new Set(inboxLinks).size !== inboxLinks.length) {
+    throw badRequest("导入内容中存在重复取件链接，不能绑定到多个邮箱");
+  }
   return accounts;
 }

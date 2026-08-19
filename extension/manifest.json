@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "AliasHub Outlook Connector",
+  "name": "注册工作站 Outlook 连接器",
   "version": "1.1.3",
-  "description": "Connect AliasHub jobs to Microsoft's official Outlook alias pages.",
+  "description": "将注册工作站任务连接到 Microsoft 官方 Outlook 别名页面。",
   "permissions": ["storage", "tabs", "cookies"],
   "host_permissions": [
     "__ALIAS_HUB_HOST_PERMISSION__",
@@ -13,7 +13,7 @@
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "AliasHub Connector",
+    "default_title": "注册工作站连接器",
     "default_popup": "popup.html"
   },
   "content_scripts": [

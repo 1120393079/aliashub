@@ -79,6 +79,93 @@ def test_chatgpt_platform_does_not_pre_generate_password():
     assert platform._prepare_registration_password(None) is None
 
 
+def test_codex_oauth_empty_password_uses_mailbox_otp_passwordless_login(monkeypatch):
+    from platforms.chatgpt import oauth as oauth_module
+
+    oauth_start = SimpleNamespace(
+        auth_url="https://auth.openai.com/oauth/authorize?state=state_test",
+        state="state_test",
+    )
+    page = SimpleNamespace(
+        url=oauth_start.auth_url,
+        evaluate=lambda script: "Mozilla/5.0 Test",
+    )
+    phase = {"value": "password"}
+    events = []
+
+    def otp_callback():
+        events.append("otp")
+        return "123456"
+
+    otp_callback.refresh_baseline = lambda strict=False: events.append(("baseline", strict))
+
+    monkeypatch.setattr(oauth_module, "generate_oauth_url", lambda **kwargs: oauth_start)
+    monkeypatch.setattr(
+        browser_register_module,
+        "_goto_with_retry",
+        lambda page, url, **kwargs: setattr(page, "url", url),
+    )
+    monkeypatch.setattr(browser_register_module, "_get_page_oauth_url", lambda page: "")
+
+    def derive_state(page):
+        if phase["value"] == "password":
+            return {"page_type": "login_password", "continue_url": "", "current_url": page.url}
+        return {"page_type": "email_otp_verification", "continue_url": "", "current_url": page.url}
+
+    monkeypatch.setattr(browser_register_module, "_derive_oauth_state_from_page", derive_state)
+
+    def click_passwordless(page, log, *, context):
+        events.append(("passwordless", context))
+        phase["value"] = "otp"
+        page.url = "https://auth.openai.com/email-verification"
+        return True
+
+    monkeypatch.setattr(
+        browser_register_module,
+        "_click_passwordless_login_if_available",
+        click_passwordless,
+    )
+    monkeypatch.setattr(
+        browser_register_module,
+        "_submit_oauth_password_direct",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("empty password was submitted")),
+    )
+
+    def submit_otp(page, code, log):
+        events.append(("submit", code))
+        page.url = "http://localhost:1455/auth/callback?code=code_test&state=state_test"
+        return {"ok": True, "status": 200, "url": page.url, "data": None, "text": ""}
+
+    monkeypatch.setattr(browser_register_module, "_submit_otp_via_page", submit_otp)
+    monkeypatch.setattr(
+        browser_register_module,
+        "_submit_callback_result",
+        lambda callback_url, oauth_start, proxy: {
+            "access_token": "at_test",
+            "account_id": "acct_test",
+        },
+    )
+
+    result = browser_register_module._do_codex_oauth(
+        page,
+        {},
+        "passwordless@test.com",
+        "",
+        otp_callback,
+        None,
+        None,
+        lambda message: None,
+    )
+
+    assert result["access_token"] == "at_test"
+    assert events == [
+        ("baseline", True),
+        ("passwordless", "OAuth 密码页"),
+        "otp",
+        ("submit", "123456"),
+    ]
+
+
 def test_protocol_mailbox_mapper_rejects_partial_oauth_result():
     platform = object.__new__(ChatGPTPlatform)
     platform.mailbox = None

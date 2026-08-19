@@ -29,6 +29,23 @@ function sourceInventoryDatabase() {
       status TEXT NOT NULL,
       failure_reason TEXT NOT NULL DEFAULT ''
     );
+    CREATE TABLE mailcom_registration_pipeline_items (
+      id INTEGER PRIMARY KEY,
+      pipeline_id TEXT NOT NULL,
+      account_id INTEGER,
+      current_address_id INTEGER,
+      current_email TEXT NOT NULL COLLATE NOCASE,
+      replacement_email TEXT NOT NULL DEFAULT '' COLLATE NOCASE,
+      current_attempt_id INTEGER,
+      status TEXT NOT NULL,
+      stage TEXT NOT NULL
+    );
+    CREATE TABLE mailcom_registration_pipeline_attempts (
+      id INTEGER PRIMARY KEY,
+      item_id INTEGER NOT NULL,
+      email TEXT NOT NULL COLLATE NOCASE,
+      recycle_status TEXT NOT NULL
+    );
     INSERT INTO source_accounts VALUES
       (1, 'icloud', 'source@icloud.com', 'connected'),
       (2, 'microsoft', 'offline@outlook.com', 'action_required');
@@ -98,6 +115,7 @@ test("pickup publishing sends an available password but never sends the access t
   assert.equal(requests[0].url, "http://127.0.0.1:4190/api/admin/mailboxes");
   assert.equal(requests[0].body.upsert, true);
   assert.equal(requests[0].body.clear_credentials, false);
+  assert.equal(requests[0].body.relist, true);
   assert.deepEqual(requests[0].body.items, [{
     email: "buyer.mailbox@example.com",
     password: "configured-password",
@@ -193,6 +211,83 @@ test("source mailbox inventory excludes generated addresses and blocks every Cha
   db.close();
 });
 
+test("pickup source availability and publishing reject a Mail.com recycling reservation", async () => {
+  const db = sourceInventoryDatabase();
+  db.exec(`
+    INSERT INTO source_accounts VALUES
+      (3, 'mailcom', 'mother@email.com', 'connected');
+    INSERT INTO addresses VALUES
+      (15, 3, 'reserved@email.com', 'official', 'active', 'mailcom_alias', '', '', '2026-08-07T06:00:00Z');
+    INSERT INTO mailcom_registration_pipeline_items (
+      id, pipeline_id, account_id, current_address_id, current_email,
+      replacement_email, status, stage
+    ) VALUES (
+      1, 'pipeline-1', 3, 15, 'old-reserved@email.com',
+      'reserved@email.com', 'queued', 'recycle_retry_wait'
+    );
+  `);
+  const requests = [];
+  const service = new PickupService({
+    db,
+    registration: {},
+    password: "secret",
+    fetchFn: async (...args) => {
+      requests.push(args);
+      throw new Error("reserved address must not reach pickup");
+    },
+  });
+
+  const result = service.listSourceAddresses();
+  const item = result.items.find((entry) => entry.email === "reserved@email.com");
+  assert.equal(item.mailcom_recycling_reserved, true);
+  assert.equal(item.eligible, false);
+  assert.match(item.blocked_reason, /正在轮换/);
+  await assert.rejects(
+    service.importSourceAddresses({ ids: [15] }),
+    (error) => error.code === "PICKUP_MAILCOM_RECYCLING_RESERVED" && error.status === 409,
+  );
+  assert.equal(requests.length, 0);
+  db.close();
+});
+
+test("registered-account pickup publishing keeps an in-flight recycle reserved after cancellation", async () => {
+  const db = sourceInventoryDatabase();
+  const requests = [];
+  const registration = {
+    async listRegisteredAccounts() {
+      db.prepare(`
+        INSERT INTO mailcom_registration_pipeline_items (
+          id, pipeline_id, account_id, current_address_id, current_email,
+          current_attempt_id, status, stage
+        ) VALUES (2, 'pipeline-2', 3, 15, 'late-reserved@email.com', 20, 'cancel_requested', 'cancel_requested')
+      `).run();
+      db.prepare(`
+        INSERT INTO mailcom_registration_pipeline_attempts (id, item_id, email, recycle_status)
+        VALUES (20, 2, 'late-reserved@email.com', 'running')
+      `).run();
+      return {
+        items: [{ id: 201, email: "late-reserved@email.com", password_available: false }],
+      };
+    },
+  };
+  const service = new PickupService({
+    db,
+    registration,
+    password: "secret",
+    fetchFn: async (...args) => {
+      requests.push(args);
+      throw new Error("reserved account must not reach pickup");
+    },
+  });
+
+  await assert.rejects(
+    service.importRegisteredAccounts({ ids: [201] }),
+    (error) => error.code === "PICKUP_MAILCOM_RECYCLING_RESERVED" && error.status === 409,
+  );
+  assert.equal(requests.length, 0);
+  db.close();
+});
+
 test("source mailbox publishing sends no credentials and rejects ChatGPT-used addresses", async () => {
   const db = sourceInventoryDatabase();
   const requests = [];
@@ -232,6 +327,7 @@ test("source mailbox publishing sends no credentials and rejects ChatGPT-used ad
   const result = await service.importSourceAddresses({ ids: [10] });
   assert.equal(requests.length, 1);
   assert.equal(requests[0].body.clear_credentials, true);
+  assert.equal(Object.hasOwn(requests[0].body, "relist"), false);
   assert.deepEqual(requests[0].body.items, [{
     email: "available@icloud.com",
     label: "iCloud 隐藏邮箱",

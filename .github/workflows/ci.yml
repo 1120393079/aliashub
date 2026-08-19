@@ -18,6 +18,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+      - run: npm run test:pickup
       - run: npm run build
       - run: bash -n scripts/*.sh
       - run: REQUIRE_LICENSE=1 ./scripts/check-public-release.sh
@@ -25,10 +26,27 @@ jobs:
         env:
           REGISTRATION_SERVICE_TOKEN: ci-registration-token
           REGISTRATION_VNC_PASSWORD: ci-vnc-password
+          PAYMENT_LINK_SERVICE_PASSWORD: ci-payment-link-password
         run: |
           cp .env.example .env
           trap 'rm -f .env' EXIT
           docker compose -f compose.yaml -f compose.full.yaml config >/dev/null
+
+  payment-extractor:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: payment-link-extractor
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: payment-link-extractor/requirements.txt
+      - run: pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -v
+      - run: python -m compileall -q payment_link_extractor iprocket_chain_bridge.py
 
   worker-frontend:
     runs-on: ubuntu-latest
@@ -67,3 +85,4 @@ jobs:
           tests/test_api_proxies.py
           tests/test_validity_recovery.py
           tests/test_platform_action_task.py
+          tests/test_chatgpt_cpa_session.py

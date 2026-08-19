@@ -4,11 +4,12 @@ import csv
 import io
 from datetime import datetime, timezone
 
+from sqlalchemy import func, or_
 from sqlmodel import Session, select
 
 from core.datetime_utils import serialize_datetime
 from core.account_display import build_account_display_summary
-from core.db import AccountModel, engine
+from core.db import AccountModel, AccountOverviewModel, engine
 from core.account_graph import (
     compute_account_stats,
     load_account_graphs,
@@ -111,26 +112,54 @@ class AccountsRepository:
     def list(self, query: AccountQuery) -> tuple[int, list[AccountRecord]]:
         page = max(query.page, 1)
         page_size = max(query.page_size, 1)
+        expected_status = str(query.status or "").strip()
         with Session(engine) as session:
             statement = select(AccountModel)
+            total_statement = select(func.count()).select_from(AccountModel)
             if query.platform:
                 statement = statement.where(AccountModel.platform == query.platform)
+                total_statement = total_statement.where(AccountModel.platform == query.platform)
             if query.email:
                 statement = statement.where(AccountModel.email.contains(query.email))
+                total_statement = total_statement.where(AccountModel.email.contains(query.email))
+            if expected_status:
+                lifecycle_status = func.coalesce(
+                    func.nullif(func.trim(AccountOverviewModel.lifecycle_status), ""),
+                    "registered",
+                )
+                validity_status = func.coalesce(
+                    func.nullif(func.trim(AccountOverviewModel.validity_status), ""),
+                    "unknown",
+                )
+                plan_state = func.coalesce(
+                    func.nullif(func.trim(AccountOverviewModel.plan_state), ""),
+                    "unknown",
+                )
+                display_status = func.coalesce(
+                    func.nullif(func.trim(AccountOverviewModel.display_status), ""),
+                    lifecycle_status,
+                )
+                status_filter = or_(
+                    display_status == expected_status,
+                    lifecycle_status == expected_status,
+                    plan_state == expected_status,
+                    validity_status == expected_status,
+                )
+                statement = statement.outerjoin(
+                    AccountOverviewModel,
+                    AccountOverviewModel.account_id == AccountModel.id,
+                ).where(status_filter)
+                total_statement = total_statement.outerjoin(
+                    AccountOverviewModel,
+                    AccountOverviewModel.account_id == AccountModel.id,
+                ).where(status_filter)
             statement = statement.order_by(AccountModel.created_at.desc(), AccountModel.id.desc())
-            models = session.exec(statement).all()
+            total = int(session.exec(total_statement).one() or 0)
+            models = session.exec(
+                statement.offset((page - 1) * page_size).limit(page_size)
+            ).all()
             records = self._load_records(session, models)
-            if query.status:
-                records = [item for item in records if matches_status_filter({
-                    "display_status": item.display_status,
-                    "lifecycle_status": item.lifecycle_status,
-                    "plan_state": item.plan_state,
-                    "validity_status": item.validity_status,
-                }, query.status)]
-        total = len(records)
-        start = (page - 1) * page_size
-        end = start + page_size
-        return total, records[start:end]
+        return total, records
 
     def get(self, account_id: int) -> AccountRecord | None:
         with Session(engine) as session:

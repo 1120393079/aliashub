@@ -23,7 +23,7 @@ async function api(path, options = {}) {
     body: options.body ? JSON.stringify(options.body) : undefined,
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || `AliasHub HTTP ${response.status}`);
+  if (!response.ok) throw new Error(data.error || `注册工作站 HTTP ${response.status}`);
   return data;
 }
 
@@ -63,7 +63,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.type === "openAliases") {
       const accounts = await api("/api/extension/accounts");
       const target = accounts.items[0];
-      if (!target) throw new Error("请先在 AliasHub 网站选择一个源头邮箱");
+      if (!target) throw new Error("请先在注册工作站选择一个源头邮箱");
       await chrome.tabs.create({ url: target.officialUrl });
       return { ok: true };
     }

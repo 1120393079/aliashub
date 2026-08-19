@@ -1424,7 +1424,10 @@ class PickupStore:
         upsert=False,
         clear_credentials=False,
         allow_unbound=False,
+        relist=False,
     ):
+        if relist and not upsert:
+            raise ValueError("重新上架必须同时启用 upsert")
         normalized = []
         items = items or []
         if count:
@@ -1469,6 +1472,19 @@ class PickupStore:
                 for item, email, source in zip(normalized, emails, sources):
                     existing = db.execute("SELECT * FROM pickup_mailboxes WHERE email = ?", (email,)).fetchone()
                     if existing and upsert:
+                        restore_archived = False
+                        if relist and existing["hidden_at"]:
+                            if existing["status"] != "sold":
+                                raise ValueError(f"邮箱 {email} 的归档状态异常，不能自动重新上架")
+                            sale_evidence = any(
+                                str(existing[field] or "").strip()
+                                for field in ("sold_at", "ldxp_trade_no", "ldxp_card_digest")
+                            )
+                            if sale_evidence:
+                                raise ValueError(f"邮箱 {email} 已有销售记录，不能自动重新上架")
+                            restore_archived = True
+                        elif relist and existing["status"] in {"sold", "disabled"}:
+                            raise ValueError(f"邮箱 {email} 当前状态为 {existing['status']}，不能自动重新上架")
                         account_password = "" if clear_credentials else item["password"] or existing["account_password"]
                         access_token = "" if clear_credentials else item["access_token"] or existing["access_token"]
                         preserve_source = source and source["provider"] == "unbound" and existing["source_account_id"]
@@ -1493,6 +1509,16 @@ class PickupStore:
                                 existing["id"],
                             ),
                         )
+                        if restore_archived:
+                            db.execute(
+                                """
+                                UPDATE pickup_mailboxes
+                                SET status = 'ready', sold_at = NULL, ldxp_trade_no = '',
+                                    ldxp_card_digest = '', hidden_at = NULL, updated_at = ?
+                                WHERE id = ?
+                                """,
+                                (isoformat(now), existing["id"]),
+                            )
                         created_ids.append(existing["id"])
                         continue
                     cursor = db.execute(
@@ -3360,6 +3386,7 @@ class PickupHandler(BaseHTTPRequestHandler):
                     upsert=bool(payload.get("upsert")),
                     clear_credentials=bool(payload.get("clear_credentials")),
                     allow_unbound=bool(payload.get("allow_unbound")),
+                    relist=payload.get("relist") is True,
                 )
                 self.send_json(201, {"items": items})
                 return

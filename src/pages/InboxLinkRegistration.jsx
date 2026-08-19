@@ -156,7 +156,7 @@ export default function InboxLinkRegistrationPage({ onNavigate }) {
             <div className="inbox-link-bind-actions">
               <span>检测到 <b>{detectedCount}</b> 行</span>
               <Button variant="primary" size="lg" icon={MailPlus} loading={importing} disabled={!detectedCount || !data.encryption_ready} onClick={bind}>绑定邮箱</Button>
-              <Button icon={Play} onClick={() => onNavigate("registration", { mailboxMode: "inbox_link" })}>去 ChatGPT 注册</Button>
+              <Button icon={Play} onClick={() => onNavigate("registration", { mailboxMode: "inbox_link" })}>去注册工作站</Button>
             </div>
             {!data.encryption_ready && <div className="inline-alert error"><KeyRound size={16} /><span>服务端未配置加密密钥，暂时不能保存取件链接。</span></div>}
           </div>
@@ -167,7 +167,7 @@ export default function InboxLinkRegistrationPage({ onNavigate }) {
             <header className="panel-header"><div><h2>使用流程</h2><p>绑定与注册分开管理</p></div><ShieldCheck size={20} /></header>
             <ol>
               <li><b>绑定邮箱</b><span>在本页粘贴邮箱和取件链接。</span></li>
-              <li><b>选择邮箱来源</b><span>前往 ChatGPT 注册，选择“链接取件邮箱池”。</span></li>
+              <li><b>选择邮箱来源</b><span>前往注册工作站，选择“链接取件邮箱池”。</span></li>
               <li><b>填写注册数量</b><span>输入几个就从可用绑定中取几个。</span></li>
               <li><b>邮件中心</b><span>每个链接邮箱独立显示，可单独同步邮件和验证码。</span></li>
             </ol>

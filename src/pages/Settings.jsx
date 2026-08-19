@@ -1,24 +1,39 @@
 import { useEffect, useState } from "react";
-import { Cable, Copy, Database, Download, ExternalLink, KeyRound, LockKeyhole, Mail, Puzzle, Save, Server, ShieldCheck } from "lucide-react";
+import { Cable, Copy, Database, Download, ExternalLink, KeyRound, LockKeyhole, Mail, Puzzle, Save, Server, ShieldCheck, Smartphone } from "lucide-react";
 import { api, appUrl } from "../api.js";
 import { Button, FormField, LoadingBlock, StatusBadge, useToast } from "../components.jsx";
 import { copyText } from "../utils.js";
 
-export default function SettingsPage() {
+export default function SettingsPage({ initialSection = "" }) {
   const [form, setForm] = useState(null);
   const [health, setHealth] = useState(null);
   const [nfapi, setNfapi] = useState(null);
+  const [heroSms, setHeroSms] = useState(null);
   const [saving, setSaving] = useState(false);
   const [savingNfapi, setSavingNfapi] = useState(false);
   const [testingNfapi, setTestingNfapi] = useState(false);
+  const [savingHeroSms, setSavingHeroSms] = useState(false);
+  const [testingHeroSms, setTestingHeroSms] = useState(false);
+  const [activeSection, setActiveSection] = useState(initialSection || "general");
   const toast = useToast();
 
   const load = async () => {
     try {
-      const [settings, status, nfapiConfig] = await Promise.all([api("/api/settings"), api("/api/health"), api("/api/nfapi/config")]);
+      const [settings, status, nfapiConfig, heroSmsConfig] = await Promise.all([
+        api("/api/settings"),
+        api("/api/health"),
+        api("/api/nfapi/config"),
+        api("/api/registration/payment-agreements/settings").catch((error) => ({
+          configured: false,
+          api_key_configured: false,
+          encryption_ready: false,
+          load_error: error.message || "HeroSMS 配置读取失败",
+        })),
+      ]);
       setForm(settings);
       setHealth(status);
       setNfapi({ ...nfapiConfig, admin_api_key: "" });
+      setHeroSms({ ...heroSmsConfig, api_key: "" });
     } catch (error) {
       toast(error.message, "error");
     }
@@ -58,7 +73,51 @@ export default function SettingsPage() {
     }
   };
 
+  const saveHeroSms = async () => {
+    setSavingHeroSms(true);
+    try {
+      const apiKey = heroSms.api_key.trim();
+      const result = await api("/api/registration/payment-agreements/settings", {
+        method: "PUT",
+        body: {
+          ...(apiKey ? { api_key: apiKey } : {}),
+          max_price: Number(heroSms.max_price),
+          change_retries: Number(heroSms.change_retries),
+          wait_seconds: Number(heroSms.wait_seconds),
+        },
+      });
+      setHeroSms({ ...result, api_key: "" });
+      toast("HeroSMS 接码配置已保存");
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      setSavingHeroSms(false);
+    }
+  };
+
+  const testHeroSms = async () => {
+    setTestingHeroSms(true);
+    try {
+      const result = await api("/api/registration/payment-agreements/test", { method: "POST" });
+      toast(`HeroSMS 连接正常，当前余额 ${result.balance}`);
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      setTestingHeroSms(false);
+    }
+  };
+
   useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!initialSection || !form || !heroSms) return;
+    setActiveSection(initialSection);
+    window.requestAnimationFrame(() => document.getElementById(initialSection)?.scrollIntoView({ block: "start" }));
+  }, [initialSection, form, heroSms]);
+
+  const scrollSection = (section) => {
+    setActiveSection(section);
+    document.getElementById(section)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
 
   const save = async () => {
     setSaving(true);
@@ -80,11 +139,27 @@ export default function SettingsPage() {
     }
   };
 
-  if (!form || !nfapi) return <div className="page-stack"><LoadingBlock rows={7} /></div>;
+  if (!form || !nfapi || !heroSms) return <div className="page-stack"><LoadingBlock rows={7} /></div>;
+
+  const heroMaxPrice = Number(heroSms.max_price);
+  const heroRetries = Number(heroSms.change_retries);
+  const heroWaitSeconds = Number(heroSms.wait_seconds);
+  const heroSmsValid = heroSms.encryption_ready !== false
+    && (heroSms.api_key_configured || heroSms.api_key.trim())
+    && Number.isFinite(heroMaxPrice) && heroMaxPrice > 0 && heroMaxPrice <= 100
+    && Number.isInteger(heroRetries) && heroRetries >= 0 && heroRetries <= 10
+    && Number.isInteger(heroWaitSeconds) && heroWaitSeconds >= 30 && heroWaitSeconds <= 1800;
 
   return (
     <div className="settings-layout">
-      <aside className="settings-index"><a href="#general"><Mail size={16} />基本设置</a><a href="#nfapi"><Cable size={16} />NFapi 连接</a><a href="#security"><ShieldCheck size={16} />邮箱连接安全</a><a href="#connector"><Puzzle size={16} />官网扩展</a><a href="#runtime"><Server size={16} />运行状态</a></aside>
+      <aside className="settings-index">
+        <button type="button" className={activeSection === "general" ? "active" : ""} onClick={() => scrollSection("general")}><Mail size={16} />基本设置</button>
+        <button type="button" className={activeSection === "nfapi" ? "active" : ""} onClick={() => scrollSection("nfapi")}><Cable size={16} />NFapi 连接</button>
+        <button type="button" className={activeSection === "herosms" ? "active" : ""} onClick={() => scrollSection("herosms")}><Smartphone size={16} />HeroSMS 接码</button>
+        <button type="button" className={activeSection === "security" ? "active" : ""} onClick={() => scrollSection("security")}><ShieldCheck size={16} />邮箱连接安全</button>
+        <button type="button" className={activeSection === "connector" ? "active" : ""} onClick={() => scrollSection("connector")}><Puzzle size={16} />官网扩展</button>
+        <button type="button" className={activeSection === "runtime" ? "active" : ""} onClick={() => scrollSection("runtime")}><Server size={16} />运行状态</button>
+      </aside>
       <div className="settings-content">
         <section id="general" className="settings-section">
           <header><span><Mail size={19} /></span><div><h2>基本设置</h2><p>管理台与验证码数据配置</p></div></header>
@@ -101,24 +176,41 @@ export default function SettingsPage() {
           </div>
         </section>
 
+        <section id="herosms" className="settings-section">
+          <header><span><Smartphone size={19} /></span><div><h2>HeroSMS 接码</h2><p>同一把加密 Key 同时用于 PayPal 协议和 OpenAI 自动接码</p></div><StatusBadge status={heroSms.configured ? "active" : "inactive"}>{heroSms.configured ? "已配置" : "未配置"}</StatusBadge></header>
+          <div className="settings-form">
+            <div className="nfapi-connection-state"><Smartphone size={17} /><span><b>{heroSms.api_key_configured ? "HeroSMS API Key 已保存" : "等待配置 HeroSMS API Key"}</b><small>{heroSms.encryption_ready ? "API Key 使用 AES-256-GCM 加密保存；PayPal 使用 ts，OpenAI 使用 dr" : "服务器 DATA_ENCRYPTION_KEY 尚未配置"}</small></span><StatusBadge status={heroSms.api_key_configured ? "active" : "inactive"}>{heroSms.api_key_configured ? "Key 已配置" : "缺少 Key"}</StatusBadge></div>
+            {(heroSms.load_error || heroSms.api_key_error) && <div className="inline-alert error"><span>{heroSms.load_error || heroSms.api_key_error}</span></div>}
+            <FormField label="HeroSMS API Key" hint={heroSms.api_key_configured ? "已配置；留空保存会保留原 Key，输入新值才会替换。" : "从 HeroSMS API 页面复制；保存后不会在页面回显。"}><input type="password" autoComplete="new-password" value={heroSms.api_key} disabled={savingHeroSms} onChange={(event) => setHeroSms({ ...heroSms, api_key: event.target.value })} placeholder={heroSms.api_key_configured ? "留空保留现有 Key" : "输入 HeroSMS API Key"} /></FormField>
+            <div className="form-grid three">
+              <FormField label="PayPal 单号最高价格" hint="OpenAI 使用账号页弹窗中的独立上限；允许范围 0.01–100"><input type="number" min="0.01" max="100" step="0.01" value={heroSms.max_price ?? 1} disabled={savingHeroSms} onChange={(event) => setHeroSms({ ...heroSms, max_price: event.target.value })} /></FormField>
+              <FormField label="PayPal 自动换号次数" hint="允许范围 0–10"><input type="number" min="0" max="10" step="1" value={heroSms.change_retries ?? 2} disabled={savingHeroSms} onChange={(event) => setHeroSms({ ...heroSms, change_retries: event.target.value })} /></FormField>
+              <FormField label="PayPal 等码秒数" hint="允许范围 30–1800 秒"><input type="number" min="30" max="1800" step="1" value={heroSms.wait_seconds ?? 120} disabled={savingHeroSms} onChange={(event) => setHeroSms({ ...heroSms, wait_seconds: event.target.value })} /></FormField>
+            </div>
+            <div className="nfapi-connection-actions"><Button icon={Cable} loading={testingHeroSms} disabled={savingHeroSms || !heroSms.api_key_configured} onClick={testHeroSms}>测试已保存 Key</Button><Button variant="primary" icon={Save} loading={savingHeroSms} disabled={testingHeroSms || !heroSmsValid} onClick={saveHeroSms}>保存 HeroSMS 设置</Button></div>
+          </div>
+        </section>
+
         <section id="security" className="settings-section">
-          <header><span><LockKeyhole size={19} /></span><div><h2>邮箱连接安全</h2><p>Microsoft、Google 公共客户端与 iCloud IMAP 凭据存储</p></div></header>
+          <header><span><LockKeyhole size={19} /></span><div><h2>邮箱连接安全</h2><p>Microsoft、Google 公共客户端与 iCloud / mail.com / 网易邮箱凭据存储</p></div></header>
           <div className="security-list">
             <div><ShieldCheck size={17} /><span><b>Microsoft Authorization Code + PKCE</b><small>{form.microsoft_oauth_client}</small></span><StatusBadge status="active">已启用</StatusBadge></div>
-            <div><ShieldCheck size={17} /><span><b>Google 内置公共客户端 + PKCE</b><small>Thunderbird 邮件公共客户端；AliasHub 只执行 Gmail 邮件读取</small></span><StatusBadge status="active">已启用</StatusBadge></div>
-            <div><KeyRound size={17} /><span><b>邮箱连接凭据</b><small>OAuth Refresh Token 与 iCloud App 专用密码均使用 AES-256-GCM 加密保存</small></span><StatusBadge status="active">已加密</StatusBadge></div>
-            <div><Database size={17} /><span><b>邮件读取权限</b><small>Microsoft Graph Mail.Read · Google Gmail readonly · iCloud IMAP readonly</small></span><StatusBadge status="active">只读</StatusBadge></div>
+            <div><ShieldCheck size={17} /><span><b>Google 内置公共客户端 + PKCE</b><small>Thunderbird 邮件公共客户端；注册工作站只执行 Gmail 邮件读取</small></span><StatusBadge status="active">已启用</StatusBadge></div>
+            <div><KeyRound size={17} /><span><b>邮箱连接凭据</b><small>OAuth Refresh Token、iCloud App 专用密码、mail.com 登录密码与网易客户端授权码均使用 AES-256-GCM 加密保存</small></span><StatusBadge status="active">已加密</StatusBadge></div>
+            <div><Database size={17} /><span><b>网易邮箱 IMAP</b><small>@163.com / @126.com / @yeah.net 母号；固定连接 imap.163.com:993 / imap.126.com:993 / imap.yeah.net:993 · TLS</small></span><StatusBadge status="active">已支持</StatusBadge></div>
+            <div><Mail size={17} /><span><b>网易替身邮箱</b><small>替身邮箱固定使用 @aka.yeah.net，通过所属母号的 IMAP 邮箱读取邮件</small></span><StatusBadge status="active">已支持</StatusBadge></div>
+            <div><Database size={17} /><span><b>邮件读取权限</b><small>Microsoft Graph Mail.Read · Google Gmail readonly · iCloud / mail.com / 网易邮箱 IMAP readonly</small></span><StatusBadge status="active">只读</StatusBadge></div>
           </div>
         </section>
 
         <section id="connector" className="settings-section">
           <header><span><Puzzle size={19} /></span><div><h2>Microsoft 官网扩展</h2><p>仅用于在本地浏览器操作 Microsoft 官方别名页面</p></div></header>
-          <div className="settings-form"><FormField label="扩展配对密钥"><div className="copy-input"><input readOnly value={form.extension_api_key || ""} /><Button icon={Copy} onClick={() => copyText(form.extension_api_key).then(() => toast("扩展配对密钥已复制"))}>复制</Button></div></FormField><Button variant="primary" icon={Download} onClick={() => { window.location.href = appUrl(form.extension_download); }}>下载 AliasHub 扩展</Button></div>
+          <div className="settings-form"><FormField label="扩展配对密钥"><div className="copy-input"><input readOnly value={form.extension_api_key || ""} /><Button icon={Copy} onClick={() => copyText(form.extension_api_key).then(() => toast("扩展配对密钥已复制"))}>复制</Button></div></FormField><Button variant="primary" icon={Download} onClick={() => { window.location.href = appUrl(form.extension_download); }}>下载注册工作站扩展</Button></div>
         </section>
 
         <section id="runtime" className="settings-section">
           <header><span><Server size={19} /></span><div><h2>运行状态</h2><p>生产服务与支持范围</p></div></header>
-          <dl className="runtime-grid"><div><dt>API 服务</dt><dd><span className="live-dot" />{health?.status === "ok" ? "运行正常" : "未知"}</dd></div><div><dt>源头邮箱</dt><dd>{health?.accounts || 0} 个</dd></div><div><dt>邮箱提供商</dt><dd>Microsoft · Google · iCloud</dd></div><div><dt>Microsoft 域名</dt><dd>{(form.supported_domains || []).join(" · ")}</dd></div><div><dt>服务地址</dt><dd>{form.public_base_url}</dd></div><div><dt>Google OAuth</dt><dd>内置授权</dd></div><div><dt>iCloud IMAP</dt><dd>{form.icloud_imap?.host || "imap.mail.me.com"}:{form.icloud_imap?.port || 993} · TLS</dd></div></dl>
+          <dl className="runtime-grid"><div><dt>API 服务</dt><dd><span className="live-dot" />{health?.status === "ok" ? "运行正常" : "未知"}</dd></div><div><dt>源头邮箱</dt><dd>{health?.accounts || 0} 个</dd></div><div><dt>邮箱提供商</dt><dd>Microsoft · Google · iCloud · mail.com · 网易邮箱</dd></div><div><dt>Microsoft 域名</dt><dd>{(form.supported_domains || []).join(" · ")}</dd></div><div><dt>服务地址</dt><dd>{form.public_base_url}</dd></div><div><dt>Google OAuth</dt><dd>内置授权</dd></div><div><dt>iCloud IMAP</dt><dd>{form.icloud_imap?.host || "imap.mail.me.com"}:{form.icloud_imap?.port || 993} · TLS</dd></div><div><dt>mail.com IMAP</dt><dd>imap.mail.com:993 · TLS</dd></div><div><dt>网易邮箱域名</dt><dd>@163.com · @126.com · @yeah.net</dd></div><div><dt>网易替身域</dt><dd>@aka.yeah.net</dd></div><div><dt>网易 IMAP</dt><dd>imap.163.com:993 / imap.126.com:993 / imap.yeah.net:993 · TLS</dd></div></dl>
           <a className="official-doc-link" href="https://support.microsoft.com/en-us/outlook/add-or-remove-an-email-alias-in-outlook-com" target="_blank" rel="noreferrer"><ExternalLink size={15} />Microsoft 官方别名规则</a>
         </section>
       </div>

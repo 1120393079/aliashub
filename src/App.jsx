@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Bell, BookOpen, Bot, ChevronDown, Inbox, KeyRound, Layers, LayoutDashboard, Link2, LogOut, Mail, Menu, Moon, Plus, Settings, ShieldCheck, Store, Sun, WandSparkles, X } from "lucide-react";
+import { Bell, BookOpen, Bot, ChevronDown, Cog, Inbox, KeyRound, Layers, LayoutDashboard, Link2, LogOut, Mail, Menu, Moon, Plus, Settings, ShieldCheck, Store, Sun, WandSparkles, X } from "lucide-react";
 import { api } from "./api.js";
 import { Button, IconButton, LoadingBlock, MicrosoftMark, ProviderMark, useToast } from "./components.jsx";
 import OverviewPage from "./pages/Overview.jsx";
@@ -17,7 +17,7 @@ import SettingsPage from "./pages/Settings.jsx";
 
 const pages = {
   overview: { label: "总览", subtitle: "源头邮箱与任务状态", icon: LayoutDashboard },
-  sources: { label: "源头邮箱", subtitle: "Microsoft、Google 与 iCloud 邮箱", icon: Mail },
+  sources: { label: "源头邮箱", subtitle: "Microsoft、Google、iCloud、mail.com 与网易邮箱", icon: Mail },
   factory: { label: "别名工厂", subtitle: "官方别名与 Plus 分裂地址", icon: WandSparkles },
   inbox: { label: "邮件中心", subtitle: "集中接收所有绑定邮箱的邮件", icon: Inbox },
   codes: { label: "验证码中心", subtitle: "集中查看所有源头号的验证码", icon: KeyRound },
@@ -32,6 +32,15 @@ const pages = {
 
 const mobilePageKeys = ["overview", "sources", "inbox", "addresses", "registration"];
 const emailWorkspacePageKeys = ["sources", "factory", "inbox", "codes", "addresses", "inbox-link", "sales", "microsoft-registration", "icloud-privacy"];
+
+function BrandMark() {
+  return (
+    <span className="brand-mark" aria-hidden="true">
+      <img src={`${import.meta.env.BASE_URL}naturalflower-logo.png`} alt="" />
+      <Cog className="brand-mark-mechanic" aria-hidden="true" />
+    </span>
+  );
+}
 
 function LoginPage({ onAuthenticated }) {
   const [form, setForm] = useState({ username: "admin", password: "" });
@@ -48,7 +57,7 @@ function LoginPage({ onAuthenticated }) {
   return (
     <main className="login-page">
       <section className="login-panel">
-        <div className="login-brand"><img src={`${import.meta.env.BASE_URL}aliashub-mark.svg`} alt="" /><div><strong>AliasHub</strong><span>多邮箱别名中枢</span></div></div>
+        <div className="login-brand"><BrandMark /><div><strong>注册工作站</strong><span>账号注册与邮箱管理</span></div></div>
         <div className="login-heading"><h1>登录管理台</h1><p>访问源头邮箱、别名和验证码</p></div>
         <form onSubmit={submit} className="form-stack">
           <label className="form-field"><span className="field-label">管理员账号</span><input autoComplete="username" value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} /></label>
@@ -123,11 +132,11 @@ export default function App() {
     if (page === "addresses") return <AddressesPage {...props} initialAccountId={routeState.accountId} initialKind={routeState.kind} initialStrategy={routeState.strategy} />;
     if (page === "sales") return <SalesPage {...props} />;
     if (page === "icloud-privacy") return <ICloudPrivacyPage {...props} />;
-    if (page === "settings") return <SettingsPage {...props} />;
+    if (page === "settings") return <SettingsPage {...props} initialSection={routeState.section} />;
     return <OverviewPage {...props} overview={overview} onAddAccount={() => { navigate("sources"); setAddAccountOpen(true); }} />;
   }, [page, refreshKey, routeState, overview, addAccountOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (!auth) return <div className="boot-screen"><img src={`${import.meta.env.BASE_URL}aliashub-mark.svg`} alt="AliasHub" /><LoadingBlock rows={2} /></div>;
+  if (!auth) return <div className="boot-screen" role="status" aria-label="注册工作站正在加载"><BrandMark /><LoadingBlock rows={2} /></div>;
   if (!auth.authenticated) return <LoginPage onAuthenticated={checkAuth} />;
   const current = pages[page] || pages.overview;
   const unusedCodes = overview?.metrics?.unusedCodes || 0;
@@ -137,7 +146,7 @@ export default function App() {
   return (
     <div className="app-shell">
       <aside className={`sidebar ${mobileNav ? "open" : ""}`}>
-        <div className="sidebar-brand"><img src={`${import.meta.env.BASE_URL}aliashub-mark.svg`} alt="" /><div><strong>AliasHub</strong><span>邮箱别名中枢</span></div><IconButton className="sidebar-close" icon={X} label="关闭菜单" onClick={() => setMobileNav(false)} /></div>
+        <div className="sidebar-brand"><BrandMark /><div><strong>注册工作站</strong><span>账号注册与邮箱管理</span></div><IconButton className="sidebar-close" icon={X} label="关闭菜单" onClick={() => setMobileNav(false)} /></div>
         <nav className="sidebar-nav" aria-label="主导航">
           {Object.entries(pages).filter(([key]) => key === "overview").map(([key, item]) => {
             const Icon = item.icon;
@@ -172,7 +181,7 @@ export default function App() {
             return <button key={key} className={className} onClick={() => navigate(key)}><Icon size={18} /><span>{item.label}</span></button>;
           })}
         </nav>
-        <div className="sidebar-provider"><span className="provider-mark-stack"><ProviderMark provider="microsoft" size={25} /><ProviderMark provider="google" size={25} /><ProviderMark provider="icloud" size={25} /></span><span className="sidebar-provider-copy"><b>Microsoft + Google + iCloud</b><small>Outlook · Gmail · iCloud</small></span><i className="online-dot" /></div>
+        <div className="sidebar-provider"><span className="provider-mark-stack"><ProviderMark provider="microsoft" size={25} /><ProviderMark provider="google" size={25} /><ProviderMark provider="icloud" size={25} /><ProviderMark provider="mailcom" size={25} /><ProviderMark provider="netease" size={25} /></span><span className="sidebar-provider-copy"><b>Microsoft · Google · iCloud · mail.com · 网易</b><small>Outlook · Gmail · iCloud · mail.com · 163/126/yeah</small></span><i className="online-dot" /></div>
         <div className="sidebar-footer">{auth.authEnabled && <button onClick={logout}><LogOut size={17} /><span>退出管理台</span></button>}<span className="version">v1.0</span></div>
       </aside>
       {mobileNav && <button className="sidebar-overlay" aria-label="关闭菜单" onClick={() => setMobileNav(false)} />}

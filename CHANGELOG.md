@@ -13,19 +13,40 @@ All notable changes to AliasHub are documented in this file.
 - Added the complete standalone Mail Pickup service, buyer and administrator
   pages, compatible mailbox query API, inbound delivery, storefront automation,
   tests, Docker image, and Full Compose integration.
+- Added direct PayPal billing-agreement link extraction for registered accounts,
+  persistent task progress, independent Checkout and Update proxy pools, proxy
+  rotation and subscription import, plus DE/EUR, TR/USD, and GB/GBP billing
+  profiles.
+- Added the complete payment-link extractor source, workbench, CLI, Docker image,
+  and Full Compose integration so the direct-link flow is reproducible from a
+  clean clone.
+- Added registration-failure markers to the address inventory and registration
+  selector, plus one-click filtered selection and guarded bulk deletion of failed
+  addresses.
+- Added NetEase mailbox import for `@163.com`, `@126.com`, and `@yeah.net`
+  accounts using client authorization codes, including direct registration and
+  inbox routing for imported `@aka.yeah.net` alias addresses.
+- Added selectable proxy routes for Access Token refresh, exact Plus activation
+  time display and sorting, and deleted-account detection from account state and
+  mailbox evidence.
 
 ### Changed
 
 - Replaced deployment-specific Pickup domains, product IDs, image URLs, and
   account examples with environment-driven or documentation-only defaults.
-- Full mode now starts AliasHub, the registration worker, and Mail Pickup while
-  preserving all runtime state under ignored `.env` and `data/` paths.
+- Full mode now starts AliasHub, the registration worker, Mail Pickup, and the
+  payment-link extractor while preserving all runtime state under ignored `.env`
+  and `data/` paths.
 
 ### Security
 
 - Pickup publication never sends Access Tokens; source-address publication
   clears credentials, and repository checks exclude databases, credentials,
   browser profiles, private domains, and production configuration.
+- Removed deployment-specific NFapi, Pickup, Google OAuth, mailbox-link, custom
+  domain, proxy-account, and workspace fixtures from the published source. All
+  deployment credentials and service endpoints now come from ignored local
+  configuration or administrator settings.
 
 ## [1.2.0] - 2026-08-04
 

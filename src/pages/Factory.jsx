@@ -198,7 +198,7 @@ export default function FactoryPage({ refreshKey, onDataChange, onNavigate, acti
   }, [detail, selectedBases, splitForm]);
 
   if (loading && !accounts.length) return <div className="page-stack"><LoadingBlock rows={8} /></div>;
-  if (!accounts.length || !selectedAccount || !effectiveMode) return <div className="page-stack"><EmptyState icon={Mail} title="先添加支持别名的源头邮箱" description="别名工厂支持 Microsoft 官方别名和 Google Plus 分裂；iCloud 可用于收取邮件和验证码。" action={<Button variant="primary" onClick={() => onNavigate("sources")}>添加源头邮箱</Button>} /></div>;
+  if (!accounts.length || !selectedAccount || !effectiveMode) return <div className="page-stack"><EmptyState icon={Mail} title="先添加支持别名的源头邮箱" description="别名工厂用于 Microsoft 官方别名和 Google Plus 分裂；iCloud 与 mail.com 官方地址请在源头邮箱中登记后直接注册。" action={<Button variant="primary" onClick={() => onNavigate("sources")}>管理源头邮箱</Button>} /></div>;
 
   return (
     <div className="page-stack factory-page">
@@ -216,7 +216,7 @@ export default function FactoryPage({ refreshKey, onDataChange, onNavigate, acti
               <div className="form-grid two"><FormField label="地址前缀" hint="可留空"><input value={officialForm.prefix} onChange={(event) => updateOfficial("prefix", event.target.value)} placeholder="例如 alex" /></FormField><FormField label="生成形式"><select value={officialForm.mode} onChange={(event) => updateOfficial("mode", event.target.value)}><option value="random">随机字符</option><option value="readable">易读单词</option><option value="sequence">连续编号</option></select></FormField></div>
               <div className="form-grid two"><FormField label="统一标签"><input value={officialForm.label} onChange={(event) => updateOfficial("label", event.target.value)} /></FormField><FormField label="用途"><input value={officialForm.purpose} onChange={(event) => updateOfficial("purpose", event.target.value)} placeholder="例如 注册账号" /></FormField></div>
               <div className="official-run-summary"><span className="address-kind-icon kind-official"><AtSign size={17} /></span><div><b>新地址创建为 @outlook.com</b><small>Hotmail、Live 和 MSN 源头号同样遵循此规则</small></div></div>
-              <div className="connector-prerequisite"><Download size={18} /><span><b>AliasHub 官网连接器（可选）</b><small>仅自动生成需要；不用连接器可在官网创建后手工登记</small></span><div className="connector-actions"><Button size="sm" icon={ListPlus} onClick={() => setAliasSyncOpen(true)}>手工登记</Button><Button size="sm" icon={Download} onClick={downloadExtension}>下载连接器</Button></div></div>
+              <div className="connector-prerequisite"><Download size={18} /><span><b>注册工作站官网连接器（可选）</b><small>仅自动生成需要；不用连接器可在官网创建后手工登记</small></span><div className="connector-actions"><Button size="sm" icon={ListPlus} onClick={() => setAliasSyncOpen(true)}>手工登记</Button><Button size="sm" icon={Download} onClick={downloadExtension}>下载连接器</Button></div></div>
               <Button variant="primary" size="lg" icon={Play} loading={submitting} disabled={selectedAccount?.status !== "connected" || ["queued", "running", "waiting_user"].includes(job?.status)} onClick={startOfficial}>使用连接器自动生成</Button>
               {selectedAccount?.status !== "connected" && <div className="inline-alert warning"><AlertCircle size={16} /><span>这个源头邮箱需要重新登录后才能操作微软官网。</span><Button size="sm" onClick={() => onNavigate("sources")}>去登录</Button></div>}
               <JobProgress job={job} onReconnect={reconnectOfficial} onDownload={downloadExtension} onManual={() => stopJob(true)} onCancel={() => stopJob(false)} cancelling={cancelling} />

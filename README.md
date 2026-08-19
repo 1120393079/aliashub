@@ -7,13 +7,20 @@ the installation that you control.
 
 ## Features
 
-- Connect multiple Microsoft and Google source mailboxes with OAuth, plus
-  iCloud Mail with an Apple App-specific password.
-- Encrypt refresh tokens and iCloud App-specific passwords at rest with
+- Connect multiple Microsoft and Google source mailboxes with OAuth, iCloud Mail
+  with an Apple App-specific password, mail.com with its login password, and
+  NetEase mailboxes with a client authorization code.
+- Encrypt refresh tokens and all stored IMAP credentials at rest with
   AES-256-GCM.
 - Read inbox messages, extract verification codes, search mail, and export
   address inventories.
 - Manage Outlook official aliases and generate repeatable `+tag` addresses.
+- Import NetEase `@163.com`, `@126.com`, or `@yeah.net` mother accounts with a
+  client authorization code, map their `@aka.yeah.net` alias addresses, and use
+  those addresses directly for registration and verification-code delivery.
+- Mark addresses whose latest registration attempt failed, select every failed
+  address in the current filtered inventory with one action, and remove the
+  selected addresses in a guarded bulk operation.
 - Run Outlook alias fill jobs through the optional Chrome/Edge connector.
 - Coordinate account registration through the bundled optional registration
   worker, including browser/noVNC links, proxy selection, direct Microsoft
@@ -27,13 +34,17 @@ the installation that you control.
   transient upstream failures preserve the last confirmed result.
 - Refresh an existing account's Access Token from its authenticated web session
   or original-mailbox OTP login, and mark deleted or disabled accounts with a
-  red `AT invalid` state. Access-token recovery and new-account registration use
-  independent worker lanes so one queue does not block the other.
+  red `AT invalid` state. The refresh can reuse the original route or a selected
+  saved proxy. Access-token recovery and new-account registration use independent
+  worker lanes so one queue does not block the other.
 - Group accounts automatically by detected plan or override groups manually in
   the account workspace, including bulk group edits and email search.
 - Classify existing or newly created Checkout sessions as `cs_live` or `oaics`
   through a verified German exit, with cached-link reuse and account cooldowns;
   detect the Japanese Plus one-month trial offer through a verified Japan exit.
+- Generate PayPal billing-agreement links directly from selected registered
+  accounts through the bundled extractor, with independent Checkout and Update
+  proxy pools and billing profiles for DE/EUR, TR/USD, and GB/GBP.
 - Restore accounts removed from the worker's local account pool from JSON, CSV,
   JSONL, TXT, or email-only input while reconnecting their retained AliasHub
   registration and mailbox resources.
@@ -54,7 +65,9 @@ web application and API, SQLite migrations, tests, Docker deployment files, the
 Outlook browser connector, and the registration worker with its browser/noVNC
 runtime under [`registration-worker/`](registration-worker/). It also includes
 the complete Mail Pickup service, buyer/admin pages, tests, and storefront
-automation under [`mail-pickup/`](mail-pickup/).
+automation under [`mail-pickup/`](mail-pickup/), plus the PayPal payment-link
+extractor, API, and workbench under
+[`payment-link-extractor/`](payment-link-extractor/).
 
 “Complete” refers to the supported AliasHub core and full deployment paths.
 The worker retains some upstream legacy or experimental routes whose separately
@@ -66,10 +79,11 @@ The deployment remains modular:
 
 - **Core mode** runs AliasHub only. Mailbox OAuth, message scanning, aliases,
   address generation, verification codes, and the browser connector all work.
-- **Full mode** also runs the bundled registration worker, headed browser, and
-  Mail Pickup service. It enables automatic account registration, account and
-  source-address publishing, buyer pickup links, and storefront synchronization
-  without separately installing those services.
+- **Full mode** also runs the bundled registration worker, headed browser, Mail
+  Pickup service, and payment-link extractor. It enables automatic account
+  registration, direct PayPal link extraction, account and source-address
+  publishing, buyer pickup links, and storefront synchronization without
+  separately installing those services.
 
 SUB2 is not a bundled service and is never required. Each deployment may connect
 its own SUB2-compatible service URL and Admin API Key, or leave both empty.
@@ -94,9 +108,10 @@ docker compose -f compose.yaml -f compose.full.yaml ps
 
 Open `http://127.0.0.1:4180`. The setup script prints the generated administrator
 password once and stores all deployment secrets in the local `.env` file. Full
-mode also binds the worker UI to `127.0.0.1:8000` and noVNC to
-`127.0.0.1:6080`, and Mail Pickup to `127.0.0.1:4190`; none is exposed on a
-public interface by default.
+mode also binds the worker UI to `127.0.0.1:8000`, noVNC to
+`127.0.0.1:6080`, Mail Pickup to `127.0.0.1:4190`, and the payment-link
+workbench to `127.0.0.1:18794`; none is exposed on a public interface by
+default.
 
 For native Node.js setup and remote-server deployment, see
 [LOCAL-DEPLOY.md](LOCAL-DEPLOY.md).
@@ -129,6 +144,7 @@ Run the verification suite before submitting a change:
 npm test
 npm run test:pickup
 npm run build
+python3 -c 'import ast,pathlib; [ast.parse(p.read_text(encoding="utf-8-sig"), filename=str(p)) for p in pathlib.Path("payment-link-extractor").rglob("*.py")]'
 ./scripts/check-public-release.sh
 ```
 
@@ -225,21 +241,38 @@ profiles remain deployment-local and are never part of the source repository.
 Native deployment and endpoint details are documented in
 [`mail-pickup/README.md`](mail-pickup/README.md).
 
+## PayPal payment-link extractor
+
+The bundled [`payment-link-extractor/`](payment-link-extractor/) service accepts
+one task per account from AliasHub, performs the Checkout/Update and provider
+flows, and returns only a validated HTTPS PayPal billing-agreement URL. AliasHub
+persists task progress and results, while Access Tokens and proxy credentials are
+sent only over the private Compose network and are not written to the source
+tree.
+
+Full Compose mode configures the internal service URL and a generated shared
+password automatically. In the AliasHub registration workspace, save separate
+Checkout and Update proxy pools, choose DE/EUR, TR/USD, or GB/GBP, select up to
+50 registered accounts, and run **直接提链**. The standalone workbench and CLI
+remain available for deployments that need them; see
+[`payment-link-extractor/README.md`](payment-link-extractor/README.md).
+
 ## Data and secrets
 
 Runtime state belongs in `.env` and `data/`; both are excluded from Git. Full
-mode stores the worker database in `data/registration-worker/` and Pickup state
-in `data/mail-pickup/`. Back up `.env` and the complete `data/` directory
-together. Losing `DATA_ENCRYPTION_KEY` or `PICKUP_TOKEN_SECRET` makes encrypted
-OAuth tokens, iCloud App-specific passwords, inbox-link keys, stored service
-credentials, or Pickup tokens unreadable.
+mode stores the worker database in `data/registration-worker/`, Pickup state in
+`data/mail-pickup/`, and extractor logs under `data/payment-link-extractor/`.
+Back up `.env` and the complete `data/` directory together. Losing
+`DATA_ENCRYPTION_KEY` or `PICKUP_TOKEN_SECRET` makes encrypted OAuth tokens,
+iCloud App-specific passwords, NetEase client authorization codes, inbox-link
+keys, stored service credentials, or Pickup tokens unreadable.
 
 Never commit:
 
 - `.env`, databases, attachments, logs, backups, or browser profiles;
 - OAuth tokens, callback URLs/codes, administrator passwords, or session keys;
-- connector pairing keys, registration-worker tokens, SUB2 API Keys, or proxy
-  credentials;
+- connector pairing keys, registration-worker or payment-extractor passwords,
+  SUB2 API Keys, proxy subscriptions, or proxy credentials;
 - mailbox inbox links or their embedded access keys;
 - private deployment hostnames, addresses, or production configuration.
 
@@ -252,6 +285,7 @@ See [docs/RELEASING.md](docs/RELEASING.md) before making the repository public.
 
 ## License
 
-AliasHub, the bundled registration worker, and Mail Pickup are distributed under the
-GNU Affero General Public License v3.0 only (`AGPL-3.0-only`). See
+AliasHub, the bundled registration worker, Mail Pickup, and payment-link
+extractor are distributed under the GNU Affero General Public License v3.0 only
+(`AGPL-3.0-only`). See
 [`LICENSE`](LICENSE) and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

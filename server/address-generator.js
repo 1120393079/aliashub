@@ -41,9 +41,40 @@ const MICROSOFT_DOMAINS = new Set([
 ]);
 const ICLOUD_DOMAINS = new Set(["icloud.com", "me.com", "mac.com"]);
 const ICLOUD_PRIVATE_RELAY_DOMAIN = "privaterelay.appleid.com";
+const NETEASE_DOMAINS = new Set(["163.com", "126.com", "yeah.net"]);
+const NETEASE_ALIAS_DOMAIN = "aka.yeah.net";
+const MAILCOM_DOMAINS = new Set([
+  "2trom.com", "accountant.com", "acdcfan.com", "adexec.com", "africamail.com", "alumni.com",
+  "angelic.com", "archaeologist.com", "arcticmail.com", "artlover.com", "asia.com", "atheist.com",
+  "australiamail.com", "bartender.net", "berlin.com", "bikerider.com", "birdlover.com",
+  "boardermail.com", "brazilmail.com", "brew-master.com", "bsdmail.com", "californiamail.com",
+  "catlover.com", "cheerful.com", "chef.net", "chemist.com", "chinamail.com", "collector.org",
+  "columnist.com", "comic.com", "consultant.com", "contractor.net", "counsellor.com", "cutey.com",
+  "cyber-wizard.com", "cyberdude.com", "cybergal.com", "dallasmail.com", "dbzmail.com",
+  "diplomats.com", "disciples.com", "discofan.com", "doglover.com", "doramail.com", "dr.com",
+  "dublin.com", "dutchmail.com", "elvisfan.com", "email.com", "engineer.com", "englandmail.com",
+  "europe.com", "europemail.com", "execs.com", "financier.com", "fireman.net", "galaxyhit.com",
+  "gardener.com", "geologist.com", "germanymail.com", "graduate.org", "graphic-designer.com",
+  "greenmail.net", "hackermail.com", "hairdresser.net", "hilarious.com", "hiphopfan.com",
+  "iname.com", "innocent.com", "irelandmail.com", "israelmail.com", "italymail.com", "keromail.com",
+  "kissfans.com", "kittymail.com", "koreamail.com", "legislator.com", "linuxmail.org", "lobbyist.com",
+  "lovecat.com", "madonnafan.com", "mail.com", "marchmail.com", "metalfan.com", "mexicomail.com",
+  "minister.com", "moscowmail.com", "munich.com", "musician.org", "muslim.com", "myself.com",
+  "ninfan.com", "nonpartisan.com", "nycmail.com", "optician.com", "orthodontist.net",
+  "pediatrician.com", "petlover.com", "photographer.net", "physicist.net", "polandmail.com",
+  "politician.com", "post.com", "priest.com", "programmer.net", "protestant.com", "publicist.com",
+  "ravemail.com", "realtyagent.com", "reborn.com", "reggaefan.com", "registerednurses.com",
+  "reincarnate.com", "religious.com", "repairman.com", "safrica.com", "saintly.com",
+  "sanfranmail.com", "scotlandmail.com", "secretary.net", "socialworker.net", "sociologist.com",
+  "songwriter.net", "spainmail.com", "swedenmail.com", "swissmail.com", "teachers.org", "techie.com",
+  "technologist.com", "theplate.com", "therapist.net", "toke.com", "toothfairy.com",
+  "torontomail.com", "tvstar.com", "usa.com", "uymail.com", "webname.com",
+]);
 export const ICLOUD_MAIL_ALIAS_STRATEGY = "icloud_mail_alias";
 export const ICLOUD_HIDE_MY_EMAIL_STRATEGY = "icloud_hide_my_email";
 export const ICLOUD_CUSTOM_DOMAIN_STRATEGY = "icloud_custom_domain";
+export const MAILCOM_ALIAS_STRATEGY = "mailcom_alias";
+export const NETEASE_ALIAS_STRATEGY = "netease_alias";
 export const ICLOUD_IMPORTED_ADDRESS_STRATEGIES = new Set([
   ICLOUD_MAIL_ALIAS_STRATEGY,
   ICLOUD_HIDE_MY_EMAIL_STRATEGY,
@@ -79,6 +110,28 @@ export function normalizeIcloudEmail(value) {
   return normalizeEmail(value);
 }
 
+export function normalizeMailcomEmail(value) {
+  const email = normalizeEmail(value);
+  if (!email) return "";
+  return MAILCOM_DOMAINS.has(email.split("@")[1]) ? email : "";
+}
+
+export function normalizeMailcomLoginEmail(value) {
+  // The fixed IMAP login verifies provider ownership before credentials are persisted.
+  return normalizeEmail(value);
+}
+
+export function normalizeNeteaseEmail(value) {
+  const email = normalizeEmail(value);
+  if (!email) return "";
+  return NETEASE_DOMAINS.has(email.split("@")[1]) ? email : "";
+}
+
+export function normalizeNeteaseAliasEmail(value) {
+  const email = normalizeEmail(value);
+  return email?.endsWith(`@${NETEASE_ALIAS_DOMAIN}`) ? email : "";
+}
+
 export function normalizeIcloudAliasEmail(value) {
   const email = normalizeEmail(value);
   if (!email) return "";
@@ -100,6 +153,14 @@ export function isIcloudPrivateRelay(value) {
 
 export function isIcloudImportedStrategy(value) {
   return ICLOUD_IMPORTED_ADDRESS_STRATEGIES.has(String(value || ""));
+}
+
+export function isMailcomAliasStrategy(value) {
+  return String(value || "") === MAILCOM_ALIAS_STRATEGY;
+}
+
+export function isNeteaseAliasStrategy(value) {
+  return String(value || "") === NETEASE_ALIAS_STRATEGY;
 }
 
 export function normalizeMicrosoftEmail(value) {
@@ -175,3 +236,6 @@ export function codeFromText(value) {
 export const microsoftDomains = [...MICROSOFT_DOMAINS];
 export const icloudDomains = [...ICLOUD_DOMAINS];
 export const icloudPrivateRelayDomain = ICLOUD_PRIVATE_RELAY_DOMAIN;
+export const mailcomDomains = [...MAILCOM_DOMAINS];
+export const neteaseDomains = [...NETEASE_DOMAINS];
+export const neteaseAliasDomain = NETEASE_ALIAS_DOMAIN;

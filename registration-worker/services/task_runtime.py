@@ -24,7 +24,7 @@ class TaskRuntime:
     def __init__(
         self,
         *,
-        max_parallel_tasks: int = 3,
+        max_parallel_tasks: int = 20,
         max_parallel_per_platform: int = 1,
         max_parallel_at_recovery: int = 2,
         poll_interval: float = 0.5,
@@ -62,8 +62,6 @@ class TaskRuntime:
         task = force_release_task(task_id)
         if not task:
             return None
-        with self._lock:
-            self._workers.pop(task_id, None)
         self.wake_up()
         return task
 
