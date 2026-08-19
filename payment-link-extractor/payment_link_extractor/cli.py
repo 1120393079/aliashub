@@ -10,7 +10,8 @@ import threading
 from urllib.parse import urlsplit
 
 from .application import extract_payment_link
-from .config import SUPPORTED_COUNTRIES
+from .config import DEFAULT_RETRY_COUNT, SUPPORTED_COUNTRIES, normalize_retry_count
+from .errors import CheckoutApprovalBlocked
 from .web.env import load_configured_env, load_env_file
 from .logging_utils import configure_logging, safe_log_text
 from .models import ExtractionConfig
@@ -60,6 +61,12 @@ def parse_args() -> argparse.Namespace:
         default=_env_bool("OPLL_UPDATE_CHECKOUT", True),
         help="run checkout/update before payment extraction",
     )
+    parser.add_argument(
+        "--retry-count",
+        type=int,
+        default=_env_retry_count(),
+        help="complete Checkout rounds after a blocked approval (default: 3)",
+    )
     return parser.parse_args()
 
 
@@ -91,12 +98,16 @@ def main() -> int:
                 payment_method=args.payment_method,
                 apply_checkout_update=args.update_checkout,
                 verbose=not args.quiet,
+                retry_count=normalize_retry_count(args.retry_count),
             )
         )
     except Exception as exc:
         error = getattr(exc, "detail", None) or str(exc)
+        payload = {"ok": False, "error": safe_log_text(error, 800)}
+        if isinstance(exc, CheckoutApprovalBlocked):
+            payload["error_category"] = "blocked"
         print(
-            json.dumps({"ok": False, "error": safe_log_text(error, 800)}, ensure_ascii=False),
+            json.dumps(payload, ensure_ascii=False),
             file=sys.stderr,
         )
         return 1
@@ -136,3 +147,10 @@ def _env_bool(name: str, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_retry_count() -> int:
+    try:
+        return normalize_retry_count(os.getenv("OPLL_RETRY_COUNT", str(DEFAULT_RETRY_COUNT)))
+    except Exception:
+        return DEFAULT_RETRY_COUNT

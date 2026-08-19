@@ -141,6 +141,7 @@ h2 { margin-bottom: 4px; font-size: 18px; }
 .status-succeeded { background: #def5e8; color: #18794e; }
 .status-failed, .status-cancelled { background: #fde5e5; color: #a33b3b; }
 .status-network { background: #fff0d6; color: #a05a00; }
+.status-blocked { background: #eee7ff; color: #6543a5; }
 .status-nonzero { background: #fde5e5; color: #b33b3b; }
 .task-message { margin: 14px 0 0; color: #586572; font-size: 13px; }
 .task-progress { margin-top: 14px; }

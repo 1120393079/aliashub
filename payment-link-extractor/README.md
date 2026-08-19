@@ -7,6 +7,8 @@ AliasHub 自带的独立 PayPal 提链服务。源码、Web 工作台和 API 均
 - PayPal BA 链接提取与重定向解析
 - DE / EUR、TR / USD、GB / GBP 账单组合
 - Checkout Proxy 与 Update Proxy 独立配置和轮换
+- ChatGPT approval 返回 `blocked` 时丢弃旧 Checkout，按 `retry_count` 创建全新的 Checkout；默认 3 轮
+- 零元 PayPal 优惠流程即使 `retry_count=1`，也保留至少一次新的 Checkout 恢复机会
 - 异步任务、进度事件、取消、重试、批量删除与 WebSocket 推送
 - IPRocket 订阅导入、代理探测和可选链式代理桥
 - 密码保护的完整 Web 工作台和 JSON API

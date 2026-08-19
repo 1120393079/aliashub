@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 from ..auth import account_email, normalize_access_token
 from ..application import extract_payment_link
-from ..errors import ExtractionCancelled, NetworkError
+from ..errors import CheckoutApprovalBlocked, ExtractionCancelled, NetworkError
 from ..logging_utils import log_context
 from ..models import ExtractionConfig, PaymentLinkResult
 from .events import EVENT_HISTORY_SIZE, make_event, redact_text, utc_timestamp
@@ -22,6 +22,7 @@ TERMINAL_STATES = frozenset({"succeeded", "failed", "cancelled"})
 STAGE_PROGRESS = {
     "queued": 0,
     "running": 5,
+    "checkout_retry": 14,
     "eligibility_check": 10,
     "checkout": 15,
     "checkout_update": 25,
@@ -69,6 +70,7 @@ class TaskRecord:
     finished_at: str | None = None
     result: dict[str, Any] | None = None
     error: str | None = None
+    error_category: str | None = None
     network_error: bool = False
     account_email: str = ""
     session_kind: str | None = None
@@ -148,6 +150,7 @@ class TaskManager:
             "account_email": record.account_email,
             "payment_method": record.config.payment_method,
             "billing_country": record.config.country,
+            "retry_count": getattr(record.config, "retry_count", 3),
             "progress": record.progress,
         }
         if retry_of:
@@ -366,6 +369,7 @@ class TaskManager:
                 record.status = "failed"
                 record.stage = "failed"
                 record.error = redact_text(exc, self._secrets(record.config))
+                record.error_category = "blocked" if isinstance(exc, CheckoutApprovalBlocked) else None
                 record.network_error = isinstance(exc, NetworkError)
                 record.finished_at = utc_timestamp()
                 self._publish_locked(
@@ -374,6 +378,7 @@ class TaskManager:
                     {
                         "status": record.status,
                         "error": record.error,
+                        "error_category": record.error_category,
                         "network_error": record.network_error,
                         "progress": record.progress,
                     },
@@ -450,6 +455,7 @@ class TaskManager:
             "account_email": record.account_email,
             "payment_method": record.config.payment_method,
             "billing_country": record.config.country,
+            "retry_count": getattr(record.config, "retry_count", 3),
         }
         if record.session_kind:
             snapshot["session_kind"] = record.session_kind
@@ -461,6 +467,8 @@ class TaskManager:
             snapshot["result"] = record.result
         if record.error:
             snapshot["error"] = record.error
+        if record.error_category:
+            snapshot["error_category"] = record.error_category
         if record.status == "failed":
             snapshot["network_error"] = record.network_error
         return snapshot
