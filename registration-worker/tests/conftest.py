@@ -36,8 +36,13 @@ def _reset_db():
 
 
 @pytest.fixture()
-def client():
+def client(monkeypatch):
     """FastAPI TestClient with a clean database."""
+    from services import solver_manager
+
+    # API tests must not download or launch the optional Camoufox solver.
+    monkeypatch.setattr(solver_manager, "start_async", lambda: None)
+    monkeypatch.setattr(solver_manager, "stop", lambda: None)
     from main import app
 
     with TestClient(app, raise_server_exceptions=False) as c:

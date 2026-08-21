@@ -127,6 +127,7 @@ test("binds links encrypted and creates registration tasks from the saved mailbo
       body: JSON.stringify({
         mailboxMode: "inbox_link",
         count: 2,
+        concurrency: 5,
         browserMode: "headless",
         proxySelection: "direct",
         autoContinuePostSignup: true,
@@ -144,6 +145,9 @@ test("binds links encrypted and creates registration tasks from the saved mailbo
     assert.equal(client.created.length, 2);
     assert.equal(client.created[0].email, "fixture-one@icloud.com");
     assert.equal(client.created[0].extra.mail_provider, "dispose_inbox_link");
+    assert.equal(client.created[0].extra.registration_batch_concurrency, 2);
+    assert.equal(client.created[1].extra.registration_batch_concurrency, 2);
+    assert.equal(client.created[1].extra.registration_batch_id, client.created[0].extra.registration_batch_id);
     assert.equal(
       client.created[0].extra.dispose_inbox_link_pool_text,
       "fixture-one@icloud.com https://dispose.lol/ib/test-mailbox-key-0001",

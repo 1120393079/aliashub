@@ -16,7 +16,6 @@ export class RegistrationClient {
     const { timeoutMs = 0, ...fetchOptions } = options;
     const controller = timeoutMs > 0 ? new AbortController() : null;
     const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
-    timer?.unref?.();
     try {
       const response = await this.fetchFn(`${this.baseUrl}${path}`, {
         ...fetchOptions,
