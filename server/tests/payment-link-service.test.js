@@ -219,6 +219,41 @@ test("payment-link integration requires selected accounts and a dedicated proxy 
   }
 });
 
+test("payment-link integration accepts more than 50 selected accounts without truncation", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "aliashub-payment-link-unbounded-test-"));
+  const db = createDatabase({ filename: path.join(directory, "test.db"), seedDemo: false });
+  let credentialReads = 0;
+  const service = new PaymentLinkService({
+    db,
+    registration: {
+      async registeredAccountAccessToken() {
+        credentialReads += 1;
+        throw Object.assign(new Error("fixture account has no AT"), { status: 404 });
+      },
+    },
+    baseUrl: "http://127.0.0.1:8891",
+    fetchFn: async () => {
+      throw new Error("remote task submission should not run without credentials");
+    },
+  });
+  service.saveProxyPool({
+    checkout_proxies: ["http://checkout.example:8000"],
+    update_proxies: ["http://update.example:8000"],
+  });
+  try {
+    const ids = Array.from({ length: 51 }, (_, index) => index + 1);
+    const result = await service.start({ ids });
+    assert.equal(result.requested, ids.length);
+    assert.equal(result.started, 0);
+    assert.equal(result.failed, ids.length);
+    assert.equal(result.items.length, ids.length);
+    assert.equal(credentialReads, ids.length);
+  } finally {
+    db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("payment-link integration imports IPRocket into both pools and persists task switches", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "aliashub-payment-link-source-test-"));
   const db = createDatabase({ filename: path.join(directory, "test.db"), seedDemo: false });

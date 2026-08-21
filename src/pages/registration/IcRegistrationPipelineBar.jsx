@@ -431,7 +431,7 @@ export default function IcRegistrationPipelineBar({
     countError,
     concurrencyError,
     proxyInvalid,
-    !String(country || "").trim() ? "请选择提链国家" : "",
+    !String(country || "").trim() ? "请选择账单国家" : "",
   ].filter(Boolean);
   const mailboxSetupRequired = autoCreateMailbox && mailboxStatusLoaded
     && (!mailboxServiceReady || !appleLoginReady);
@@ -655,7 +655,7 @@ export default function IcRegistrationPipelineBar({
             ))}
           </select>
         </FormField>
-        <FormField label="提链国家">
+        <FormField label="账单国家">
           <select value={country} disabled={pipelineActive} onChange={(event) => {
             const value = event.target.value;
             setCountry(value);

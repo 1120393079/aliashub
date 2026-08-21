@@ -3,6 +3,8 @@ import { Agent, ProxyAgent, request } from "undici";
 
 const CHECKOUT_URL = "https://chatgpt.com/backend-api/payments/checkout";
 const CHECKOUT_UPDATE_URL = "https://chatgpt.com/backend-api/payments/checkout/update";
+const PROMO_ELIGIBILITY_PATH = "/backend-api/promo_campaign/check_coupon";
+const PROMO_ELIGIBILITY_URL = `https://chatgpt.com${PROMO_ELIGIBILITY_PATH}?coupon=plus-1-month-free&is_coupon_from_query_param=true`;
 const STRIPE_INIT_BASE_URL = "https://api.stripe.com/v1/payment_pages";
 const DIRECT_TRACE_URL = "https://chatgpt.com/cdn-cgi/trace";
 const STRIPE_VERSION = "2025-03-31.basil; checkout_server_update_beta=v1; checkout_manual_approval_preview=v1";
@@ -14,6 +16,9 @@ const INIT_RETRY_DELAY_MS = 2_000;
 export const JP_ZERO_TRIAL_EVIDENCE = "checkout.jp.plus.final_amount_due.v1";
 export const GB_ZERO_TRIAL_EVIDENCE = "checkout.gb.plus.final_amount_due.v1";
 export const US_ZERO_TRIAL_EVIDENCE = "checkout.us.plus.final_amount_due.v1";
+export const JP_FAST_INELIGIBLE_EVIDENCE = "promo.jp.plus.check_coupon.not_eligible.v1";
+export const GB_FAST_INELIGIBLE_EVIDENCE = "promo.gb.plus.check_coupon.not_eligible.v1";
+export const US_FAST_INELIGIBLE_EVIDENCE = "promo.us.plus.check_coupon.not_eligible.v1";
 export const DIRECT_TRIAL_ROUTE = "direct";
 
 const TRIAL_REGIONS = Object.freeze({
@@ -26,6 +31,7 @@ const TRIAL_REGIONS = Object.freeze({
     acceptLanguage: "ja-JP,ja;q=0.9,en;q=0.8",
     label: "日本",
     evidence: JP_ZERO_TRIAL_EVIDENCE,
+    fastIneligibleEvidence: JP_FAST_INELIGIBLE_EVIDENCE,
   }),
   GB: Object.freeze({
     country: "GB",
@@ -36,6 +42,7 @@ const TRIAL_REGIONS = Object.freeze({
     acceptLanguage: "en-GB,en;q=0.9",
     label: "英国",
     evidence: GB_ZERO_TRIAL_EVIDENCE,
+    fastIneligibleEvidence: GB_FAST_INELIGIBLE_EVIDENCE,
   }),
   US: Object.freeze({
     country: "US",
@@ -46,6 +53,7 @@ const TRIAL_REGIONS = Object.freeze({
     acceptLanguage: "en-US,en;q=0.9",
     label: "美国",
     evidence: US_ZERO_TRIAL_EVIDENCE,
+    fastIneligibleEvidence: US_FAST_INELIGIBLE_EVIDENCE,
     allowDirect: true,
   }),
 });
@@ -281,6 +289,7 @@ async function probeTrialEligibility(region, {
   proxyAgentFactory,
   directAgentFactory,
   retryDelayMs = INIT_RETRY_DELAY_MS,
+  fastIneligible = false,
 } = {}) {
   const token = String(accessToken || "").trim();
   const proxyUrl = String(proxy || "").trim();
@@ -294,6 +303,40 @@ async function probeTrialEligibility(region, {
     ? (directAgentFactory ? directAgentFactory() : new Agent())
     : (proxyAgentFactory ? proxyAgentFactory(proxyUrl) : new ProxyAgent(proxyUrl));
   try {
+    if (fastIneligible) {
+      const promoResponse = await requestFn(PROMO_ELIGIBILITY_URL, {
+        method: "GET",
+        ...(dispatcher ? { dispatcher } : {}),
+        headers: chatgptHeaders(token, PROMO_ELIGIBILITY_PATH, region),
+        headersTimeout: 15_000,
+        bodyTimeout: 15_000,
+      });
+      const promoText = await promoResponse.body.text();
+      if (promoResponse.statusCode !== 200) {
+        const status = Number(promoResponse.statusCode) || 502;
+        throw Object.assign(new Error(`${region.label} 0 元快速资格检测失败 HTTP ${status}`), {
+          status: status >= 400 && status < 500 ? status : 502,
+          code: checkoutErrorCode(promoText),
+        });
+      }
+      const promo = parseJson(promoText, `${region.label} 0 元快速资格检测`);
+      const state = String(promo.state || "").trim().toLowerCase();
+      if (state === "not_eligible") {
+        return {
+          eligible: false,
+          amountDue: null,
+          currency: region.currency,
+          evidence: region.fastIneligibleEvidence,
+          state,
+        };
+      }
+      if (state !== "eligible") {
+        throw Object.assign(
+          new Error(`${region.label} 0 元快速资格检测返回未知状态：${state || "empty"}`),
+          { status: 502 },
+        );
+      }
+    }
     const checkoutResponse = await requestFn(CHECKOUT_URL, {
       method: "POST",
       ...(dispatcher ? { dispatcher } : {}),
@@ -316,7 +359,7 @@ async function probeTrialEligibility(region, {
     if (checkoutResponse.statusCode !== 200) {
       const status = Number(checkoutResponse.statusCode) || 502;
       throw Object.assign(new Error(`${region.label} 0 元 Checkout 创建失败 HTTP ${status}`), {
-        status: status === 429 ? 429 : 502,
+        status: status >= 400 && status < 500 ? status : 502,
         code: checkoutErrorCode(checkoutText),
       });
     }

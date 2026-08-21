@@ -51,15 +51,23 @@ function addMailcomAccount(db, email, aliases = [], {
 }
 
 class FakeRegistration {
-  constructor(db, outcomes = {}, timeline = []) {
+  constructor(db, outcomes = {}, timeline = [], trialOutcomes = {}) {
     this.db = db;
     this.timeline = timeline;
     this.outcomes = new Map(Object.entries(outcomes).map(([email, values]) => [
       email.toLowerCase(), Array.isArray(values) ? [...values] : [values],
     ]));
+    this.trialOutcomes = new Map(Object.entries(trialOutcomes).map(([email, values]) => [
+      email.toLowerCase(), Array.isArray(values) ? [...values] : [values],
+    ]));
     this.jobOutcomes = new Map();
     this.createCalls = [];
     this.cancelCalls = [];
+    this.deleteCalls = [];
+    this.deletedAccountIds = new Set();
+    this.trialCalls = [];
+    this.trialActive = 0;
+    this.maxTrialActive = 0;
     this.nextAccountId = 10_000;
     this.emailByExternalId = new Map();
     this.client = { health: async () => ({ ok: true, configured: true }) };
@@ -73,12 +81,53 @@ class FakeRegistration {
     return ["http://fixture-proxy.example:8080"];
   }
 
+  async resolveRegisteredAccountTrialRoute() {
+    return "fixture-trial-route";
+  }
+
   nextOutcome(email) {
     const key = String(email).toLowerCase();
     const queue = this.outcomes.get(key);
     if (!queue?.length) return { status: "completed" };
     const outcome = queue.shift();
     return typeof outcome === "string" ? { status: outcome } : { ...outcome };
+  }
+
+  nextTrialOutcome(email) {
+    const queue = this.trialOutcomes.get(String(email || "").toLowerCase())
+      || this.trialOutcomes.get("*");
+    if (!queue?.length) return { status: "eligible", eligible: true };
+    const outcome = queue.shift();
+    return typeof outcome === "string" ? { status: outcome } : { ...outcome };
+  }
+
+  async checkRegisteredAccountTrialForCountry(account, country) {
+    const email = String(account?.email || this.emailByExternalId.get(String(account?.id)) || "")
+      .toLowerCase();
+    const normalizedCountry = String(country || "").toUpperCase();
+    const outcome = this.nextTrialOutcome(email);
+    this.trialCalls.push({ id: Number(account?.id), email, country: normalizedCountry });
+    this.timeline.push(`trial:check:${email}:${normalizedCountry}`);
+    this.trialActive += 1;
+    this.maxTrialActive = Math.max(this.maxTrialActive, this.trialActive);
+    try {
+      if (outcome.gate) await outcome.gate.promise;
+      if (outcome.error instanceof Error && outcome.throw === true) throw outcome.error;
+      const prefix = normalizedCountry === "GB" ? "gb_trial"
+        : normalizedCountry === "US" ? "us_trial" : "trial";
+      const status = String(outcome.status || "eligible").toLowerCase();
+      const eligible = typeof outcome.eligible === "boolean"
+        ? outcome.eligible : status === "eligible" ? true : status === "ineligible" ? false : null;
+      return {
+        id: Number(account?.id),
+        [`${prefix}_status`]: status,
+        [`${prefix}_eligible`]: eligible,
+        [`${prefix}_error`]: outcome.message || (status === "failed" ? "fixture trial check failure" : ""),
+        [`${prefix}_checked_at`]: outcome.checkedAt || nowIso(),
+      };
+    } finally {
+      this.trialActive -= 1;
+    }
   }
 
   async createJobs(input) {
@@ -157,6 +206,23 @@ class FakeRegistration {
         message = '任务已取消', finished_at = ?, updated_at = ? WHERE id = ?
     `).run(at, at, row.id);
     return this.getJob(row.id);
+  }
+
+  async deleteRegisteredAccountForPipeline(input = {}) {
+    const id = Number(input.id);
+    const email = String(input.email || "").trim().toLowerCase();
+    const registrationJobId = Number(input.registrationJobId);
+    assert.equal(Number.isSafeInteger(id) && id > 0, true);
+    assert.equal(Number.isSafeInteger(registrationJobId) && registrationJobId > 0, true);
+    assert.equal(email, String(this.emailByExternalId.get(String(id)) || "").toLowerCase());
+    const registrationJob = this.getJob(registrationJobId);
+    assert.ok(registrationJob);
+    assert.equal(String(registrationJob.email || "").toLowerCase(), email);
+    assert.equal(String(registrationJob.external_account_id || ""), String(id));
+    const alreadyAbsent = this.deletedAccountIds.has(id);
+    this.deleteCalls.push({ id, email, registrationJobId });
+    this.deletedAccountIds.add(id);
+    return { id, email, deleted: !alreadyAbsent, already_absent: alreadyAbsent };
   }
 }
 
@@ -404,6 +470,7 @@ class FakeMailcomAliases {
     this.prepareGates = [...prepareGates];
     this.prepareCalls = [];
     this.authorizationCalls = [];
+    this.createReplacementCalls = [];
     this.recycleCalls = [];
     this.operationLog = [];
     this.prepareActive = 0;
@@ -413,6 +480,7 @@ class FakeMailcomAliases {
   async prepareAccount(accountId, { domain }) {
     const callIndex = this.prepareCalls.length;
     this.prepareCalls.push({ accountId, domain });
+    this.operationLog.push(`prepare:${accountId}`);
     this.prepareActive += 1;
     this.maxPrepareActive = Math.max(this.maxPrepareActive, this.prepareActive);
     await Promise.resolve();
@@ -472,6 +540,41 @@ class FakeMailcomAliases {
     }
     return { removed: options.address, created: item.address, item, account: { id: accountId } };
   }
+
+  async createReplacementAlias(accountId, options) {
+    this.createReplacementCalls.push({ accountId, ...options });
+    this.operationLog.push(`create-replacement:${accountId}:${options.replacementAddress}`);
+    const configuredFailure = this.recycleFailures.shift();
+    if (configuredFailure) throw configuredFailure;
+    if (this.recycleGate) await this.recycleGate.promise;
+    const afterGateFailure = this.recycleFailuresAfterGate.shift();
+    if (afterGateFailure) throw afterGateFailure;
+    if (options.recycleAddress) {
+      this.db.prepare(`
+        UPDATE addresses SET status = 'disabled', remote_confirmed = 0, updated_at = ?
+        WHERE account_id = ? AND address = ? COLLATE NOCASE AND kind = 'official'
+      `).run(nowIso(), accountId, options.recycleAddress);
+    }
+    let item = this.db.prepare(`
+      SELECT * FROM addresses WHERE account_id = ? AND address = ? COLLATE NOCASE
+    `).get(accountId, options.replacementAddress);
+    if (item) {
+      this.db.prepare("UPDATE addresses SET status = 'active', updated_at = ? WHERE id = ?")
+        .run(nowIso(), item.id);
+      item = this.db.prepare("SELECT * FROM addresses WHERE id = ?").get(item.id);
+    } else {
+      const at = nowIso();
+      const result = this.db.prepare(`
+        INSERT INTO addresses (
+          account_id, address, kind, status, strategy, label, purpose,
+          remote_confirmed, created_at, updated_at
+        ) VALUES (?, ?, 'official', 'active', ?, 'Mail.com 母号替代别名', '流水线', 1, ?, ?)
+      `).run(accountId, options.replacementAddress, MAILCOM_ALIAS_STRATEGY, at, at);
+      item = this.db.prepare("SELECT * FROM addresses WHERE id = ?")
+        .get(Number(result.lastInsertRowid));
+    }
+    return { created: item.address, item, account: { id: accountId } };
+  }
 }
 
 function input(overrides = {}) {
@@ -480,7 +583,7 @@ function input(overrides = {}) {
     concurrency: 2,
     browserMode: "headless",
     proxySelection: "auto",
-    paymentLinkCountry: "DE",
+    paymentLinkCountry: "GB",
     recycleSucceeded: false,
     requestId: "mailcom-pipeline-fixture-001",
     ...overrides,
@@ -490,6 +593,7 @@ function input(overrides = {}) {
 function harness(t, {
   accounts = [{ email: "owner@mail.com", aliases: ["first@email.com"] }],
   registrationOutcomes = {},
+  trialOutcomes = {},
   paymentOutcomes = {},
   agreementOptions = {},
   aliasOptions = {},
@@ -507,7 +611,7 @@ function harness(t, {
     },
   ));
   const timeline = [];
-  const registration = new FakeRegistration(db, registrationOutcomes, timeline);
+  const registration = new FakeRegistration(db, registrationOutcomes, timeline, trialOutcomes);
   const paymentLinks = new FakePaymentLinks(registration, paymentOutcomes, timeline);
   const paymentAgreements = new FakePaymentAgreements(registration, timeline, agreementOptions);
   const mailcomAliases = new FakeMailcomAliases(db, aliasOptions);
@@ -555,6 +659,123 @@ function attempts(db, pipelineId) {
   return db.prepare(`
     SELECT * FROM mailcom_registration_pipeline_attempts WHERE pipeline_id = ? ORDER BY id
   `).all(pipelineId);
+}
+
+function insertHistoricalAliasAttempt(context, {
+  pipelineId,
+  alias,
+  outcome = "registration_failed",
+  stage = outcome,
+  externalAccountId = "",
+  linkStatus = "skipped",
+  agreementStatus = "skipped",
+  recycleStatus = "failed",
+} = {}) {
+  const fixture = context.fixtures[0];
+  const at = nowIso();
+  context.db.prepare(`
+    INSERT INTO mailcom_registration_pipelines (
+      id, request_id, request_fingerprint, domain, status, stage, concurrency,
+      browser_mode, proxy_selection, payment_link_country, recycle_succeeded,
+      account_count, slot_count, created_at, updated_at, finished_at
+    ) VALUES (?, ?, ?, 'mail.com', 'completed', 'completed', 1,
+      'headless', 'auto', 'GB', 0, 1, 1, ?, ?, ?)
+  `).run(pipelineId, `${pipelineId}-request`, `${pipelineId}-fingerprint`, at, at, at);
+  const itemId = Number(context.db.prepare(`
+    INSERT INTO mailcom_registration_pipeline_items (
+      pipeline_id, account_id, source_email, slot_key, slot_kind,
+      initial_address_id, initial_email, current_address_id, current_email,
+      status, stage, created_at, updated_at, finished_at
+    ) VALUES (?, ?, ?, ?, 'official', ?, ?, ?, ?,
+      'failed', ?, ?, ?, ?)
+  `).run(
+    pipelineId,
+    fixture.account.id,
+    fixture.account.email,
+    `official:${alias.id}`,
+    alias.id,
+    alias.address,
+    alias.id,
+    alias.address,
+    stage,
+    at,
+    at,
+    at,
+  ).lastInsertRowid);
+  const attemptId = Number(context.db.prepare(`
+    INSERT INTO mailcom_registration_pipeline_attempts (
+      pipeline_id, item_id, attempt_number, address_id, email, external_account_id,
+      status, stage, outcome, registration_status, trial_status, link_status,
+      agreement_status, recycle_status, finished_at, created_at, updated_at
+    ) VALUES (?, ?, 1, ?, ?, ?, 'failed', ?, ?, 'failed', 'skipped', ?, ?, ?, ?, ?, ?)
+  `).run(
+    pipelineId,
+    itemId,
+    alias.id,
+    alias.address,
+    externalAccountId,
+    stage,
+    outcome,
+    linkStatus,
+    agreementStatus,
+    recycleStatus,
+    at,
+    at,
+    at,
+  ).lastInsertRowid);
+  context.db.prepare(`
+    UPDATE mailcom_registration_pipeline_items SET current_attempt_id = ? WHERE id = ?
+  `).run(attemptId, itemId);
+  return { pipelineId, itemId, attemptId };
+}
+
+function insertPrimaryRecycleAttempt(context, {
+  pipelineId = "mailcom-primary-safe-capacity-pipeline",
+} = {}) {
+  const fixture = context.fixtures[0];
+  const primary = context.db.prepare(`
+    SELECT * FROM addresses WHERE account_id = ? AND kind = 'primary'
+  `).get(fixture.account.id);
+  const at = nowIso();
+  context.db.prepare(`
+    INSERT INTO mailcom_registration_pipelines (
+      id, request_id, request_fingerprint, domain, status, stage, concurrency,
+      browser_mode, proxy_selection, payment_link_country, recycle_succeeded,
+      account_count, slot_count, created_at, updated_at
+    ) VALUES (?, ?, ?, 'mail.com', 'running', 'recycling', 1,
+      'headless', 'auto', 'GB', 0, 1, 1, ?, ?)
+  `).run(pipelineId, `${pipelineId}-request`, `${pipelineId}-fingerprint`, at, at);
+  const itemId = Number(context.db.prepare(`
+    INSERT INTO mailcom_registration_pipeline_items (
+      pipeline_id, account_id, source_email, slot_key, slot_kind,
+      initial_address_id, initial_email, current_address_id, current_email,
+      status, stage, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, 'primary', ?, ?, ?, ?, 'running', 'recycle_queued', ?, ?)
+  `).run(
+    pipelineId,
+    fixture.account.id,
+    fixture.account.email,
+    `primary:${fixture.account.id}`,
+    primary.id,
+    primary.address,
+    primary.id,
+    primary.address,
+    at,
+    at,
+  ).lastInsertRowid);
+  const attemptId = Number(context.db.prepare(`
+    INSERT INTO mailcom_registration_pipeline_attempts (
+      pipeline_id, item_id, attempt_number, address_id, email, status, stage,
+      outcome, registration_status, trial_status, link_status, agreement_status,
+      recycle_status, finished_at, created_at, updated_at
+    ) VALUES (?, ?, 1, ?, ?, 'failed', 'registration_failed',
+      'registration_failed', 'failed', 'skipped', 'skipped', 'skipped',
+      'pending', ?, ?, ?)
+  `).run(pipelineId, itemId, primary.id, primary.address, at, at, at).lastInsertRowid);
+  context.db.prepare(`
+    UPDATE mailcom_registration_pipeline_items SET current_attempt_id = ? WHERE id = ?
+  `).run(attemptId, itemId);
+  return { pipelineId, itemId, attemptId, primary };
 }
 
 function insertCancelledRecycleOrphan(context, {
@@ -621,8 +842,8 @@ function insertCancelledRecycleOrphan(context, {
       pipeline_id, item_id, attempt_number, address_id, email, status, stage,
       outcome, registration_status, link_status, recycle_status, recycle_attempts,
       registration_finished_at, link_finished_at, finished_at, created_at, updated_at
-    ) VALUES (?, ?, 1, ?, ?, 'succeeded', ?, 'succeeded',
-      'succeeded', 'succeeded', 'running', 1, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, 1, ?, ?, 'failed', ?, 'link_failed',
+      'succeeded', 'failed', 'running', 1, ?, ?, ?, ?, ?)
   `).run(pipelineId, itemId, oldAlias.id, oldAlias.address, stage, at, at, at, at, at);
   const attemptId = Number(attemptResult.lastInsertRowid);
   context.db.prepare(`
@@ -682,6 +903,71 @@ test("start automatically verifies saved Mail.com web credentials and re-admits 
   )));
 });
 
+test("transient Mail.com browser failures never create or overwrite an authorization block", async (t) => {
+  const blockedReason = `${MAILCOM_ALIAS_AUTHORIZATION_BLOCK_PREFIX}fixture session expired`;
+  const transientFailure = () => Object.assign(new Error("Mail.com 网页连接暂时不稳定，请稍后再试"), {
+    status: 503,
+    code: "MAILCOM_ALIAS_OPEN_TRANSIENT",
+  });
+  const context = harness(t, {
+    accounts: [
+      {
+        email: "ready-transient@mail.com",
+        aliases: [],
+        savedCredentials: true,
+      },
+      {
+        email: "blocked-transient@mail.com",
+        aliases: [],
+        savedCredentials: true,
+      },
+    ],
+    aliasOptions: {
+      authorizationFailures: [transientFailure(), transientFailure()],
+    },
+  });
+  await context.service.recoveryPromise;
+  context.db.prepare("UPDATE source_accounts SET limit_reason = ?, updated_at = ? WHERE id = ?")
+    .run(blockedReason, nowIso(), context.fixtures[1].account.id);
+
+  assert.equal(context.service.aliasAccountActionRequired(transientFailure()), false);
+  assert.equal(context.service.aliasAccountActionRequired(Object.assign(
+    new Error("Mail.com 网页登录超时"),
+    { status: 504, code: "MAILCOM_WEB_LOGIN_TIMEOUT" },
+  )), false);
+  assert.equal(context.service.aliasAccountActionRequired(Object.assign(
+    new Error("saved login rejected"),
+    { status: 409, code: "MAILCOM_WEB_AUTH_FAILED" },
+  )), true);
+
+  const recovered = await context.service.recoverSavedAuthorizations({
+    accountIds: context.fixtures.map((fixture) => fixture.account.id),
+    force: true,
+  });
+  assert.deepEqual(recovered, { total: 2, recovered: 0, failed: 2 });
+  const ready = context.db.prepare("SELECT status, limit_reason FROM source_accounts WHERE id = ?")
+    .get(context.fixtures[0].account.id);
+  const blocked = context.db.prepare("SELECT status, limit_reason FROM source_accounts WHERE id = ?")
+    .get(context.fixtures[1].account.id);
+  assert.deepEqual(ready, { status: "connected", limit_reason: "" });
+  assert.deepEqual(blocked, { status: "connected", limit_reason: blockedReason });
+
+  context.mailcomAliases.authorizationFailures.push(Object.assign(
+    new Error("saved login rejected"),
+    { status: 409, code: "MAILCOM_WEB_AUTH_FAILED" },
+  ));
+  const deterministic = await context.service.recoverSavedAuthorizations({
+    accountIds: [context.fixtures[0].account.id],
+    force: true,
+  });
+  assert.deepEqual(deterministic, { total: 1, recovered: 0, failed: 1 });
+  assert.match(
+    context.db.prepare("SELECT limit_reason FROM source_accounts WHERE id = ?")
+      .get(context.fixtures[0].account.id).limit_reason,
+    /网页授权需要处理：saved login rejected/,
+  );
+});
+
 test("aggregates every connected Mail.com account and exact official alias with the selected domain", async (t) => {
   const context = harness(t, {
     accounts: [
@@ -709,7 +995,7 @@ test("aggregates every connected Mail.com account and exact official alias with 
   assert.ok(context.registration.createCalls.every((call) => (
     call.addressIds.length === 1 && call.addressIds[0] === call.baseAddressId
   )));
-  assert.ok(context.paymentLinks.startCalls.every((call) => call.country === "DE"));
+  assert.ok(context.paymentLinks.startCalls.every((call) => call.country === "GB"));
 
   const status = await context.service.status();
   assert.equal(status.connected_account_count, 2);
@@ -772,6 +1058,232 @@ test("starts a prepared account before the next account finishes preparation", a
     new Set(context.registration.createCalls.map((call) => Number(call.accountId))),
     new Set(context.fixtures.map((fixture) => Number(fixture.account.id))),
   );
+});
+
+test("queues every mother preparation before an early registration failure can enqueue recycling", async (t) => {
+  const first = "prepare-priority-one@mail.com";
+  const second = "prepare-priority-two@mail.com";
+  const context = harness(t, {
+    accounts: [{ email: first, aliases: [] }, { email: second, aliases: [] }],
+    registrationOutcomes: {
+      [first]: [{ status: "failed", message: "fixture first mother failure" }],
+    },
+  });
+  const started = await context.service.start(input({
+    requestId: "mailcom-prepare-priority-001",
+    concurrency: 2,
+  }));
+  const final = await waitFor(
+    () => context.service.get(started.id),
+    (task) => task.terminal,
+    "preparation priority pipeline completion",
+  );
+  const firstAccountId = context.fixtures[0].account.id;
+  const secondAccountId = context.fixtures[1].account.id;
+  const secondPrepare = context.mailcomAliases.operationLog.indexOf(`prepare:${secondAccountId}`);
+  const firstRecycle = context.mailcomAliases.operationLog.findIndex((entry) => (
+    entry.startsWith(`create-replacement:${firstAccountId}:`)
+  ));
+
+  assert.equal(final.status, "completed");
+  assert.ok(secondPrepare >= 0);
+  assert.ok(firstRecycle > secondPrepare);
+  assert.equal(context.mailcomAliases.maxPrepareActive, 1);
+});
+
+test("configured alias concurrency prepares different mothers in parallel", async (t) => {
+  const firstGate = deferred();
+  const secondGate = deferred();
+  const context = harness(t, {
+    accounts: [
+      { email: "parallel-prepare-one@mail.com", aliases: [] },
+      { email: "parallel-prepare-two@mail.com", aliases: [] },
+    ],
+    aliasOptions: { prepareGates: [firstGate, secondGate] },
+    serviceOptions: { aliasOperationConcurrency: 2 },
+  });
+  const started = await context.service.start(input({
+    requestId: "mailcom-parallel-prepare-001",
+    concurrency: 2,
+  }));
+
+  try {
+    await waitFor(
+      () => context.mailcomAliases.prepareActive,
+      (active) => active === 2,
+      "two parallel mother preparations",
+    );
+    assert.equal(context.mailcomAliases.maxPrepareActive, 2);
+  } finally {
+    firstGate.resolve();
+    secondGate.resolve();
+  }
+
+  const final = await waitFor(
+    () => context.service.get(started.id),
+    (task) => task.terminal,
+    "parallel preparation completion",
+  );
+  assert.equal(final.status, "completed");
+});
+
+test("a full mother account ends only the failed primary slot without poisoning official recycling", async (t) => {
+  const primary = "full-primary@mail.com";
+  const aliases = Array.from({ length: 9 }, (_, index) => `full-alias-${index}@mail.com`);
+  const context = harness(t, {
+    accounts: [{ email: primary, aliases }],
+    registrationOutcomes: {
+      [primary]: [{ status: "failed", message: "fixture primary registration failure" }],
+    },
+  });
+  const started = await context.service.start(input({
+    requestId: "mailcom-primary-capacity-full-001",
+    concurrency: 10,
+  }));
+  const final = await waitFor(
+    () => context.service.get(started.id),
+    (task) => task.terminal,
+    "full primary capacity completion",
+  );
+  const primaryItem = final.items.find((item) => item.slot_kind === "primary");
+  const primaryAttempt = attempts(context.db, started.id).find((attempt) => attempt.email === primary);
+
+  assert.equal(final.status, "partial_failed");
+  assert.equal(final.registration_success_count, aliases.length);
+  assert.equal(primaryItem.status, "failed");
+  assert.equal(primaryItem.prepare_error, "");
+  assert.equal(primaryAttempt.recycle_status, "failed");
+  assert.match(primaryAttempt.recycle_error, /已占满|第 11 个替代别名/);
+  assert.equal(context.mailcomAliases.createReplacementCalls.length, 0);
+  assert.equal(context.mailcomAliases.recycleCalls.length, 0);
+  assert.ok(final.items.filter((item) => item.slot_kind === "official")
+    .every((item) => item.status === "completed"));
+});
+
+test("a full primary recycles only a historical safe failure and never selects Plus or blocked aliases", async (t) => {
+  const primary = "safe-capacity-owner@mail.com";
+  const aliases = [
+    "safe-capacity-failed@mail.com",
+    "safe-capacity-plus@mail.com",
+    "safe-capacity-blocked@mail.com",
+    ...Array.from({ length: 6 }, (_, index) => `safe-capacity-unknown-${index}@mail.com`),
+  ];
+  const context = harness(t, { accounts: [{ email: primary, aliases }] });
+  const address = (email) => context.db.prepare(`
+    SELECT * FROM addresses WHERE account_id = ? AND address = ? COLLATE NOCASE
+  `).get(context.fixtures[0].account.id, email);
+  const safeAlias = address(aliases[0]);
+  const plusAlias = address(aliases[1]);
+  const blockedAlias = address(aliases[2]);
+
+  insertHistoricalAliasAttempt(context, {
+    pipelineId: "mailcom-safe-capacity-history",
+    alias: safeAlias,
+  });
+  insertHistoricalAliasAttempt(context, {
+    pipelineId: "mailcom-plus-capacity-history",
+    alias: plusAlias,
+  });
+  insertHistoricalAliasAttempt(context, {
+    pipelineId: "mailcom-blocked-capacity-history",
+    alias: blockedAlias,
+    outcome: "link_blocked",
+    stage: "link_blocked",
+    externalAccountId: "blocked-capacity-account",
+    linkStatus: "failed",
+    recycleStatus: "skipped",
+  });
+  const at = nowIso();
+  context.db.prepare(`
+    INSERT INTO registered_account_status_checks (
+      external_account_id, email, detection_status, subscription_status,
+      account_type, checked_at, created_at, updated_at
+    ) VALUES ('plus-capacity-account', ?, 'completed', 'active', 'plus', ?, ?, ?)
+  `).run(plusAlias.address, at, at, at);
+  const primaryRecycle = insertPrimaryRecycleAttempt(context);
+  const primaryItem = context.db.prepare(`
+    SELECT * FROM mailcom_registration_pipeline_items WHERE id = ?
+  `).get(primaryRecycle.itemId);
+
+  assert.deepEqual(
+    context.service.motherAliasCandidates(primaryItem).map((candidate) => candidate.address),
+    [safeAlias.address],
+  );
+
+  await context.service.recycleAttempt(primaryRecycle.attemptId);
+
+  assert.equal(context.mailcomAliases.createReplacementCalls.length, 1);
+  assert.equal(context.mailcomAliases.recycleCalls.length, 0);
+  const call = context.mailcomAliases.createReplacementCalls[0];
+  assert.equal(call.accountId, context.fixtures[0].account.id);
+  assert.equal(call.recycleAddress, safeAlias.address);
+  assert.match(call.replacementAddress, /^ah[a-z0-9]+@mail\.com$/);
+  assert.equal(address(safeAlias.address).status, "disabled");
+  assert.equal(address(plusAlias.address).status, "active");
+  assert.equal(address(blockedAlias.address).status, "active");
+  assert.equal(context.db.prepare(`
+    SELECT COUNT(*) AS count FROM addresses
+    WHERE account_id = ? AND status = 'active'
+      AND (kind = 'primary' OR (kind = 'official' AND strategy = ?))
+  `).get(context.fixtures[0].account.id, MAILCOM_ALIAS_STRATEGY).count, 10);
+  assert.deepEqual(
+    context.db.prepare(`
+      SELECT recycle_status, replacement_email
+      FROM mailcom_registration_pipeline_attempts WHERE id = ?
+    `).get(primaryRecycle.attemptId),
+    { recycle_status: "succeeded", replacement_email: call.replacementAddress },
+  );
+});
+
+test("a full primary waits while an official slot is still being checked instead of failing or creating an eleventh address", async (t) => {
+  const primary = "pending-capacity-owner@mail.com";
+  const aliases = Array.from({ length: 9 }, (_, index) => `pending-capacity-${index}@mail.com`);
+  const context = harness(t, { accounts: [{ email: primary, aliases }] });
+  const primaryRecycle = insertPrimaryRecycleAttempt(context, {
+    pipelineId: "mailcom-primary-pending-capacity-pipeline",
+  });
+  const pendingAlias = context.db.prepare(`
+    SELECT * FROM addresses WHERE account_id = ? AND address = ? COLLATE NOCASE
+  `).get(context.fixtures[0].account.id, aliases[0]);
+  const at = nowIso();
+  context.db.prepare(`
+    INSERT INTO mailcom_registration_pipeline_items (
+      pipeline_id, account_id, source_email, slot_key, slot_kind,
+      initial_address_id, initial_email, current_address_id, current_email,
+      status, stage, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, 'official', ?, ?, ?, ?,
+      'running', 'trial_running', ?, ?)
+  `).run(
+    primaryRecycle.pipelineId,
+    context.fixtures[0].account.id,
+    primary,
+    `official:${pendingAlias.id}`,
+    pendingAlias.id,
+    pendingAlias.address,
+    pendingAlias.id,
+    pendingAlias.address,
+    at,
+    at,
+  );
+
+  await context.service.recycleAttempt(primaryRecycle.attemptId);
+
+  const storedAttempt = context.db.prepare(`
+    SELECT recycle_status, stage, recycle_error, next_retry_at
+    FROM mailcom_registration_pipeline_attempts WHERE id = ?
+  `).get(primaryRecycle.attemptId);
+  const storedItem = context.db.prepare(`
+    SELECT status, stage, error FROM mailcom_registration_pipeline_items WHERE id = ?
+  `).get(primaryRecycle.itemId);
+  assert.equal(storedAttempt.recycle_status, "retry_wait");
+  assert.equal(storedAttempt.stage, "recycle_retry_wait");
+  assert.match(storedAttempt.recycle_error, /等待普通官方别名.*不会创建第 11 个地址/);
+  assert.ok(storedAttempt.next_retry_at);
+  assert.equal(storedItem.status, "retry_wait");
+  assert.equal(storedItem.stage, "recycle_retry_wait");
+  assert.match(storedItem.error, /等待普通官方别名/);
+  assert.equal(context.mailcomAliases.createReplacementCalls.length, 0);
+  assert.equal(context.mailcomAliases.recycleCalls.length, 0);
 });
 
 test("registration failure is retained before an official alias is recycled and succeeds", async (t) => {
@@ -903,6 +1415,250 @@ test("runs registration, link extraction, and agreement in order without recycli
   assert.equal(final.items.find((item) => item.slot_kind === "official").current_email, alias);
 });
 
+test("GB trial eligibility is checked once per attempt before link extraction", async (t) => {
+  const context = harness(t);
+  const started = await context.service.start(input({
+    requestId: "mailcom-gb-trial-before-link-001",
+    paymentLinkCountry: "GB",
+  }));
+  const final = await waitFor(
+    () => context.service.get(started.id),
+    (task) => task.terminal,
+    "GB trial-gated pipeline completion",
+  );
+  const rows = attempts(context.db, started.id);
+
+  assert.equal(final.status, "completed");
+  assert.equal(context.registration.trialCalls.length, rows.length);
+  assert.equal(context.registration.maxTrialActive <= 2, true);
+  assert.ok(context.registration.trialCalls.every((call) => call.country === "GB"));
+  assert.ok(rows.every((attempt) => (
+    attempt.trial_country === "GB"
+      && attempt.trial_status === "eligible"
+      && Boolean(attempt.trial_checked_at)
+  )));
+  for (const attempt of rows) {
+    const matchingCalls = context.registration.trialCalls.filter((call) => (
+      call.email === attempt.email && call.id === Number(attempt.external_account_id)
+    ));
+    assert.equal(matchingCalls.length, 1);
+    const registrationIndex = context.timeline.indexOf(`registration:sync:${attempt.email}`);
+    const trialIndex = context.timeline.indexOf(`trial:check:${attempt.email}:GB`);
+    const linkIndex = context.timeline.indexOf(`link:start:${attempt.email}`);
+    assert.ok(registrationIndex >= 0 && registrationIndex < trialIndex);
+    assert.ok(trialIndex < linkIndex);
+  }
+});
+
+test("an ineligible official alias skips link and agreement then recycles to an eligible replacement", async (t) => {
+  const alias = "no-trial@email.com";
+  const context = harness(t, {
+    accounts: [{ email: "trial-owner@mail.com", aliases: [alias] }],
+    trialOutcomes: {
+      [alias]: { status: "ineligible", eligible: false },
+    },
+  });
+  const started = await context.service.start(input({
+    requestId: "mailcom-trial-ineligible-recycle-001",
+    paymentLinkCountry: "GB",
+  }));
+  const final = await waitFor(
+    () => context.service.get(started.id),
+    (task) => task.terminal,
+    "ineligible alias replacement completion",
+  );
+  const rows = attempts(context.db, started.id);
+  const rejected = rows.find((attempt) => attempt.email === alias);
+  const replacementEmail = context.mailcomAliases.recycleCalls[0]?.replacementAddress;
+  const replacement = rows.find((attempt) => attempt.email === replacementEmail);
+
+  assert.equal(final.status, "completed");
+  assert.equal(rows.length, 3);
+  assert.ok(rejected);
+  assert.equal(rejected.trial_status, "ineligible");
+  assert.equal(rejected.outcome, "trial_ineligible");
+  assert.equal(rejected.link_status, "skipped");
+  assert.equal(rejected.agreement_status, "skipped");
+  assert.equal(rejected.recycle_status, "succeeded");
+  assert.equal(context.timeline.includes(`link:start:${alias}`), false);
+  assert.equal(context.timeline.includes(`agreement:start:${alias}`), false);
+  assert.equal(context.mailcomAliases.recycleCalls.length, 1);
+  assert.equal(context.mailcomAliases.recycleCalls[0].address, alias);
+  assert.match(replacementEmail, /^ah[a-z0-9]+@mail\.com$/);
+  assert.ok(replacement);
+  assert.equal(replacement.trial_status, "eligible");
+  assert.equal(replacement.link_status, "succeeded");
+  assert.equal(replacement.agreement_status, "succeeded");
+  assert.equal(context.registration.trialCalls.filter((call) => call.email === alias).length, 1);
+  assert.equal(context.registration.trialCalls.filter((call) => call.email === replacementEmail).length, 1);
+  assert.ok(context.timeline.includes(`link:start:${replacementEmail}`));
+  assert.ok(context.timeline.includes(`agreement:start:${replacementEmail}`));
+});
+
+test("an ineligible primary address keeps the mother and switches to an official alias", async (t) => {
+  const primary = "primary-no-trial@mail.com";
+  const context = harness(t, {
+    accounts: [{ email: primary, aliases: [] }],
+    trialOutcomes: {
+      [primary]: { status: "ineligible", eligible: false },
+    },
+  });
+  const started = await context.service.start(input({
+    requestId: "mailcom-primary-trial-ineligible-001",
+    paymentLinkCountry: "GB",
+  }));
+  const final = await waitFor(
+    () => context.service.get(started.id),
+    (task) => task.terminal,
+    "ineligible primary alias replacement",
+  );
+  const rows = attempts(context.db, started.id);
+  const row = rows.find((attempt) => attempt.email === primary);
+  const replacement = rows.find((attempt) => attempt.email !== primary);
+  const storedPrimary = context.db.prepare(`
+    SELECT status FROM addresses WHERE address = ? COLLATE NOCASE AND kind = 'primary'
+  `).get(primary);
+
+  assert.equal(final.status, "completed");
+  assert.equal(final.attempt_count, 2);
+  assert.equal(final.items[0].status, "completed");
+  assert.equal(row.outcome, "trial_ineligible");
+  assert.equal(row.trial_status, "ineligible");
+  assert.equal(row.link_status, "skipped");
+  assert.equal(row.agreement_status, "skipped");
+  assert.equal(row.recycle_status, "succeeded");
+  assert.ok(replacement);
+  assert.match(replacement.email, /^ah[a-z0-9]+@mail\.com$/);
+  assert.equal(replacement.trial_status, "eligible");
+  assert.equal(replacement.link_status, "succeeded");
+  assert.equal(replacement.agreement_status, "succeeded");
+  assert.equal(storedPrimary.status, "active");
+  assert.equal(context.registration.createCalls.length, 2);
+  assert.equal(context.registration.trialCalls.length, 2);
+  assert.equal(context.paymentLinks.startCalls.length, 1);
+  assert.equal(context.paymentAgreements.startCalls.length, 1);
+  assert.equal(context.registration.deleteCalls.length, 1);
+  assert.deepEqual(context.registration.deleteCalls[0], {
+    id: Number(row.external_account_id),
+    email: primary,
+    registrationJobId: Number(row.registration_job_id),
+  });
+  assert.equal(context.mailcomAliases.createReplacementCalls.length, 1);
+  assert.equal(context.mailcomAliases.recycleCalls.length, 0);
+});
+
+test("a failed trial check retries the same attempt and only links after eligibility", async (t) => {
+  const primary = "trial-retry@mail.com";
+  const context = harness(t, {
+    accounts: [{ email: primary, aliases: [] }],
+    trialOutcomes: {
+      [primary]: [
+        { status: "failed", message: "fixture transient trial failure" },
+        { status: "eligible", eligible: true },
+      ],
+    },
+  });
+  const started = await context.service.start(input({
+    requestId: "mailcom-trial-retry-same-attempt-001",
+    paymentLinkCountry: "GB",
+  }));
+  const final = await waitFor(
+    () => context.service.get(started.id),
+    (task) => task.terminal,
+    "trial retry completion",
+  );
+  const rows = attempts(context.db, started.id);
+
+  assert.equal(final.status, "completed");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].trial_status, "eligible");
+  assert.equal(rows[0].trial_error, "");
+  assert.equal(rows[0].link_status, "succeeded");
+  assert.equal(rows[0].agreement_status, "succeeded");
+  assert.equal(context.registration.createCalls.length, 1);
+  assert.equal(context.registration.trialCalls.length, 2);
+  assert.equal(context.paymentLinks.startCalls.length, 1);
+  assert.equal(context.paymentAgreements.startCalls.length, 1);
+  assert.equal(context.mailcomAliases.recycleCalls.length, 0);
+  assert.equal(final.items[0].attempt_count, 1);
+  assert.equal(final.items[0].retry_count, 1);
+  const trialIndexes = context.timeline.reduce((indexes, entry, index) => (
+    entry === `trial:check:${primary}:GB` ? [...indexes, index] : indexes
+  ), []);
+  const linkIndex = context.timeline.indexOf(`link:start:${primary}`);
+  assert.equal(trialIndexes.length, 2);
+  assert.ok(trialIndexes[0] < trialIndexes[1] && trialIndexes[1] < linkIndex);
+});
+
+test("a deterministic trial HTTP 400 stops immediately and preserves the account and mailbox", async (t) => {
+  const primary = "trial-deterministic-400@mail.com";
+  const error = Object.assign(new Error("英国 0 元 Checkout 创建失败 HTTP 400"), {
+    status: 400,
+    code: "invalid_request",
+  });
+  const context = harness(t, {
+    accounts: [{ email: primary, aliases: [] }],
+    trialOutcomes: {
+      [primary]: [{ error, throw: true }],
+    },
+  });
+  const started = await context.service.start(input({
+    requestId: "mailcom-trial-deterministic-400",
+    paymentLinkCountry: "GB",
+  }));
+  const final = await waitFor(
+    () => context.service.get(started.id),
+    (task) => task.terminal,
+    "deterministic trial failure completion",
+  );
+  const row = attempts(context.db, started.id)[0];
+
+  assert.equal(final.status, "failed");
+  assert.equal(row.outcome, "trial_check_failed");
+  assert.equal(row.trial_status, "failed");
+  assert.equal(row.link_status, "skipped");
+  assert.equal(row.recycle_status, "skipped");
+  assert.equal(final.items[0].retry_count, 0);
+  assert.equal(context.registration.trialCalls.length, 1);
+  assert.equal(context.registration.deleteCalls.length, 0);
+  assert.equal(context.mailcomAliases.createReplacementCalls.length, 0);
+  assert.match(final.items[0].error, /账号池和邮箱均已保留/);
+});
+
+test("transient trial failures stop after the configured attempt limit instead of looping forever", async (t) => {
+  const primary = "trial-retry-limit@mail.com";
+  const failures = Array.from({ length: 3 }, () => ({
+    error: Object.assign(new Error("fixture trial service unavailable"), {
+      status: 502,
+      code: "TRIAL_SERVICE_UNAVAILABLE",
+    }),
+    throw: true,
+  }));
+  const context = harness(t, {
+    accounts: [{ email: primary, aliases: [] }],
+    trialOutcomes: { [primary]: failures },
+    serviceOptions: { trialCheckAttemptLimit: 3 },
+  });
+  const started = await context.service.start(input({
+    requestId: "mailcom-trial-retry-limit-001",
+    paymentLinkCountry: "GB",
+  }));
+  const final = await waitFor(
+    () => context.service.get(started.id),
+    (task) => task.terminal,
+    "bounded trial retry completion",
+  );
+  const row = attempts(context.db, started.id)[0];
+
+  assert.equal(final.status, "failed");
+  assert.equal(row.outcome, "trial_check_failed");
+  assert.equal(row.recycle_status, "skipped");
+  assert.equal(context.registration.trialCalls.length, 3);
+  assert.equal(final.items[0].retry_count, 2);
+  assert.equal(context.paymentLinks.startCalls.length, 0);
+  assert.equal(context.mailcomAliases.createReplacementCalls.length, 0);
+});
+
 test("successful agreements are preserved for every recycleSucceeded input", async (t) => {
   const finite = harness(t);
   const finiteStarted = await finite.service.start(input({ requestId: "mailcom-agreement-finite-001" }));
@@ -953,6 +1709,86 @@ test("successful agreements are preserved for every recycleSucceeded input", asy
   )));
 });
 
+test("new pipelines do not reuse completed registration jobs from earlier attempts", async (t) => {
+  const context = harness(t);
+  const alias = context.fixtures[0].aliases[0];
+  const historicalExternalId = "20000";
+  const historicalAt = "2020-01-01T00:00:00.000Z";
+  const historical = context.db.prepare(`
+    INSERT INTO registration_jobs (
+      account_id, address_id, base_address_id, email, external_task_id, external_account_id,
+      status, stage, browser_mode, message, created_at, updated_at, finished_at
+    ) VALUES (?, ?, ?, ?, 'historical-registration', ?, 'completed', 'completed',
+      'headless', '任务结束: succeeded', ?, ?, ?)
+  `).run(
+    context.fixtures[0].account.id,
+    alias.id,
+    alias.id,
+    alias.address,
+    historicalExternalId,
+    historicalAt,
+    historicalAt,
+    historicalAt,
+  );
+  context.registration.emailByExternalId.set(historicalExternalId, alias.address);
+
+  const started = await context.service.start(input({
+    requestId: "mailcom-ignore-historical-completed-registration-001",
+  }));
+  const final = await waitFor(
+    () => context.service.get(started.id),
+    (task) => task.terminal,
+    "historical completed registration replacement",
+  );
+  const rows = attempts(context.db, started.id);
+  const rejected = rows.find((attempt) => attempt.email === alias.address);
+  assert.ok(rejected);
+  const replacement = rows.find((attempt) => (
+    attempt.item_id === rejected.item_id && attempt.id !== rejected.id
+  ));
+
+  assert.equal(final.status, "completed");
+  assert.equal(rejected.registration_job_id, null);
+  assert.equal(rejected.external_account_id, "");
+  assert.equal(rejected.registration_status, "failed");
+  assert.equal(rejected.failure_reason, "already_completed");
+  assert.equal(rejected.link_status, "skipped");
+  assert.equal(rejected.recycle_status, "succeeded");
+  assert.notEqual(rejected.registration_job_id, Number(historical.lastInsertRowid));
+  assert.ok(replacement);
+  assert.equal(replacement.registration_status, "succeeded");
+  assert.equal(replacement.link_status, "succeeded");
+  assert.equal(replacement.agreement_status, "succeeded");
+  assert.equal(context.registration.createCalls.length, 2);
+  assert.equal(context.paymentLinks.startCalls.length, 2);
+  assert.equal(context.paymentAgreements.startCalls.length, 2);
+  assert.equal(context.timeline.includes(`link:start:${alias.address}`), false);
+  assert.equal(context.mailcomAliases.recycleCalls.length, 1);
+  assert.equal(context.mailcomAliases.recycleCalls[0].address, alias.address);
+});
+
+test("completed registration without an account id uses a canonical unavailable message", (t) => {
+  const context = harness(t);
+  const address = context.db.prepare(`
+    SELECT * FROM addresses WHERE account_id = ? AND kind = 'primary'
+  `).get(context.fixtures[0].account.id);
+  const at = nowIso();
+  context.db.prepare(`
+    INSERT INTO registration_jobs (
+      account_id, address_id, base_address_id, email, status, stage, browser_mode,
+      message, created_at, updated_at, finished_at
+    ) VALUES (?, ?, ?, ?, 'completed', 'completed', 'headless', '任务结束: succeeded', ?, ?, ?)
+  `).run(context.fixtures[0].account.id, address.id, address.id, address.address, at, at, at);
+
+  assert.deepEqual(context.service.unavailableAddressState({
+    current_address_id: address.id,
+    current_email: address.address,
+  }), {
+    reason: "already_completed",
+    message: "这个 Mail.com 地址已经用于成功注册",
+  });
+});
+
 test("later pipelines preserve every email that already completed an agreement", async (t) => {
   const context = harness(t);
   const first = await context.service.start(input({ requestId: "mailcom-preserve-history-first-001" }));
@@ -986,6 +1822,169 @@ test("later pipelines preserve every email that already completed an agreement",
   assert.equal(context.paymentLinks.startCalls.length, 2);
   assert.equal(context.paymentAgreements.startCalls.length, 2);
   assert.equal(context.mailcomAliases.recycleCalls.length, 0);
+});
+
+test("historical link-blocked aliases stay protected until the registered account is deleted", async (t) => {
+  const alias = "historical-blocked@email.com";
+  const context = harness(t, {
+    accounts: [{ email: "historical-blocked-owner@mail.com", aliases: [alias] }],
+  });
+  context.registration.resolveRegisteredAccountTrialRoute = async () => "fixture-trial-route";
+  const first = await context.service.start(input({
+    requestId: "mailcom-preserve-blocked-first-001",
+  }));
+  const firstFinal = await waitFor(
+    () => context.service.get(first.id),
+    (task) => task.terminal,
+    "initial blocked preservation fixture",
+  );
+  assert.equal(firstFinal.status, "completed");
+  const firstAttempt = attempts(context.db, first.id).find((attempt) => attempt.email === alias);
+  assert.ok(firstAttempt);
+  const at = nowIso();
+  context.db.prepare(`
+    UPDATE mailcom_registration_pipeline_attempts
+    SET status = 'failed', stage = 'link_blocked', outcome = 'link_blocked',
+      link_status = 'failed', agreement_status = 'skipped', recycle_status = 'skipped',
+      error = 'ChatGPT manual approval blocked', failure_reason = 'link_blocked',
+      updated_at = ? WHERE id = ?
+  `).run(at, firstAttempt.id);
+
+  const callsBefore = {
+    registrations: context.registration.createCalls.length,
+    deletes: context.registration.deleteCalls.length,
+    links: context.paymentLinks.startCalls.length,
+    agreements: context.paymentAgreements.startCalls.length,
+    recycles: context.mailcomAliases.recycleCalls.length,
+  };
+  const second = await context.service.start(input({
+    requestId: "mailcom-preserve-blocked-second-001",
+  }));
+  const secondFinal = await waitFor(
+    () => context.service.get(second.id),
+    (task) => task.terminal,
+    "historical blocked preservation",
+  );
+  const blockedItem = secondFinal.items.find((item) => item.current_email === alias);
+
+  assert.equal(secondFinal.status, "completed");
+  assert.equal(secondFinal.attempt_count, 0);
+  assert.equal(blockedItem.status, "completed");
+  assert.equal(blockedItem.stage, "link_blocked_preserved");
+  assert.match(blockedItem.error, /blocked/);
+  assert.equal(context.registration.createCalls.length, callsBefore.registrations);
+  assert.equal(context.registration.deleteCalls.length, callsBefore.deletes);
+  assert.equal(context.paymentLinks.startCalls.length, callsBefore.links);
+  assert.equal(context.paymentAgreements.startCalls.length, callsBefore.agreements);
+  assert.equal(context.mailcomAliases.recycleCalls.length, callsBefore.recycles);
+
+  const released = context.service.releaseBlockedAccounts([{
+    id: Number(firstAttempt.external_account_id),
+    email: alias,
+  }]);
+  assert.deepEqual(released, { released: 1, resumed: 0, pipeline_ids: [] });
+  assert.deepEqual(
+    context.db.prepare(`
+      SELECT stage, external_account_id, outcome, recycle_status
+      FROM mailcom_registration_pipeline_attempts WHERE id = ?
+    `).get(firstAttempt.id),
+    {
+      stage: "link_blocked_released",
+      external_account_id: "",
+      outcome: "link_blocked",
+      recycle_status: "skipped",
+    },
+  );
+  assert.deepEqual(
+    context.service.releaseBlockedAccounts([{
+      id: Number(firstAttempt.external_account_id),
+      email: alias,
+    }]),
+    { released: 0, resumed: 0, pipeline_ids: [] },
+  );
+
+  const third = await context.service.start(input({
+    requestId: "mailcom-released-blocked-third-001",
+  }));
+  const thirdFinal = await waitFor(
+    () => context.service.get(third.id),
+    (task) => task.terminal,
+    "released blocked alias replacement",
+  );
+  assert.equal(thirdFinal.status, "completed");
+  assert.equal(context.mailcomAliases.recycleCalls.length, callsBefore.recycles + 1);
+  assert.equal(context.mailcomAliases.recycleCalls.at(-1).address, alias);
+  assert.equal(
+    context.db.prepare("SELECT status FROM addresses WHERE address = ? COLLATE NOCASE").get(alias).status,
+    "disabled",
+  );
+});
+
+test("deleting a blocked account revives its preserved slot while the pipeline is still active", async (t) => {
+  const alias = "active-release-blocked@email.com";
+  const context = harness(t, {
+    accounts: [{ email: "active-release-owner@mail.com", aliases: [alias] }],
+  });
+  const first = await context.service.start(input({
+    requestId: "mailcom-active-release-first-001",
+  }));
+  await waitFor(
+    () => context.service.get(first.id),
+    (task) => task.terminal,
+    "active release fixture",
+  );
+  const blockedAttempt = attempts(context.db, first.id).find((attempt) => attempt.email === alias);
+  assert.ok(blockedAttempt?.external_account_id);
+  context.db.prepare(`
+    UPDATE mailcom_registration_pipeline_attempts
+    SET status = 'failed', stage = 'link_blocked', outcome = 'link_blocked',
+      link_status = 'failed', agreement_status = 'skipped', recycle_status = 'skipped',
+      error = 'ChatGPT manual approval blocked', failure_reason = 'link_blocked',
+      updated_at = ? WHERE id = ?
+  `).run(nowIso(), blockedAttempt.id);
+
+  const prepareGate = deferred();
+  const added = addMailcomAccount(context.db, "active-release-waiting@mail.com", []);
+  context.fixtures.push(added);
+  context.mailcomAliases.prepareGates = [null, null, prepareGate];
+  const second = await context.service.start(input({
+    requestId: "mailcom-active-release-second-001",
+  }));
+
+  try {
+    await waitFor(
+      () => context.service.get(second.id),
+      (task) => task.items.some((item) => item.current_email === alias
+        && item.stage === "link_blocked_preserved")
+        && task.items.some((item) => item.source_email === added.account.email
+          && item.stage === "prepare_running"),
+      "active pipeline blocked preservation",
+    );
+    const released = context.service.releaseBlockedAccounts([{
+      id: Number(blockedAttempt.external_account_id),
+      email: alias,
+    }]);
+    assert.equal(released.released, 1);
+    assert.equal(released.resumed, 1);
+    assert.deepEqual(released.pipeline_ids, [second.id]);
+    const revived = context.service.get(second.id).items.find((item) => item.current_email === alias);
+    assert.equal(revived.status, "queued");
+    assert.equal(revived.stage, "registration_queued");
+  } finally {
+    prepareGate.resolve();
+  }
+
+  const final = await waitFor(
+    () => context.service.get(second.id),
+    (task) => task.terminal,
+    "active released slot completion",
+  );
+  assert.equal(final.status, "completed");
+  assert.equal(context.mailcomAliases.recycleCalls.filter((call) => call.address === alias).length, 1);
+  assert.equal(
+    context.db.prepare("SELECT status FROM addresses WHERE address = ? COLLATE NOCASE").get(alias).status,
+    "disabled",
+  );
 });
 
 test("agreement success remains permanently protected when the stored attempt status is no longer succeeded", async (t) => {
@@ -1038,13 +2037,12 @@ test("agreement success remains permanently protected when the stored attempt st
   assert.deepEqual(new Set(active), new Set(protectedEmails.map((email) => email.toLowerCase())));
 });
 
-test("agreement failure preserves link success, rotates official aliases, and never re-registers primary", async (t) => {
+test("agreement failure preserves an eligible official alias without recycling", async (t) => {
   const primary = "owner@mail.com";
   const alias = "first@email.com";
   const context = harness(t, {
     agreementOptions: {
       outcomes: {
-        [primary]: { status: "failed", error: "fixture primary agreement failure" },
         [alias]: { status: "failed", error: "fixture alias agreement failure" },
       },
     },
@@ -1053,28 +2051,38 @@ test("agreement failure preserves link success, rotates official aliases, and ne
   const final = await waitFor(
     () => context.service.get(started.id),
     (task) => task.terminal,
-    "agreement failure replacement",
+    "eligible agreement failure preservation",
   );
   const rows = attempts(context.db, started.id);
-  const primaryRows = rows.filter((attempt) => attempt.email === primary);
+  const primaryAttempt = rows.find((attempt) => attempt.email === primary);
   const failedAlias = rows.find((attempt) => attempt.email === alias);
+  const storedAlias = context.db.prepare("SELECT status FROM addresses WHERE address = ? COLLATE NOCASE")
+    .get(alias);
 
   assert.equal(final.status, "partial_failed");
-  assert.equal(primaryRows.length, 1);
-  assert.equal(primaryRows[0].link_status, "succeeded");
-  assert.equal(primaryRows[0].agreement_status, "failed");
-  assert.match(primaryRows[0].agreement_error, /primary agreement failure/);
-  assert.equal(primaryRows[0].recycle_status, "skipped");
+  assert.equal(final.attempt_count, 2);
+  assert.equal(final.registration_success_count, 2);
+  assert.equal(final.phase_progress.registration.succeeded, 2);
+  assert.equal(final.phase_progress.registration.failed, 0);
+  assert.equal(final.link_success_count, 2);
+  assert.equal(final.agreement_success_count, 1);
+  assert.equal(final.agreement_failure_count, 1);
+  assert.equal(final.failure_count, 1);
+  assert.equal(primaryAttempt.status, "succeeded");
+  assert.equal(primaryAttempt.agreement_status, "succeeded");
+  assert.equal(failedAlias.trial_status, "eligible");
+  assert.equal(failedAlias.outcome, "agreement_failed");
   assert.equal(failedAlias.link_status, "succeeded");
   assert.equal(failedAlias.agreement_status, "failed");
   assert.match(failedAlias.agreement_error, /alias agreement failure/);
-  assert.equal(failedAlias.recycle_status, "succeeded");
-  assert.equal(context.mailcomAliases.recycleCalls.length, 1);
-  assert.equal(context.mailcomAliases.recycleCalls[0].address, alias);
+  assert.equal(failedAlias.recycle_status, "skipped");
+  assert.equal(storedAlias.status, "active");
+  assert.equal(context.registration.deleteCalls.length, 0);
+  assert.equal(context.mailcomAliases.recycleCalls.length, 0);
   assert.equal(rows.filter((attempt) => attempt.agreement_status === "succeeded").length, 1);
   assert.equal(context.paymentAgreements.contexts.size, 0);
-  assert.equal(context.paymentAgreements.releaseCalls.length, 3);
-  assert.equal(context.paymentAgreements.releaseCalls.filter((call) => call.successful === false).length, 2);
+  assert.equal(context.paymentAgreements.releaseCalls.length, 2);
+  assert.equal(context.paymentAgreements.releaseCalls.filter((call) => call.successful === false).length, 1);
   assert.equal(context.paymentAgreements.releaseCalls.filter((call) => call.successful === true).length, 1);
 });
 
@@ -1477,7 +2485,7 @@ test("successfulAccounts paginates link successes, isolates pipelines, and retur
     .find((item) => item.external_account_id === hugeExternalAccountId);
   assert.ok(hugeAccount);
   assert.equal(typeof hugeAccount.external_account_id, "string");
-  assert.equal(hugeAccount.payment_link_country, "DE");
+  assert.equal(hugeAccount.payment_link_country, "GB");
 
   const publicAccountFields = [
     "agreement_country", "agreement_error", "agreement_finished_at", "agreement_job_id",
@@ -1608,6 +2616,25 @@ test("registration concurrency accepts twenty and rejects values above the worke
   );
 });
 
+test("new pipelines reject countries without an independent zero-trial precheck", async (t) => {
+  const context = harness(t, {
+    accounts: [{ email: "unsupported-trial-country@mail.com", aliases: [] }],
+  });
+  for (const [index, paymentLinkCountry] of ["DE", "TR", "BR", "TH"].entries()) {
+    await assert.rejects(
+      context.service.start(input({
+        requestId: `mailcom-trial-country-invalid-${index}`,
+        paymentLinkCountry,
+      })),
+      (error) => error.code === "MAILCOM_PIPELINE_INVALID"
+        && /JP、GB 或 US/.test(error.message),
+    );
+  }
+  assert.equal(context.db.prepare(`
+    SELECT COUNT(*) AS count FROM mailcom_registration_pipelines
+  `).get().count, 0);
+});
+
 test("link attempt limit defaults to three and accepts only integers from one through ten", async (t) => {
   const context = harness(t, {
     accounts: [{ email: "link-limit@mail.com", aliases: [] }],
@@ -1732,6 +2759,53 @@ test("configured link attempts are exhausted on the same account before an offic
   `).get(alias).count, 1);
   assert.equal(context.mailcomAliases.recycleCalls.length, 1);
   assert.equal(context.mailcomAliases.recycleCalls[0].address, alias);
+});
+
+test("a Plus account discovered before link failure keeps both the account-pool record and official alias", async (t) => {
+  const alias = "plus-link-failure@email.com";
+  const context = harness(t, {
+    accounts: [{ email: "plus-link-owner@mail.com", aliases: [alias] }],
+    paymentOutcomes: { [alias]: ["failed"] },
+  });
+  context.paymentLinks.afterStart = (row) => {
+    if (row.email !== alias) return;
+    const at = nowIso();
+    context.db.prepare(`
+      INSERT INTO registered_account_status_checks (
+        external_account_id, email, detection_status, subscription_status,
+        account_type, checked_at, created_at, updated_at
+      ) VALUES (?, ?, 'completed', 'active', 'plus', ?, ?, ?)
+    `).run(row.external_account_id, row.email, at, at, at);
+  };
+
+  const started = await context.service.start(input({
+    requestId: "mailcom-plus-link-failure-001",
+    linkAttempts: 1,
+  }));
+  const final = await waitFor(
+    () => context.service.get(started.id),
+    (task) => task.terminal,
+    "Plus link failure preservation",
+  );
+  const plusAttempt = attempts(context.db, started.id)
+    .find((attempt) => attempt.email === alias);
+  const plusItem = final.items.find((item) => item.current_email === alias);
+
+  assert.equal(final.status, "partial_failed");
+  assert.ok(plusAttempt?.external_account_id);
+  assert.equal(plusAttempt.outcome, "link_failed");
+  assert.equal(plusAttempt.link_status, "failed");
+  assert.equal(plusAttempt.recycle_status, "skipped");
+  assert.equal(plusItem.status, "failed");
+  assert.match(plusItem.error, /fixture link failure/);
+  assert.equal(context.registration.deleteCalls.length, 0);
+  assert.equal(context.mailcomAliases.recycleCalls.length, 0);
+  assert.equal(context.mailcomAliases.createReplacementCalls.length, 0);
+  assert.equal(
+    context.db.prepare("SELECT status FROM addresses WHERE address = ? COLLATE NOCASE")
+      .get(alias).status,
+    "active",
+  );
 });
 
 test("a successful payment link stops the configured retries immediately", async (t) => {
@@ -1920,7 +2994,7 @@ test("recovery adopts a synced planned replacement without creating a duplicate 
       browser_mode, proxy_selection, payment_link_country, recycle_succeeded,
       account_count, slot_count, created_at, updated_at
     ) VALUES (?, 'mailcom-replacement-recovery-request', 'fixture-fingerprint', 'mail.com',
-      'running', 'processing', 1, 'headless', 'auto', 'DE', 0, 1, 2, ?, ?)
+      'running', 'processing', 1, 'headless', 'auto', 'GB', 0, 1, 2, ?, ?)
   `).run(pipelineId, at, at);
   context.db.prepare(`
     INSERT INTO mailcom_registration_pipeline_items (
@@ -2615,6 +3689,10 @@ test("a Mail.com session expiry waits for saved-password authorization recovery 
       [aAliases[0]]: ["failed"],
       [aAliases[1]]: ["failed"],
     },
+    trialOutcomes: {
+      [aAliases[0]]: { status: "failed", message: "账号不存在" },
+      [aAliases[1]]: { status: "failed", message: "账号不存在" },
+    },
     aliasOptions: {
       authorizationGate,
       recycleGate,
@@ -2665,7 +3743,7 @@ test("a Mail.com session expiry waits for saved-password authorization recovery 
       },
       (state) => state.authorizationCalls > 0
         && state.attempts.some((attempt) => (
-          attempt.recycle_status === "retry_wait"
+          attempt.recycle_status === "running" && attempt.stage === "recycle_retry_wait"
         )),
       "saved-password authorization retry wait",
     );
@@ -2730,6 +3808,10 @@ test("a queued recycle callback rechecks agreement success before calling the re
   const aliases = ["queued-first@email.com", "queued-second@email.com"];
   const context = harness(t, {
     accounts: [{ email: "queued-owner@mail.com", aliases }],
+    trialOutcomes: {
+      [aliases[0]]: { status: "failed", message: "账号不存在" },
+      [aliases[1]]: { status: "failed", message: "账号不存在" },
+    },
     agreementOptions: {
       outcomes: {
         [aliases[0]]: { status: "failed", error: "fixture agreement failure" },
@@ -2776,7 +3858,7 @@ test("a queued recycle callback rechecks agreement success before calling the re
     SELECT * FROM mailcom_registration_pipeline_attempts WHERE id = ?
   `).get(protectedAttempt.id);
   const address = context.db.prepare("SELECT * FROM addresses WHERE id = ?").get(protectedAttempt.address_id);
-  assert.equal(final.status, "completed");
+  assert.equal(final.status, "partial_failed");
   assert.notEqual(stored.status, "succeeded");
   assert.equal(stored.agreement_status, "succeeded");
   assert.equal(stored.recycle_status, "skipped");
@@ -2785,13 +3867,17 @@ test("a queued recycle callback rechecks agreement success before calling the re
   assert.ok(context.mailcomAliases.recycleCalls.every((call) => call.address !== protectedAttempt.email));
 });
 
-test("queued recycle callbacks do not touch Mail.com after pipeline cancellation", async (t) => {
+test("queued cleanup recycles still replace deleted-account aliases after pipeline cancellation", async (t) => {
   const gate = deferred();
   const context = harness(t, {
     accounts: [{ email: "owner@mail.com", aliases: ["first@email.com", "second@email.com"] }],
     paymentOutcomes: {
       "first@email.com": ["failed"],
       "second@email.com": ["failed"],
+    },
+    trialOutcomes: {
+      "first@email.com": { status: "failed", message: "账号不存在" },
+      "second@email.com": { status: "failed", message: "账号不存在" },
     },
     aliasOptions: { recycleGate: gate },
   });
@@ -2814,8 +3900,16 @@ test("queued recycle callbacks do not touch Mail.com after pipeline cancellation
   const cancelled = await context.service.cancel(started.id);
   assert.equal(cancelled.status, "cancelled");
   gate.resolve();
-  await new Promise((resolve) => setTimeout(resolve, 30));
-  assert.equal(context.mailcomAliases.recycleCalls.length, 1);
+  await waitFor(
+    () => context.mailcomAliases.recycleCalls.length,
+    (count) => count === 2,
+    "cancelled cleanup recycle completion",
+  );
+  assert.equal(context.mailcomAliases.recycleCalls.length, 2);
+  assert.deepEqual(
+    new Set(context.mailcomAliases.recycleCalls.map((call) => call.address)),
+    new Set(["first@email.com", "second@email.com"]),
+  );
   assert.equal(context.service.get(started.id).status, "cancelled");
 });
 

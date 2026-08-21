@@ -2465,6 +2465,68 @@ test("registration integration generates isolated addresses and exposes mailbox 
       const targets = before.body.items.slice(0, 2);
       deletedLocalAccountFixtures = targets.map((item) => ({ id: item.id, email: item.email, password: item.password || "" }));
       const jobCount = db.prepare("SELECT COUNT(*) AS count FROM registration_jobs").get().count;
+      const releaseOwner = createSourceAccount(db, {
+        email: "blocked-release-owner@mail.com",
+        provider: "mailcom",
+        officialLimit: 10,
+      });
+      const releaseAt = nowIso();
+      const releaseAddressId = Number(db.prepare(`
+        INSERT INTO addresses (
+          account_id, address, kind, status, strategy, label, purpose,
+          remote_confirmed, created_at, updated_at
+        ) VALUES (?, ?, 'official', 'active', 'mailcom_alias', 'blocked 删除释放测试',
+          'ChatGPT 注册', 1, ?, ?)
+      `).run(releaseOwner.id, targets[0].email, releaseAt, releaseAt).lastInsertRowid);
+      const releasePipelineId = "registration-api-blocked-release";
+      db.prepare(`
+        INSERT INTO mailcom_registration_pipelines (
+          id, request_id, request_fingerprint, domain, status, stage, concurrency,
+          browser_mode, proxy_selection, payment_link_country, account_count, slot_count,
+          created_at, updated_at, finished_at
+        ) VALUES (?, ?, 'fixture', 'mail.com', 'completed', 'completed', 1,
+          'headless', 'auto', 'GB', 1, 1, ?, ?, ?)
+      `).run(releasePipelineId, releasePipelineId, releaseAt, releaseAt, releaseAt);
+      const releaseItemId = Number(db.prepare(`
+        INSERT INTO mailcom_registration_pipeline_items (
+          pipeline_id, account_id, source_email, slot_key, slot_kind,
+          initial_address_id, initial_email, current_address_id, current_email,
+          status, stage, created_at, updated_at, finished_at
+        ) VALUES (?, ?, ?, 'official:release-test', 'official', ?, ?, ?, ?,
+          'failed', 'failed', ?, ?, ?)
+      `).run(
+        releasePipelineId,
+        releaseOwner.id,
+        releaseOwner.email,
+        releaseAddressId,
+        targets[0].email,
+        releaseAddressId,
+        targets[0].email,
+        releaseAt,
+        releaseAt,
+        releaseAt,
+      ).lastInsertRowid);
+      const releaseAttemptId = Number(db.prepare(`
+        INSERT INTO mailcom_registration_pipeline_attempts (
+          pipeline_id, item_id, attempt_number, address_id, email, external_account_id,
+          status, stage, outcome, registration_status, trial_status, link_status,
+          agreement_status, failure_reason, error, recycle_status,
+          created_at, updated_at, finished_at
+        ) VALUES (?, ?, 1, ?, ?, ?, 'failed', 'link_blocked', 'link_blocked',
+          'succeeded', 'eligible', 'failed', 'skipped', 'link_blocked',
+          'ChatGPT manual approval blocked', 'skipped', ?, ?, ?)
+      `).run(
+        releasePipelineId,
+        releaseItemId,
+        releaseAddressId,
+        targets[0].email,
+        String(targets[0].id),
+        releaseAt,
+        releaseAt,
+        releaseAt,
+      ).lastInsertRowid);
+      db.prepare("UPDATE mailcom_registration_pipeline_items SET current_attempt_id = ? WHERE id = ?")
+        .run(releaseAttemptId, releaseItemId);
       const addressCount = db.prepare("SELECT COUNT(*) AS count FROM addresses").get().count;
 
       const removed = await jsonRequest(runtime.app, "/api/registration/accounts/bulk-delete", {
@@ -2475,7 +2537,15 @@ test("registration integration generates isolated addresses and exposes mailbox 
       assert.equal(removed.body.requested, 2);
       assert.equal(removed.body.deleted, 2);
       assert.deepEqual(removed.body.deleted_ids, targets.map((item) => Number(item.id)));
+      assert.equal(removed.body.released_mailcom_blocked, 1);
+      assert.equal(removed.body.resumed_mailcom_slots, 0);
       assert.deepEqual(removed.body.failed, []);
+      assert.deepEqual(
+        db.prepare(`
+          SELECT stage, external_account_id FROM mailcom_registration_pipeline_attempts WHERE id = ?
+        `).get(releaseAttemptId),
+        { stage: "link_blocked_released", external_account_id: "" },
+      );
 
       const after = await jsonRequest(runtime.app, "/api/registration/accounts");
       assert.equal(after.body.total, before.body.total - 2);

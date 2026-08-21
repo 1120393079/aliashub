@@ -84,12 +84,15 @@ export function publicAccount(db, row) {
 export function importMailcomAliases(db, account, values = [], {
   replace = false,
   purpose = "Mail.com 手工导入",
+  trustedRemoteSync = false,
 } = {}) {
   if (account?.provider !== "mailcom") {
     throw Object.assign(new Error("这个源头邮箱不是 Mail.com 账号"), { status: 409, code: "MAILCOM_ACCOUNT_REQUIRED" });
   }
   const raw = Array.isArray(values) ? values : [];
-  if (raw.length > 100) throw Object.assign(new Error("单次最多提交 100 个 Mail.com 别名"), { status: 400 });
+  if (!trustedRemoteSync && raw.length > 100) {
+    throw Object.assign(new Error("单次最多提交 100 个 Mail.com 别名"), { status: 400 });
+  }
   const invalid = raw.map((value) => String(value || "").trim())
     .filter((value) => value && !normalizeMailcomEmail(value));
   if (invalid.length) {
@@ -106,14 +109,7 @@ export function importMailcomAliases(db, account, values = [], {
   `).all(account.id);
   const existing = existingRows.filter((item) => isMailcomAliasStrategy(item.strategy))
     .map((item) => item.address.toLowerCase());
-  const otherOfficial = existingRows.filter((item) => !isMailcomAliasStrategy(item.strategy))
-    .map((item) => item.address.toLowerCase());
   const finalAliases = replace ? aliases : [...new Set([...existing, ...aliases])];
-  const officialLimit = 10;
-  const addressCount = new Set([account.email.toLowerCase(), ...otherOfficial, ...finalAliases]).size;
-  if (addressCount > officialLimit) {
-    throw Object.assign(new Error(`Mail.com 母号和官方别名合计最多 ${officialLimit} 个地址`), { status: 400, code: "MAILCOM_ALIAS_LIMIT" });
-  }
   const duplicate = db.prepare(`
     SELECT source_accounts.email AS source_email
     FROM addresses

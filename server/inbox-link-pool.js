@@ -436,6 +436,63 @@ export class InboxLinkMailboxService {
     });
   }
 
+  /**
+   * Return the decrypted links for a bounded set of mailbox addresses.  This
+   * is intentionally server-only; the regular list endpoint exposes masked
+   * previews and never returns these credentials.
+   */
+  exportEntriesByEmails(emails = []) {
+    const normalized = [...new Set((Array.isArray(emails) ? emails : [])
+      .map((value) => String(value || "").trim().toLowerCase())
+      .filter(Boolean))];
+    if (!normalized.length) return { entries: [], missing: [] };
+    if (normalized.length > 1_000) throw serviceError("单次最多匹配 1000 个邮箱凭证", 400);
+    const rows = this.db.prepare(`
+      SELECT * FROM inbox_link_mailboxes
+      WHERE lower(email) IN (${normalized.map(() => "?").join(",")})
+        AND status = 'active'
+    `).all(...normalized);
+    const byEmail = new Map();
+    for (const row of rows) {
+      const email = String(row.email || "").trim().toLowerCase();
+      if (!email || byEmail.has(email)) continue;
+      byEmail.set(email, {
+        email,
+        inboxLink: storedInboxLink(this.decrypt(row.inbox_key_encrypted)),
+      });
+    }
+    return {
+      entries: normalized.filter((email) => byEmail.has(email)).map((email) => byEmail.get(email)),
+      missing: normalized.filter((email) => !byEmail.has(email)),
+    };
+  }
+
+  /** Return every active link mailbox without exposing credentials to clients. */
+  exportAllActiveEntries({ maximum = 1_000 } = {}) {
+    const limit = Number(maximum);
+    if (!Number.isSafeInteger(limit) || limit < 1) {
+      throw serviceError("链接取件邮箱导出上限无效", 500);
+    }
+    const total = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count FROM inbox_link_mailboxes WHERE status = 'active'
+    `).get()?.count || 0);
+    if (total > limit) {
+      throw serviceError(`已启用的链接取件邮箱共 ${total} 个，单次最多导入 ${limit} 个`, 400);
+    }
+    const rows = this.db.prepare(`
+      SELECT * FROM inbox_link_mailboxes
+      WHERE status = 'active'
+      ORDER BY created_at, id
+    `).all();
+    return {
+      entries: rows.map((row) => ({
+        email: String(row.email || "").trim().toLowerCase(),
+        inboxLink: storedInboxLink(this.decrypt(row.inbox_key_encrypted)),
+      })),
+      missing: [],
+    };
+  }
+
   requestUrls(row, path, params = {}) {
     const inboxLink = storedInboxLink(this.decrypt(row.inbox_key_encrypted));
     const link = new URL(inboxLink);

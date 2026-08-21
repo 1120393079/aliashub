@@ -34,7 +34,7 @@ export default function OverviewPage({ overview, onNavigate, onAddAccount }) {
             return <button key={account.id} className="source-summary-row" onClick={() => onNavigate(isMailcom ? "sources" : canGenerateAliases ? "factory" : "inbox", { accountId: account.id, mode: supportsOfficial ? undefined : "split" })}>
               <ProviderMark provider={meta.id} size={34} />
               <span className="source-summary-copy"><b>{account.display_name || account.email.split("@")[0]}</b><small>{meta.name} · {account.email}</small></span>
-              <span className="source-alias-mini"><b>{isMailcom ? `${account.official_used || 1}/${account.official_limit || 10}` : isNetease ? account.netease_aliases || 0 : supportsOfficial ? `${account.official_used}/${account.official_limit}` : supportsPlus ? "Plus" : "IMAP"}</b><small>{isMailcom ? "母号 / 别名" : isNetease ? "替身邮箱" : supportsOfficial ? "基础地址" : supportsPlus ? "分裂可用" : "收件扫描"}</small></span>
+              <span className="source-alias-mini"><b>{isMailcom ? account.official_used || 1 : isNetease ? account.netease_aliases || 0 : supportsOfficial ? `${account.official_used}/${account.official_limit}` : supportsPlus ? "Plus" : "IMAP"}</b><small>{isMailcom ? "当前地址" : isNetease ? "替身邮箱" : supportsOfficial ? "基础地址" : supportsPlus ? "分裂可用" : "收件扫描"}</small></span>
               <span className="source-alias-mini"><b>{isMailcom ? account.mailcom_aliases ?? account.official_aliases ?? 0 : isNetease ? (account.netease_aliases || 0) + 1 : supportsPlus ? account.split_count : "-"}</b><small>{isMailcom ? "官方别名" : isNetease ? "可直接注册" : supportsPlus ? "分裂" : "只读"}</small></span>
               <StatusBadge status={account.status}>{accountStatus[account.status]}</StatusBadge>
             </button>;

@@ -192,6 +192,7 @@ def default_phone_binder(
             log_fn=log,
             backend_config=backend_config,
             cancel_check=cancel_check,
+            phone_binding_mode=True,
         )
         result = worker._retry_oauth_fresh_browser(account.email, account.password)
         if callback.completed and isinstance(result, dict) and result.get("access_token"):
@@ -221,9 +222,22 @@ def default_phone_binder(
                 "account_id": account.id,
                 "phone": phone_entry.phone,
             }
+        if (
+            isinstance(result, dict)
+            and result.get("phone_verification_failed")
+            and result.get("error")
+        ):
+            error = _sanitize_phone_bind_error(result.get("error"), phone_entry.sms_api)
+        elif isinstance(result, dict) and result.get("phone_challenge_present") is False:
+            error = (
+                "OpenAI 登录成功，但未出现手机号验证页；"
+                "账号可能已绑定手机号，或当前账号不要求再次验证"
+            )
+        else:
+            error = "OpenAI phone verification challenge was not completed"
         return {
             "ok": False,
-            "error": "OpenAI phone verification challenge was not completed",
+            "error": error,
             "account_id": account.id,
             "phone": phone_entry.phone,
         }

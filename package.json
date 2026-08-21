@@ -21,8 +21,8 @@
   ],
   "scripts": {
     "dev": "concurrently -k -n api,web -c green,cyan \"node --watch server/index.js\" \"vite --host 0.0.0.0\"",
-    "build": "vite build",
-    "build:local": "VITE_BASE_PATH=/ vite build",
+    "build": "umask 022 && vite build && find dist -type d -exec chmod 755 {} + && find dist -type f -exec chmod 644 {} +",
+    "build:local": "umask 022 && VITE_BASE_PATH=/ vite build && find dist -type d -exec chmod 755 {} + && find dist -type f -exec chmod 644 {} +",
     "package:extension": "bash scripts/package-extension.sh",
     "package:local": "bash scripts/package-local-release.sh",
     "setup:local": "bash scripts/setup-local.sh --native",

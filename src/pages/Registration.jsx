@@ -3,6 +3,7 @@ import { AlertTriangle, Cable, Check, ChevronDown, CircleStop, ClipboardCopy, Co
 import { api } from "../api.js";
 import { planAgentIdentityBulk, runAgentIdentityBulk } from "../agent-identity-bulk.js";
 import { Button, ConfirmDialog, EmptyState, FormField, IconButton, LoadingBlock, Modal, Pagination, ProviderMark, Segmented, StatusBadge, useToast } from "../components.jsx";
+import InventoryApiModal from "../components/InventoryApiModal.jsx";
 import { providerMeta } from "../providers.js";
 import { copyText, formatDate } from "../utils.js";
 import {
@@ -85,6 +86,11 @@ const registrationProviderOrder = new Map([
   ["mailcom", 3],
   ["netease", 4],
 ]);
+
+// Keep the task table bounded even when the API returns the maximum history
+// window.  The full response remains available for counts and bulk selection,
+// while only one page is mounted in the desktop and mobile views.
+const registrationJobPageSize = 50;
 
 function registrationMailboxSummary(account) {
   const bases = Array.isArray(account?.bases) ? account.bases : [];
@@ -193,52 +199,66 @@ function CheckoutStatusCell({ item, compact = false }) {
   </div>;
 }
 
-function TrialStatusCell({ item, compact = false }) {
-  const status = String(item?.trial_status || "unchecked").toLowerCase();
-  const eligible = status === "eligible" && item?.trial_eligible === true;
-  const ineligible = status === "ineligible" && item?.trial_eligible === false;
+function ZeroPriceTrialStatusCell({
+  item,
+  compact = false,
+  statusField,
+  eligibleField,
+  errorField,
+  checkedAtField,
+  countryLabel,
+}) {
+  const status = String(item?.[statusField] || "unchecked").toLowerCase();
+  const eligible = status === "eligible" && item?.[eligibleField] === true;
+  const ineligible = status === "ineligible" && item?.[eligibleField] === false;
   const failed = status === "failed";
   const label = eligible ? "0元" : ineligible ? "非0元" : failed ? "失败" : "未检测";
   const badge = eligible ? "active" : ineligible ? "warning" : failed ? "failed" : "inactive";
   const detail = failed
-    ? String(item?.trial_error || "日本 0 元 Checkout 检测失败")
-    : item?.trial_checked_at ? `检测时间：${formatDate(item.trial_checked_at)}` : "尚未检测日本 Checkout 最终金额";
+    ? String(item?.[errorField] || `${countryLabel} 0 元 Checkout 检测失败`)
+    : item?.[checkedAtField]
+      ? `检测时间：${formatDate(item[checkedAtField])}`
+      : `尚未检测${countryLabel} Checkout 最终金额`;
   return <div className={"registration-trial-status" + (compact ? " compact" : "")} title={detail}>
     <StatusBadge status={badge}>{label}</StatusBadge>
     {!compact && failed && <small>{detail}</small>}
   </div>;
+}
+
+function TrialStatusCell({ item, compact = false }) {
+  return <ZeroPriceTrialStatusCell
+    item={item}
+    compact={compact}
+    statusField="trial_status"
+    eligibleField="trial_eligible"
+    errorField="trial_error"
+    checkedAtField="trial_checked_at"
+    countryLabel="日本"
+  />;
 }
 
 function GbTrialStatusCell({ item, compact = false }) {
-  const status = String(item?.gb_trial_status || "unchecked").toLowerCase();
-  const eligible = status === "eligible" && item?.gb_trial_eligible === true;
-  const ineligible = status === "ineligible" && item?.gb_trial_eligible === false;
-  const failed = status === "failed";
-  const label = eligible ? "0元" : ineligible ? "非0元" : failed ? "失败" : "未检测";
-  const badge = eligible ? "active" : ineligible ? "warning" : failed ? "failed" : "inactive";
-  const detail = failed
-    ? String(item?.gb_trial_error || "英国 0 元 Checkout 检测失败")
-    : item?.gb_trial_checked_at ? `检测时间：${formatDate(item.gb_trial_checked_at)}` : "尚未检测英国 Checkout 最终金额";
-  return <div className={"registration-trial-status" + (compact ? " compact" : "")} title={detail}>
-    <StatusBadge status={badge}>{label}</StatusBadge>
-    {!compact && failed && <small>{detail}</small>}
-  </div>;
+  return <ZeroPriceTrialStatusCell
+    item={item}
+    compact={compact}
+    statusField="gb_trial_status"
+    eligibleField="gb_trial_eligible"
+    errorField="gb_trial_error"
+    checkedAtField="gb_trial_checked_at"
+    countryLabel="英国"
+  />;
 }
 
 function UsTrialStatusCell({ item, compact = false }) {
-  const status = String(item?.us_trial_status || "unchecked").toLowerCase();
-  const eligible = status === "eligible" && item?.us_trial_eligible === true;
-  const ineligible = status === "ineligible" && item?.us_trial_eligible === false;
-  const failed = status === "failed";
-  const label = eligible ? "0元" : ineligible ? "非0元" : failed ? "失败" : "未检测";
-  const badge = eligible ? "active" : ineligible ? "warning" : failed ? "failed" : "inactive";
-  const detail = failed
-    ? String(item?.us_trial_error || "美国 0 元 Checkout 检测失败")
-    : item?.us_trial_checked_at ? `检测时间：${formatDate(item.us_trial_checked_at)}` : "尚未检测美国 Checkout 最终金额";
-  return <div className={"registration-trial-status" + (compact ? " compact" : "")} title={detail}>
-    <StatusBadge status={badge}>{label}</StatusBadge>
-    {!compact && failed && <small>{detail}</small>}
-  </div>;
+  return <ZeroPriceTrialStatusCell
+    item={item}
+    compact={compact}
+    statusField="us_trial_status"
+    eligibleField="us_trial_eligible"
+    errorField="us_trial_error"
+    checkedAtField="us_trial_checked_at"
+    countryLabel="美国"
+  />;
 }
 
 function MomoStatusCell({ item, compact = false }) {
@@ -328,6 +348,7 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
   const [jobsError, setJobsError] = useState("");
   const [jobCounts, setJobCounts] = useState(null);
   const [jobFilter, setJobFilter] = useState("all");
+  const [jobPage, setJobPage] = useState(1);
   const [queueControl, setQueueControl] = useState(null);
   const [queueAction, setQueueAction] = useState("");
   const [jobActionIds, setJobActionIds] = useState(() => new Set());
@@ -415,6 +436,7 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
   const [localImportOpen, setLocalImportOpen] = useState(false);
   const [localImportContent, setLocalImportContent] = useState("");
   const [importingLocalAccounts, setImportingLocalAccounts] = useState(false);
+  const [inventoryApiOpen, setInventoryApiOpen] = useState(false);
   const [nfapiImportIds, setNfapiImportIds] = useState([]);
   const [nfapiOptions, setNfapiOptions] = useState(null);
   const [nfapiForm, setNfapiForm] = useState(nfapiImportDefaults);
@@ -857,9 +879,18 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
     && Boolean(selectedPaymentAgreementLink?.provider_url);
   const activeJobs = jobs?.filter((item) => releasableStatuses.has(item.status) && item.status !== "paused").length || 0;
   const failedJobCount = Number(jobCounts?.failed ?? jobs?.filter((item) => item.status === "failed").length) || 0;
-  const visibleJobs = jobFilter === "failed" ? (jobs || []).filter((item) => item.status === "failed") : (jobs || []);
+  const filteredJobs = jobFilter === "failed" ? (jobs || []).filter((item) => item.status === "failed") : (jobs || []);
+  const jobPages = Math.max(1, Math.ceil(filteredJobs.length / registrationJobPageSize));
+  const safeJobPage = Math.min(jobPage, jobPages);
+  const visibleJobs = filteredJobs.slice(
+    (safeJobPage - 1) * registrationJobPageSize,
+    safeJobPage * registrationJobPageSize,
+  );
   const deletableJobIds = visibleJobs.filter((item) => deletableStatuses.has(item.status)).map((item) => item.id);
   const allJobsSelected = deletableJobIds.length > 0 && deletableJobIds.every((id) => selectedJobIds.includes(id));
+  useEffect(() => {
+    setJobPage((current) => Math.min(current, jobPages));
+  }, [jobPages]);
   const accountGroups = useMemo(() => {
     const groups = new Map();
     for (const item of accounts?.items || []) {
@@ -1337,8 +1368,15 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
           ? await api(`/api/registration/accounts/${deleteTarget.ids[0]}`, { method: "DELETE" })
           : await api("/api/registration/accounts/bulk-delete", { method: "POST", body: { ids: deleteTarget.ids } });
         const failed = result.failed?.length || 0;
+        const releasedBlocked = Number(result.released_mailcom_blocked || 0);
         const deletedIds = new Set((result.deleted_ids || []).map(Number));
-        toast(failed ? `已删除 ${result.deleted} 个账号，${failed} 个失败` : `已删除 ${result.deleted} 个注册账号`, failed ? "error" : "success");
+        const releasedMessage = releasedBlocked ? `；已释放 ${releasedBlocked} 个 Mail.com blocked 别名槽` : "";
+        toast(
+          failed
+            ? `已删除 ${result.deleted} 个账号，${failed} 个失败${releasedMessage}`
+            : `已删除 ${result.deleted} 个注册账号${releasedMessage}`,
+          failed ? "error" : "success",
+        );
         setAccounts((current) => {
           if (!current?.items || !deletedIds.size) return current;
           const items = current.items.filter((item) => !deletedIds.has(Number(item.id)));
@@ -1394,7 +1432,11 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
   };
 
   const toggleJob = (id) => setSelectedJobIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
-  const toggleAllJobs = () => setSelectedJobIds(allJobsSelected ? [] : deletableJobIds);
+  const toggleAllJobs = () => setSelectedJobIds((current) => {
+    const pageIds = new Set(deletableJobIds);
+    if (allJobsSelected) return current.filter((id) => !pageIds.has(id));
+    return [...new Set([...current, ...deletableJobIds])];
+  });
   const toggleAccount = (id) => {
     if (importingNfapi) return;
     setSelectedAccountIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
@@ -2204,6 +2246,7 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
 
   const changeJobFilter = (filter) => {
     setJobFilter(filter);
+    setJobPage(1);
     setSelectedJobIds([]);
   };
 
@@ -2489,7 +2532,7 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
     ? (deleteCount > 1 ? `删除选中的 ${deleteCount} 个注册账号？` : "删除这个注册账号？")
     : (deleteCount > 1 ? `删除选中的 ${deleteCount} 条注册记录？` : "删除这条注册记录？");
   const deleteDescription = deletingAccounts
-    ? "将从本地账号池删除账号、密码（如有）、AT、Cookie 等凭据；不会注销官方 ChatGPT 账号。注册记录、分裂邮箱、邮件和验证码都会保留。"
+    ? "将从本地账号池删除账号、密码（如有）、AT、Cookie 等凭据；不会注销官方 ChatGPT 账号。注册记录、邮件和验证码都会保留；Mail.com 提链 blocked 账号删除后会解除别名保护并进入轮换补建。"
     : "只从注册记录列表中移除所选记录。已注册账号、账号凭据、分裂邮箱和验证码都会保留。";
   const queueCounts = queueControl?.counts || {};
   const paymentLinkActiveCount = paymentLinks.items.filter((item) => ["queued", "running", "cancel_requested"].includes(item.status)).length;
@@ -2627,7 +2670,9 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
               const checked = selectedJobIds.includes(job.id);
               return <article className={checked ? "selected" : ""} key={job.id}><header><input type="checkbox" aria-label={`选择 ${job.email}`} checked={checked} disabled={!selectable} onChange={() => toggleJob(job.id)} /><StatusBadge status={job.status}>{jobStatusLabel(job)}</StatusBadge><time>{formatDate(job.created_at)}</time></header><button onClick={() => copyText(job.email).then(() => toast("邮箱已复制"))}>{job.email}<Copy size={14} /></button><dl><div><dt>身份</dt><dd>{job.display_name || "等待生成"}</dd></div><div><dt>出口 IP</dt><dd>{job.exit_ip || "等待识别"}</dd></div><div><dt>代理</dt><dd>{job.proxy_label}</dd></div></dl><footer><span>{job.display_message || job.message || "-"}</span><JobCommands job={job} busy={jobActionIds.has(job.id)} onLogs={openLogs} onPause={(item) => controlJob(item, "pause")} onResume={(item) => controlJob(item, "resume")} onCancel={cancel} onRelease={setReleaseTarget} onDelete={(item) => setDeleteTarget({ kind: "job", ids: [item.id], item })} /></footer></article>;
             })}</div>
-            <div className="table-footer"><span>{jobFilter === "failed" ? `共 ${failedJobCount} 条注册失败记录` : `共 ${Number(jobCounts?.total ?? jobs.length)} 个注册任务`}</span></div>
+            <div className="table-footer"><span>{jobFilter === "failed"
+              ? `系统共 ${failedJobCount} 条失败记录；当前加载窗口匹配 ${filteredJobs.length} 条，本页显示 ${visibleJobs.length} 条`
+              : `系统共 ${Number(jobCounts?.total ?? jobs.length)} 个注册任务；当前仅加载最近 ${jobs.length} 条，本页显示 ${visibleJobs.length} 条`}</span><Pagination page={safeJobPage} pages={jobPages} onChange={setJobPage} /></div>
           </> : <EmptyState icon={jobFilter === "failed" ? AlertTriangle : UserPlus} title={jobFilter === "failed" ? "没有注册失败记录" : "还没有注册任务"} description={jobFilter === "failed" ? "当前没有未删除的失败邮箱。" : "选择源头邮箱和基础地址后开始注册。"} />}
         </section>
       </>}
@@ -2657,7 +2702,7 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
               <Button size="sm" icon={Gift} loading={checkingUsTrials} disabled={!pagedAccountItems.length || importingNfapi || checkingAccountSignals || checkingCheckouts || checkingTrials || checkingGbTrials || checkingMomo} title={selectedAccountIds.length ? "通过美国代理或服务器直连检测所选账号的 Plus Checkout 是否为 0 元" : "通过美国代理或服务器直连检测本页账号的 Plus Checkout 是否为 0 元"} onClick={checkAccountUsTrials}>检测美国0元资格</Button>
               <Button size="sm" icon={WalletCards} loading={checkingMomo} disabled={!pagedAccountItems.length || importingNfapi || checkingAccountSignals || checkingCheckouts || checkingTrials || checkingGbTrials || checkingUsTrials} title={selectedAccountIds.length ? "通过越南代理检测所选账号的零金额免费试用最终结账页是否显示 MoMo" : "通过越南代理检测本页账号的零金额免费试用最终结账页是否显示 MoMo"} onClick={checkAccountMomo}>检测 MoMo</Button>
               <Button size="sm" variant="primary" icon={Link2} loading={submittingPaymentLinks} disabled={!selectedAccountIds.length || importingNfapi} title="使用独立提链代理池，为所选账号直接生成 PayPal 支付链接" onClick={extractSelectedPaymentLinks}>直接提链</Button>
-              <Button size="sm" variant="primary" icon={Cable} disabled={!selectedPaymentAgreementReady || importingNfapi} title={selectedAccountIds.length !== 1 ? "请选择一个已提链账号" : selectedPaymentAgreementLink?.status !== "succeeded" || !selectedPaymentAgreementLink?.provider_url ? "所选账号需要先完成 PayPal 提链" : `提链国家 ${selectedPaymentAgreementCountry || "未记录"} 仅作记录；自动使用协议代理池配置接码并授权`} onClick={() => openPaymentAgreement(selectedPaymentAgreementAccount, selectedPaymentAgreementLink)}>自动协议</Button>
+              <Button size="sm" variant="primary" icon={Cable} disabled={!selectedPaymentAgreementReady || importingNfapi} title={selectedAccountIds.length !== 1 ? "请选择一个已提链账号" : selectedPaymentAgreementLink?.status !== "succeeded" || !selectedPaymentAgreementLink?.provider_url ? "所选账号需要先完成 PayPal 提链" : `账单国家 ${selectedPaymentAgreementCountry || "未记录"} 仅作提链记录；自动使用协议代理池配置接码并授权`} onClick={() => openPaymentAgreement(selectedPaymentAgreementAccount, selectedPaymentAgreementLink)}>自动协议</Button>
               <Button size="sm" variant="primary" icon={Smartphone} disabled={!selectedAccountIds.length || importingNfapi} title={selectedAccountIds.length ? `为显式选择的 ${selectedAccountIds.length} 个账号自动购买 HeroSMS OpenAI 号码并接收验证码` : "请先显式选择要自动接码的账号"} onClick={() => setOpenAiSmsOpen(true)}>OpenAI 自动接码</Button>
               <Button size="sm" icon={Pencil} disabled={!selectedAccountIds.length || importingNfapi} title="统一修改所选账号的分组" onClick={openBulkGroupEditor}>编辑分组</Button>
               <Button size="sm" variant="primary" icon={Store} loading={publishingPickup} disabled={!selectedAccountIds.length || importingNfapi} title="只把所选账号的邮箱和取件链接上架到买家取件站" onClick={publishSelectedToPickup}>上架取件站</Button>
@@ -2666,6 +2711,7 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
               <Button size="sm" icon={Download} loading={exportingSub2} disabled={!selectedAccountIds.length || importingNfapi} title="导出为 Sub2API Codex Session JSON" onClick={exportSelectedSub2}>导出 Sub2</Button>
               <Button size="sm" icon={ShieldCheck} disabled={!selectedAccountIds.length || importingNfapi} title="通过 OpenAI OAuth 为所选账号逐个获取 Refresh Token" onClick={openRefreshTokenOAuth}>OAuth 获取 RT</Button>
               <Button size="sm" icon={KeyRound} loading={exportingRefreshTokens} disabled={!selectedAccountIds.length || importingNfapi} title="导出包含邮箱和 Refresh Token 的 JSON" onClick={exportSelectedRefreshTokens}>导出 RT</Button>
+              <Button size="sm" variant="primary" icon={Database} disabled={!selectedAccountIds.length || importingNfapi} title="将所选账号或邮箱凭证提交到 nvtokens 库存 API" onClick={() => setInventoryApiOpen(true)}>库存 API</Button>
               <Button size="sm" variant="danger" icon={Trash2} disabled={!selectedAccountIds.length || importingNfapi} onClick={() => setDeleteTarget({ kind: "accounts", ids: selectedAccountIds })}>删除</Button>
             </div>
           </div>
@@ -2790,7 +2836,7 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
           <PaymentProxyDraftMessages draft={paymentCheckoutProxyDraft} label="Checkout Proxy" />
           <FormField label={`Update Proxy（${paymentLinks.update_proxy_count || 0} 条）`} hint="用于 Checkout Update；对应原项目第二个代理框"><textarea className="proxy-pool-editor payment-proxy-pool-editor" aria-invalid={Boolean(paymentUpdateProxyDraft.errors.length)} value={paymentUpdateProxyText} onChange={(event) => { setPaymentUpdateProxyText(event.target.value); setPaymentProxySaveFeedback(null); }} placeholder={"http://update-user:password@host:port\nhost:port:user:password"} /></FormField>
           <PaymentProxyDraftMessages draft={paymentUpdateProxyDraft} label="Update Proxy" />
-          <div className="form-grid two"><FormField label="提链国家" hint="只影响本次提链，不决定协议国家或号码；DE 使用 EUR，TR/US/TH 使用 USD，GB 使用 GBP，BR 使用 BRL，JP 使用 JPY"><select value={paymentLinkCountry || "DE"} onChange={(event) => setPaymentLinkCountry(event.target.value)}>{paymentLinks.countries.map((item) => <option key={item.code} value={item.code}>{item.code}（{item.currency}）</option>)}</select></FormField><FormField label="支付方式" hint="直接提链固定生成 PayPal 链接"><select value="paypal" disabled><option value="paypal">PayPal</option></select></FormField></div>
+          <div className="form-grid two"><FormField label="账单国家" hint="决定本次提链的账单国家和币种，不决定协议国家或号码；DE 使用 EUR，TR/US/TH 使用 USD，GB 使用 GBP，BR 使用 BRL，JP 使用 JPY"><select value={paymentLinkCountry || "DE"} onChange={(event) => setPaymentLinkCountry(event.target.value)}>{paymentLinks.countries.map((item) => <option key={item.code} value={item.code}>{item.code}（{item.currency}）</option>)}</select></FormField><FormField label="支付方式" hint="直接提链固定生成 PayPal 链接"><select value="paypal" disabled><option value="paypal">PayPal</option></select></FormField></div>
           <FormField label="IPRocket 代理订阅" hint="读取后会像原项目一样，同时覆盖并保存 Checkout 与 Update 两个代理池"><input type="url" value={paymentProxySourceUrl} onChange={(event) => { setPaymentProxySourceUrl(event.target.value); setPaymentProxySourceStatus(""); }} placeholder="粘贴 getLink 订阅地址" /></FormField>
           <Button icon={Download} loading={refreshingPaymentProxySource} disabled={!paymentProxySourceUrl.trim()} onClick={refreshPaymentProxySource}>读取并保存代理</Button>
           {paymentProxySourceStatus && <div className={`inline-alert ${/^已读取/.test(paymentProxySourceStatus) ? "success" : "warning"}`}><span>{paymentProxySourceStatus}</span></div>}
@@ -2810,7 +2856,7 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
 
       {view === "protocol-proxies" && <section className="registration-proxy-layout protocol-proxy-layout">
         <article className="settings-section"><header><span><Cable size={19} /></span><div><h2>PayPal 协议配置</h2><p>协议国家与运行代理池保存一次，后续直接自动接码并完成授权</p></div></header><div className="settings-form payment-proxy-settings">
-          <FormField label="协议国家" hint="HeroSMS 会购买该国家的号码；协议注册资料和地址也使用该国家，与账单国家、提链国家无关"><select value={paymentAgreementCountry} disabled={!paymentAgreementCountryOptions.length} onChange={(event) => { setPaymentAgreementCountry(event.target.value); setPaymentAgreementSaveFeedback(null); }}>{paymentAgreementCountryOptions.length ? paymentAgreementCountryOptions.map((item) => <option key={item.code} value={item.code}>{item.label}</option>) : <option value="">暂无可用国家</option>}</select></FormField>
+          <FormField label="协议国家" hint="HeroSMS 会购买该国家的号码；协议注册资料和地址也使用该国家，与账单国家无关"><select value={paymentAgreementCountry} disabled={!paymentAgreementCountryOptions.length} onChange={(event) => { setPaymentAgreementCountry(event.target.value); setPaymentAgreementSaveFeedback(null); }}>{paymentAgreementCountryOptions.length ? paymentAgreementCountryOptions.map((item) => <option key={item.code} value={item.code}>{item.label}</option>) : <option value="">暂无可用国家</option>}</select></FormField>
           <FormField label={`Protocol Proxy（${paymentAgreementRuntime?.proxy_count || 0} 条）`} hint="每行一条；协议任务自动从这里选择代理，不读取注册代理池或提链代理池"><textarea className="proxy-pool-editor protocol-proxy-pool-editor" aria-invalid={Boolean(paymentAgreementProxyDraft.errors.length)} value={paymentAgreementProxyText} onChange={(event) => { setPaymentAgreementProxyText(event.target.value); setPaymentAgreementSaveFeedback(null); }} placeholder={"http://protocol-user:password@host:port\nhost:port:user:password\nsocks5://user:password@host:port"} /></FormField>
           <PaymentProxyDraftMessages draft={paymentAgreementProxyDraft} label="Protocol Proxy" />
           {paymentAgreementRuntime?.error && <div className="inline-alert warning"><AlertTriangle size={15} /><span>{paymentAgreementRuntime.error}</span></div>}
@@ -2819,7 +2865,7 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
         </div></article>
         <div className="registration-proxy-side">
           <article className="settings-section"><header><span><Server size={19} /></span><div><h2>融合状态</h2><p>保存后的配置由注册工作站和协议工作台自动使用</p></div></header><div className="payment-link-integration-state"><div><StatusBadge status={paymentAgreementRuntime?.configured ? "active" : "warning"}>{paymentAgreementRuntime?.configured ? "已配置" : "待配置"}</StatusBadge><span><b>自动协议服务</b><small>点击账号的“协议”后，无需再次填写参数</small></span></div><div><StatusBadge status={paymentAgreementRuntime?.country ? "active" : "warning"}>{paymentAgreementRuntime?.country || "未选"}</StatusBadge><span><b>已保存的协议与号码国家</b><small>PayPal 资料、HeroSMS 号码严格跟随此国家</small></span></div><div><StatusBadge status={paymentAgreementRuntime?.proxy_count ? "active" : "warning"}>{paymentAgreementRuntime?.proxy_count || 0} 条</StatusBadge><span><b>Protocol Proxy 池</b><small>与 Checkout、Update 和注册代理池完全独立</small></span></div></div></article>
-          <article className="settings-section"><header><span><Check size={19} /></span><div><h2>使用流程</h2><p>配置一次，之后从账号列表直接启动</p></div></header><div className="proxy-rule-list"><div><Globe2 size={16} /><span><b>1. 选择国家并保存代理</b><small>协议国家决定注册资料、地址以及 HeroSMS 号码国家。</small></span></div><div><Link2 size={16} /><span><b>2. 完成 PayPal 提链</b><small>提链使用什么国家都可以，仅保留为来源记录。</small></span></div><div><Cable size={16} /><span><b>3. 点击“协议”自动执行</b><small>系统自动取代理、购买号码、接收验证码并提交 PayPal 授权。</small></span></div></div></article>
+          <article className="settings-section"><header><span><Check size={19} /></span><div><h2>使用流程</h2><p>配置一次，之后从账号列表直接启动</p></div></header><div className="proxy-rule-list"><div><Globe2 size={16} /><span><b>1. 选择国家并保存代理</b><small>协议国家决定注册资料、地址以及 HeroSMS 号码国家。</small></span></div><div><Link2 size={16} /><span><b>2. 完成 PayPal 提链</b><small>账单国家与协议流程无关，仅保留为提链来源记录。</small></span></div><div><Cable size={16} /><span><b>3. 点击“协议”自动执行</b><small>系统自动取代理、购买号码、接收验证码并提交 PayPal 授权。</small></span></div></div></article>
         </div>
       </section>}
 
@@ -2960,6 +3006,14 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
           <FormField label="邮箱 / 账号内容" hint='外部账号：email----https://...；历史账号也支持 email password {"access_token":"..."}'><textarea className="nfapi-json-editor" rows="12" spellCheck="false" value={localImportContent} disabled={importingLocalAccounts} onChange={(event) => setLocalImportContent(event.target.value)} placeholder={'someone@example.com----https://dispose.lol/ib/your-link-key\n\n或恢复历史账号：\nname@example.com\nname2@example.com password'} /></FormField>
         </div>
       </Modal>
+
+      <InventoryApiModal
+        open={inventoryApiOpen}
+        onClose={() => setInventoryApiOpen(false)}
+        selectedIds={selectedAccountIds}
+        selectedEmails={selectedAccounts.map((item) => item.email).filter(Boolean)}
+        onDone={() => { onDataChange(); loadAccounts(); }}
+      />
 
       <Modal
         open={Boolean(editingAccount)}

@@ -566,6 +566,11 @@ const schema = `
     stage TEXT NOT NULL DEFAULT 'registration_queued',
     outcome TEXT NOT NULL DEFAULT '',
     registration_status TEXT NOT NULL DEFAULT 'queued',
+    trial_country TEXT NOT NULL DEFAULT '',
+    trial_status TEXT NOT NULL DEFAULT 'pending'
+      CHECK(trial_status IN ('pending', 'running', 'eligible', 'ineligible', 'failed', 'skipped')),
+    trial_error TEXT NOT NULL DEFAULT '',
+    trial_checked_at TEXT,
     link_status TEXT NOT NULL DEFAULT 'pending',
     link_attempt_count INTEGER NOT NULL DEFAULT 0
       CHECK(link_attempt_count >= 0),
@@ -598,6 +603,10 @@ const schema = `
     ON mailcom_registration_pipeline_attempts(registration_job_id, payment_link_task_id);
   CREATE INDEX IF NOT EXISTS idx_mailcom_registration_pipeline_attempts_successes
     ON mailcom_registration_pipeline_attempts(pipeline_id, link_status, id DESC);
+  CREATE INDEX IF NOT EXISTS idx_mailcom_registration_pipeline_attempts_email
+    ON mailcom_registration_pipeline_attempts(email COLLATE NOCASE, id DESC);
+  CREATE INDEX IF NOT EXISTS idx_mailcom_registration_pipeline_attempts_external_account
+    ON mailcom_registration_pipeline_attempts(external_account_id, outcome, recycle_status);
 
   CREATE TABLE IF NOT EXISTS openai_sms_tasks (
     id TEXT PRIMARY KEY,
@@ -1135,6 +1144,55 @@ export function createDatabase({ filename, seedDemo = false } = {}) {
         OR link_status IN ('submitting', 'running', 'succeeded', 'failed')
     `);
   }
+  db.transaction(() => {
+    if (!mailcomAttemptColumns.includes("trial_country")) {
+      db.exec("ALTER TABLE mailcom_registration_pipeline_attempts ADD COLUMN trial_country TEXT NOT NULL DEFAULT ''");
+    }
+    if (!mailcomAttemptColumns.includes("trial_status")) {
+      db.exec(`
+        ALTER TABLE mailcom_registration_pipeline_attempts
+        ADD COLUMN trial_status TEXT NOT NULL DEFAULT 'pending'
+          CHECK(trial_status IN ('pending', 'running', 'eligible', 'ineligible', 'failed', 'skipped'))
+      `);
+    }
+    if (!mailcomAttemptColumns.includes("trial_error")) {
+      db.exec("ALTER TABLE mailcom_registration_pipeline_attempts ADD COLUMN trial_error TEXT NOT NULL DEFAULT ''");
+    }
+    if (!mailcomAttemptColumns.includes("trial_checked_at")) {
+      db.exec("ALTER TABLE mailcom_registration_pipeline_attempts ADD COLUMN trial_checked_at TEXT");
+    }
+    db.exec(`
+      UPDATE mailcom_registration_pipeline_attempts
+      SET trial_country = CASE WHEN trim(trial_country) = '' THEN COALESCE((
+            SELECT pipelines.payment_link_country
+            FROM mailcom_registration_pipelines AS pipelines
+            WHERE pipelines.id = mailcom_registration_pipeline_attempts.pipeline_id
+          ), '') ELSE trial_country END,
+        trial_status = CASE
+          WHEN status IN ('queued', 'running')
+            AND link_status = 'pending' AND trim(payment_link_task_id) = ''
+            AND EXISTS (
+              SELECT 1 FROM mailcom_registration_pipelines AS pipelines
+              WHERE pipelines.id = mailcom_registration_pipeline_attempts.pipeline_id
+                AND pipelines.payment_link_country IN ('JP', 'GB', 'US')
+            ) THEN 'pending'
+          ELSE 'skipped' END,
+        trial_checked_at = CASE
+          WHEN status IN ('queued', 'running')
+            AND link_status = 'pending' AND trim(payment_link_task_id) = ''
+            AND EXISTS (
+              SELECT 1 FROM mailcom_registration_pipelines AS pipelines
+              WHERE pipelines.id = mailcom_registration_pipeline_attempts.pipeline_id
+                AND pipelines.payment_link_country IN ('JP', 'GB', 'US')
+            ) THEN NULL
+          ELSE COALESCE(trial_checked_at, registration_finished_at, link_finished_at, finished_at, updated_at) END
+      WHERE trim(trial_country) = ''
+        OR (trial_status = 'pending' AND (
+          status NOT IN ('queued', 'running') OR link_status <> 'pending'
+            OR trim(payment_link_task_id) <> ''
+        ))
+    `);
+  })();
   if (!mailcomAttemptColumns.includes("agreement_job_id")) {
     db.exec("ALTER TABLE mailcom_registration_pipeline_attempts ADD COLUMN agreement_job_id TEXT NOT NULL DEFAULT ''");
   }
@@ -1277,6 +1335,11 @@ export function createDatabase({ filename, seedDemo = false } = {}) {
     nfapi_admin_api_key_encrypted: "",
     nfapi_import_defaults: "{}",
     nfapi_last_connected_at: "",
+    inventory_api_cards_url: "https://nvtokens.com/api/inventory/cards/import",
+    inventory_api_mailboxes_url: "https://nvtokens.com/api/inventory/mailboxes/import",
+    inventory_api_pool_url: "https://nvtokens.com/api/inventory/cards/pool",
+    inventory_api_key_encrypted: "",
+    inventory_api_last_connected_at: "",
     microsoft_registration_webhook_token_hash: "",
   };
   const statement = db.prepare("INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, ?, ?)");

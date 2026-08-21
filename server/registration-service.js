@@ -34,8 +34,11 @@ import { serializeInboxLinkEntry } from "./inbox-link-pool.js";
 import { checkoutTypeFromAccount, probeCheckoutType } from "./checkout-type-probe.js";
 import {
   DIRECT_TRIAL_ROUTE,
+  GB_FAST_INELIGIBLE_EVIDENCE,
   GB_ZERO_TRIAL_EVIDENCE,
+  JP_FAST_INELIGIBLE_EVIDENCE,
   JP_ZERO_TRIAL_EVIDENCE,
+  US_FAST_INELIGIBLE_EVIDENCE,
   US_ZERO_TRIAL_EVIDENCE,
   probeDirectTrialCountry,
   probeGbTrialEligibility,
@@ -57,7 +60,7 @@ const REGISTERED_ACCOUNT_PAGE_SIZE = 500;
 const MAX_REGISTERED_ACCOUNT_PAGES = 100;
 const CHECKOUT_CHECK_CONCURRENCY = 2;
 const CHECKOUT_ACCOUNT_COOLDOWN_MS = 30 * 60 * 1000;
-const TRIAL_CHECK_CONCURRENCY = 2;
+const TRIAL_CHECK_CONCURRENCY = 5;
 const MOMO_CHECK_CONCURRENCY = 2;
 const MAX_REGISTRATION_CONCURRENCY = 20;
 const ACCOUNT_DELETE_SQL_BATCH_SIZE = 500;
@@ -1467,6 +1470,24 @@ function usTrialCheckError(value) {
     .replace(/\b(?:Bearer\s+)?eyJ[A-Za-z0-9._-]+/gi, "[REDACTED]")
     .replace(/\b(?:cs_(?:live|test)|oaics)_[A-Za-z0-9_-]+/gi, "[REDACTED]"), 180)
     || "美国 0 元 Checkout 检测失败";
+}
+
+function trialCheckErrorMetadata(value) {
+  const status = Number(
+    value?.status
+      ?? value?.http_status
+      ?? value?.status_http
+      ?? value?.statusCode
+      ?? 0,
+  );
+  const code = safeRemoteText(
+    value?.code ?? value?.error_code ?? value?.errorCode ?? "",
+    120,
+  );
+  return {
+    httpStatus: Number.isSafeInteger(status) && status >= 100 && status <= 599 ? status : 0,
+    errorCode: code,
+  };
 }
 
 function momoCheckError(value) {
@@ -3064,14 +3085,17 @@ export class RegistrationService {
         const trialMatches = trialCheck
           && String(trialCheck.email || "").toLowerCase() === String(item.email || "").toLowerCase()
           && (String(trialCheck.evidence || "") === JP_ZERO_TRIAL_EVIDENCE
+            || String(trialCheck.evidence || "") === JP_FAST_INELIGIBLE_EVIDENCE
             || (String(trialCheck.status || "") === "failed" && !trialCheck.evidence));
         const gbTrialMatches = gbTrialCheck
           && String(gbTrialCheck.email || "").toLowerCase() === String(item.email || "").toLowerCase()
           && (String(gbTrialCheck.evidence || "") === GB_ZERO_TRIAL_EVIDENCE
+            || String(gbTrialCheck.evidence || "") === GB_FAST_INELIGIBLE_EVIDENCE
             || (String(gbTrialCheck.status || "") === "failed" && !gbTrialCheck.evidence));
         const usTrialMatches = usTrialCheck
           && String(usTrialCheck.email || "").toLowerCase() === String(item.email || "").toLowerCase()
           && (String(usTrialCheck.evidence || "") === US_ZERO_TRIAL_EVIDENCE
+            || String(usTrialCheck.evidence || "") === US_FAST_INELIGIBLE_EVIDENCE
             || (String(usTrialCheck.status || "") === "failed" && !usTrialCheck.evidence));
         const momoMatches = momoCheck
           && String(momoCheck.email || "").toLowerCase() === String(item.email || "").toLowerCase()
@@ -3980,6 +4004,8 @@ export class RegistrationService {
         : "failed";
     const normalizedEvidence = normalizedStatus === "failed" ? "" : safeRemoteText(evidence, 120);
     const normalizedError = normalizedStatus === "failed" ? trialCheckError(error) : "";
+    const errorMetadata = normalizedStatus === "failed"
+      ? trialCheckErrorMetadata(error) : { httpStatus: 0, errorCode: "" };
     const now = nowIso();
     const effectiveCheckedAt = checkedAt || now;
     this.db.prepare(`
@@ -4012,6 +4038,8 @@ export class RegistrationService {
       trial_evidence: normalizedEvidence,
       trial_error: normalizedError,
       trial_checked_at: effectiveCheckedAt,
+      trial_http_status: errorMetadata.httpStatus,
+      trial_error_code: errorMetadata.errorCode,
     };
   }
 
@@ -4075,26 +4103,84 @@ export class RegistrationService {
     return promise;
   }
 
-  async runRegisteredAccountTrialCheck(account, proxy) {
-    const remote = await this.client.getAccount(account.id);
-    if (!remote
-      || String(remote.platform || "chatgpt").toLowerCase() !== "chatgpt"
+  async registeredAccountTrialCredential(account) {
+    let remote;
+    try {
+      remote = await this.client.getAccount(account.id);
+    } catch (error) {
+      if (Number(error?.status || 0) === 404) {
+        throw Object.assign(new Error("注册账号不存在"), {
+          status: 404,
+          code: "registered_account_not_found",
+        });
+      }
+      throw error;
+    }
+    if (!remote) {
+      throw Object.assign(new Error("注册账号不存在"), {
+        status: 404,
+        code: "registered_account_not_found",
+      });
+    }
+    if (String(remote.platform || "chatgpt").toLowerCase() !== "chatgpt"
       || String(remote.email || "").toLowerCase() !== String(account.email || "").toLowerCase()) {
-      throw Object.assign(new Error("注册账号与远端账号不匹配"), { status: 409 });
+      throw Object.assign(new Error("注册账号与远端账号不匹配"), {
+        status: 409,
+        code: "registered_account_mismatch",
+      });
     }
     const accessToken = accessTokenFromAccount(remote);
     if (!accessToken) throw Object.assign(new Error("这个账号尚未获取到 AT"), { status: 409 });
-    const result = await this.trialProbe({ accessToken, proxy });
-    if (!result || typeof result !== "object" || typeof result.eligible !== "boolean"
-      || !Number.isFinite(result.amountDue) || result.eligible !== (result.amountDue === 0)
-      || String(result.currency || "") !== "JPY"
-      || String(result.evidence || "") !== JP_ZERO_TRIAL_EVIDENCE) {
+    return { remote, accessToken };
+  }
+
+  async runRegisteredAccountTrialCheck(account, proxy) {
+    const { accessToken } = await this.registeredAccountTrialCredential(account);
+    const result = await this.trialProbe({ accessToken, proxy, fastIneligible: true });
+    const finalAmountVerdict = result && typeof result === "object"
+      && typeof result.eligible === "boolean" && Number.isFinite(result.amountDue)
+      && result.eligible === (result.amountDue === 0)
+      && String(result.currency || "") === "JPY"
+      && String(result.evidence || "") === JP_ZERO_TRIAL_EVIDENCE;
+    const fastIneligibleVerdict = result?.eligible === false && result?.amountDue === null
+      && String(result.state || "") === "not_eligible"
+      && String(result.currency || "") === "JPY"
+      && String(result.evidence || "") === JP_FAST_INELIGIBLE_EVIDENCE;
+    if (!finalAmountVerdict && !fastIneligibleVerdict) {
       throw Object.assign(new Error("日本 0 元 Checkout 探针返回了无效结果"), { status: 502 });
     }
     return {
       eligible: result.eligible,
       evidence: safeRemoteText(result.evidence, 120),
     };
+  }
+
+  registeredAccountTrialStrategy(country) {
+    const normalizedCountry = String(country || "").trim().toUpperCase();
+    const strategies = {
+      JP: ["resolveJapaneseTrialProxy", "checkRegisteredAccountTrial"],
+      GB: ["resolveBritishTrialProxy", "checkRegisteredAccountGbTrial"],
+      US: ["resolveAmericanTrialProxy", "checkRegisteredAccountUsTrial"],
+    };
+    const strategy = strategies[normalizedCountry];
+    if (!strategy) {
+      throw Object.assign(new Error(`暂不支持 ${normalizedCountry || "当前国家"} 的 0 元试用资格预检`), {
+        status: 409,
+        code: "TRIAL_CHECK_COUNTRY_UNSUPPORTED",
+      });
+    }
+    return { country: normalizedCountry, resolveProxy: strategy[0], checkTrial: strategy[1] };
+  }
+
+  async resolveRegisteredAccountTrialRoute(country) {
+    const strategy = this.registeredAccountTrialStrategy(country);
+    return this[strategy.resolveProxy]();
+  }
+
+  async checkRegisteredAccountTrialForCountry(account, country) {
+    const strategy = this.registeredAccountTrialStrategy(country);
+    const proxy = await this[strategy.resolveProxy]();
+    return this[strategy.checkTrial](account, proxy);
   }
 
   async checkRegisteredAccountTrials(input = {}) {
@@ -4176,6 +4262,8 @@ export class RegistrationService {
         : "failed";
     const normalizedEvidence = normalizedStatus === "failed" ? "" : safeRemoteText(evidence, 120);
     const normalizedError = normalizedStatus === "failed" ? gbTrialCheckError(error) : "";
+    const errorMetadata = normalizedStatus === "failed"
+      ? trialCheckErrorMetadata(error) : { httpStatus: 0, errorCode: "" };
     const now = nowIso();
     const effectiveCheckedAt = checkedAt || now;
     this.db.prepare(`
@@ -4208,6 +4296,8 @@ export class RegistrationService {
       gb_trial_evidence: normalizedEvidence,
       gb_trial_error: normalizedError,
       gb_trial_checked_at: effectiveCheckedAt,
+      gb_trial_http_status: errorMetadata.httpStatus,
+      gb_trial_error_code: errorMetadata.errorCode,
     };
   }
 
@@ -4272,19 +4362,18 @@ export class RegistrationService {
   }
 
   async runRegisteredAccountGbTrialCheck(account, proxy) {
-    const remote = await this.client.getAccount(account.id);
-    if (!remote
-      || String(remote.platform || "chatgpt").toLowerCase() !== "chatgpt"
-      || String(remote.email || "").toLowerCase() !== String(account.email || "").toLowerCase()) {
-      throw Object.assign(new Error("注册账号与远端账号不匹配"), { status: 409 });
-    }
-    const accessToken = accessTokenFromAccount(remote);
-    if (!accessToken) throw Object.assign(new Error("这个账号尚未获取到 AT"), { status: 409 });
-    const result = await this.gbTrialProbe({ accessToken, proxy });
-    if (!result || typeof result !== "object" || typeof result.eligible !== "boolean"
-      || !Number.isFinite(result.amountDue) || result.eligible !== (result.amountDue === 0)
-      || String(result.currency || "") !== "GBP"
-      || String(result.evidence || "") !== GB_ZERO_TRIAL_EVIDENCE) {
+    const { accessToken } = await this.registeredAccountTrialCredential(account);
+    const result = await this.gbTrialProbe({ accessToken, proxy, fastIneligible: true });
+    const finalAmountVerdict = result && typeof result === "object"
+      && typeof result.eligible === "boolean" && Number.isFinite(result.amountDue)
+      && result.eligible === (result.amountDue === 0)
+      && String(result.currency || "") === "GBP"
+      && String(result.evidence || "") === GB_ZERO_TRIAL_EVIDENCE;
+    const fastIneligibleVerdict = result?.eligible === false && result?.amountDue === null
+      && String(result.state || "") === "not_eligible"
+      && String(result.currency || "") === "GBP"
+      && String(result.evidence || "") === GB_FAST_INELIGIBLE_EVIDENCE;
+    if (!finalAmountVerdict && !fastIneligibleVerdict) {
       throw Object.assign(new Error("英国 0 元 Checkout 探针返回了无效结果"), { status: 502 });
     }
     return {
@@ -4372,6 +4461,8 @@ export class RegistrationService {
         : "failed";
     const normalizedEvidence = normalizedStatus === "failed" ? "" : safeRemoteText(evidence, 120);
     const normalizedError = normalizedStatus === "failed" ? usTrialCheckError(error) : "";
+    const errorMetadata = normalizedStatus === "failed"
+      ? trialCheckErrorMetadata(error) : { httpStatus: 0, errorCode: "" };
     const now = nowIso();
     const effectiveCheckedAt = checkedAt || now;
     this.db.prepare(`
@@ -4404,6 +4495,8 @@ export class RegistrationService {
       us_trial_evidence: normalizedEvidence,
       us_trial_error: normalizedError,
       us_trial_checked_at: effectiveCheckedAt,
+      us_trial_http_status: errorMetadata.httpStatus,
+      us_trial_error_code: errorMetadata.errorCode,
     };
   }
 
@@ -4480,19 +4573,18 @@ export class RegistrationService {
   }
 
   async runRegisteredAccountUsTrialCheck(account, proxy) {
-    const remote = await this.client.getAccount(account.id);
-    if (!remote
-      || String(remote.platform || "chatgpt").toLowerCase() !== "chatgpt"
-      || String(remote.email || "").toLowerCase() !== String(account.email || "").toLowerCase()) {
-      throw Object.assign(new Error("注册账号与远端账号不匹配"), { status: 409 });
-    }
-    const accessToken = accessTokenFromAccount(remote);
-    if (!accessToken) throw Object.assign(new Error("这个账号尚未获取到 AT"), { status: 409 });
-    const result = await this.usTrialProbe({ accessToken, proxy });
-    if (!result || typeof result !== "object" || typeof result.eligible !== "boolean"
-      || !Number.isFinite(result.amountDue) || result.eligible !== (result.amountDue === 0)
-      || String(result.currency || "") !== "USD"
-      || String(result.evidence || "") !== US_ZERO_TRIAL_EVIDENCE) {
+    const { accessToken } = await this.registeredAccountTrialCredential(account);
+    const result = await this.usTrialProbe({ accessToken, proxy, fastIneligible: true });
+    const finalAmountVerdict = result && typeof result === "object"
+      && typeof result.eligible === "boolean" && Number.isFinite(result.amountDue)
+      && result.eligible === (result.amountDue === 0)
+      && String(result.currency || "") === "USD"
+      && String(result.evidence || "") === US_ZERO_TRIAL_EVIDENCE;
+    const fastIneligibleVerdict = result?.eligible === false && result?.amountDue === null
+      && String(result.state || "") === "not_eligible"
+      && String(result.currency || "") === "USD"
+      && String(result.evidence || "") === US_FAST_INELIGIBLE_EVIDENCE;
+    if (!finalAmountVerdict && !fastIneligibleVerdict) {
       throw Object.assign(new Error("美国 0 元 Checkout 探针返回了无效结果"), { status: 502 });
     }
     return {
@@ -4997,6 +5089,142 @@ export class RegistrationService {
     return { ...result, access_token_refreshed: true };
   }
 
+  cleanupRegisteredAccountArtifacts(accountId) {
+    const id = String(accountId);
+    this.db.transaction(() => {
+      this.db.prepare("DELETE FROM registered_account_metadata WHERE external_account_id = ?").run(id);
+      this.db.prepare("DELETE FROM registered_account_checkout_checks WHERE external_account_id = ?").run(id);
+      this.db.prepare("DELETE FROM registered_account_trial_checks WHERE external_account_id = ?").run(id);
+      this.db.prepare("DELETE FROM registered_account_gb_trial_checks WHERE external_account_id = ?").run(id);
+      this.db.prepare("DELETE FROM registered_account_us_trial_checks WHERE external_account_id = ?").run(id);
+      this.db.prepare("DELETE FROM registered_account_momo_checks WHERE external_account_id = ?").run(id);
+      this.db.prepare("DELETE FROM registered_account_payment_links WHERE external_account_id = ?").run(id);
+      this.db.prepare("DELETE FROM registered_account_nfapi_links WHERE external_account_id = ?").run(id);
+    })();
+  }
+
+  pipelineRegisteredAccountProtection(accountId, email, remoteAccount = null) {
+    const id = String(accountId || "").trim();
+    const normalizedEmail = String(email || "").trim().toLowerCase();
+    const protectedAttempt = this.db.prepare(`
+      SELECT 1
+      FROM mailcom_registration_pipeline_attempts
+      WHERE external_account_id = ? AND email = ? COLLATE NOCASE
+        AND (
+          (outcome = 'link_blocked' AND stage <> 'link_blocked_released')
+          OR link_status = 'succeeded'
+          OR agreement_status IN ('succeeded', 'uncertain')
+        )
+      LIMIT 1
+    `).get(id, normalizedEmail);
+    if (protectedAttempt) return "blocked、已提链或协议受保护账号";
+
+    const persisted = this.db.prepare(`
+      SELECT * FROM registered_account_status_checks
+      WHERE external_account_id = ? OR email = ? COLLATE NOCASE
+      ORDER BY external_account_id = ? DESC, updated_at DESC
+      LIMIT 1
+    `).get(id, normalizedEmail, id);
+    const persistedPlus = String(persisted?.account_type || "").toLowerCase() === "plus"
+      || String(persisted?.account_type_raw || "").toLowerCase().includes("plus")
+      || new Set(["active", "subscribed"])
+        .has(String(persisted?.subscription_status || "").toLowerCase());
+    if (persistedPlus) return "Plus 账号";
+
+    if (remoteAccount) {
+      const signals = accountStatusSignals(remoteAccount, persisted || null);
+      const remotePlus = signals.account_type === "plus"
+        || new Set(["active", "subscribed"]).has(String(signals.subscription_status || "").toLowerCase());
+      if (remotePlus) return "远端确认的 Plus 账号";
+    }
+    return "";
+  }
+
+  assertPipelineRegisteredAccountDeletable(accountId, email, remoteAccount = null) {
+    const protection = this.pipelineRegisteredAccountProtection(accountId, email, remoteAccount);
+    if (!protection) return;
+    throw Object.assign(new Error(`${protection}禁止流水线自动删除`), {
+      status: 409,
+      code: "PIPELINE_REGISTERED_ACCOUNT_PROTECTED",
+    });
+  }
+
+  async deleteRegisteredAccountForPipeline(input = {}) {
+    const id = Number(input.id);
+    const registrationJobId = Number(input.registrationJobId);
+    const expectedEmail = String(input.email || "").trim().toLowerCase();
+    if (!Number.isSafeInteger(id) || id <= 0
+      || !Number.isSafeInteger(registrationJobId) || registrationJobId <= 0 || !expectedEmail) {
+      throw Object.assign(new Error("流水线注册账号删除参数无效"), { status: 400 });
+    }
+    const job = this.db.prepare(`
+      SELECT * FROM registration_jobs
+      WHERE id = ? AND external_account_id = ? AND status = 'completed' AND email = ? COLLATE NOCASE
+      LIMIT 1
+    `).get(registrationJobId, String(id), expectedEmail);
+    if (!job) {
+      throw Object.assign(new Error("注册账号与流水线记录不匹配，拒绝删除"), {
+        status: 409,
+        code: "PIPELINE_REGISTERED_ACCOUNT_MISMATCH",
+      });
+    }
+    this.assertPipelineRegisteredAccountDeletable(id, expectedEmail);
+
+    let releasePaymentReservation = () => {};
+    if (this.paymentLinks?.reserveForAccountDeletion) {
+      releasePaymentReservation = this.paymentLinks.reserveForAccountDeletion([id]);
+    } else {
+      const activePaymentLink = this.db.prepare(`
+        SELECT external_account_id FROM registered_account_payment_links
+        WHERE external_account_id = ? AND status IN ('queued', 'running', 'cancel_requested')
+        LIMIT 1
+      `).get(String(id));
+      if (activePaymentLink) {
+        throw Object.assign(new Error(`账号 #${id} 正在提链，请等待任务结束`), { status: 409 });
+      }
+    }
+
+    try {
+      let account = null;
+      let alreadyAbsent = false;
+      try {
+        account = await this.client.getAccount(id);
+        if (!account) alreadyAbsent = true;
+      } catch (error) {
+        if (Number(error?.status || 0) === 404) alreadyAbsent = true;
+        else throw error;
+      }
+      if (account) {
+        if (String(account.platform || "chatgpt").toLowerCase() !== "chatgpt"
+          || String(account.email || "").trim().toLowerCase() !== expectedEmail) {
+          throw Object.assign(new Error(`账号 #${id} 与流水线注册记录不匹配，拒绝删除`), {
+            status: 409,
+            code: "PIPELINE_REGISTERED_ACCOUNT_MISMATCH",
+          });
+        }
+        // Re-check after the awaited remote read and immediately before the
+        // destructive call.  A concurrent status refresh may have identified
+        // this account as Plus/blocked while deletion was waiting on I/O.
+        this.assertPipelineRegisteredAccountDeletable(id, expectedEmail, account);
+        try {
+          await this.client.deleteAccount(id);
+        } catch (error) {
+          if (Number(error?.status || 0) === 404) alreadyAbsent = true;
+          else throw error;
+        }
+      }
+      this.cleanupRegisteredAccountArtifacts(id);
+      return {
+        id,
+        email: expectedEmail,
+        deleted: !alreadyAbsent,
+        already_absent: alreadyAbsent,
+      };
+    } finally {
+      releasePaymentReservation();
+    }
+  }
+
   async deleteRegisteredAccounts(input = {}) {
     const ids = normalizeSelectedIds(input, "注册账号");
     let releasePaymentReservations = () => {};
@@ -5059,11 +5287,16 @@ export class RegistrationService {
     }
     const failed = [];
     const deletedIds = [];
+    const deletedAccounts = [];
     let deleted = 0;
     settled.forEach((result, index) => {
       if (result.status === "fulfilled") {
         deleted += 1;
         deletedIds.push(String(accounts[index].id));
+        deletedAccounts.push({
+          id: Number(accounts[index].id),
+          email: String(accounts[index].email || "").trim().toLowerCase(),
+        });
       }
       else failed.push({ id: accounts[index].id, error: result.reason?.message || String(result.reason || "删除失败") });
     });
@@ -5083,7 +5316,13 @@ export class RegistrationService {
         }
       })();
     }
-    return { requested: ids.length, deleted, deleted_ids: deletedIds.map(Number), failed };
+    return {
+      requested: ids.length,
+      deleted,
+      deleted_ids: deletedIds.map(Number),
+      deleted_accounts: deletedAccounts,
+      failed,
+    };
     } finally {
       releasePaymentReservations();
     }

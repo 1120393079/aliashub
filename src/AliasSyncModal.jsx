@@ -50,7 +50,7 @@ const MAILCOM_IMPORT = {
   officialUrl: "https://myaccount.mail.com/",
   openLabel: "打开 mail.com",
   popupName: "aliashub-mailcom-aliases",
-  note: "母号与官方分裂别名合计最多 10 个地址，不支持 +tag / Plus 分裂；这里只同步注册工作站中的别名列表，不会删除 mail.com 官网地址。",
+  note: "这里只同步注册工作站中的官网地址，不会删除 mail.com 官网地址；没有本地历史创建次数限制。",
 };
 const EMPTY_MAILCOM_DOMAINS = [];
 
@@ -316,12 +316,12 @@ export default function AliasSyncModal({ account, icloudKind, mailcomDomains = E
         {isMailcom && <section className={`mailcom-auto-create-card${autoCreating ? " is-running" : autoCreateResult?.partial ? " is-partial" : autoCreateResult ? " is-complete" : ""}`} aria-busy={autoCreating}>
           <span className="mailcom-auto-create-icon">{autoCreateResult ? <CheckCircle2 size={22} /> : <WandSparkles size={22} />}</span>
           <div className="mailcom-auto-create-copy">
-            <h3>{autoCreating ? "正在自动创建官方别名" : autoCreateResult?.partial ? "官方别名部分完成" : autoCreateResult?.status === "already_full" ? "官方别名已达到上限" : autoCreateResult ? "官方别名自动创建完成" : "自动补满 mail.com 官方别名"}</h3>
-            <p>{autoCreating ? "正在登录 mail.com 官网并逐个补齐别名，可能需要几分钟；完成前请勿关闭窗口或重复提交。" : "保留全部已有官网地址，自动补足到母号与官方别名合计 10 个；不会删除或覆盖已有官网地址。"}</p>
+            <h3>{autoCreating ? "正在自动创建官方别名" : autoCreateResult?.partial ? "官方别名部分完成" : autoCreateResult?.status === "already_full" ? "预备地址已达到目标" : autoCreateResult ? "官方别名自动创建完成" : "自动预备 mail.com 官方别名"}</h3>
+            <p>{autoCreating ? "正在登录 mail.com 官网并逐个补齐别名，可能需要几分钟；完成前请勿关闭窗口或重复提交。" : "保留全部已有官网地址，流水线默认预备到合计 10 个；10 不是官网上限，后续轮换不受历史创建次数限制。"}</p>
             <label className="mailcom-auto-create-domain"><span>别名域名后缀</span><select value={mailcomDomain} disabled={autoCreating} onChange={(event) => setMailcomDomain(event.target.value)}>{availableMailcomDomains.map((domain) => <option value={domain} key={domain}>@{domain}</option>)}</select></label>
-            {autoCreateResult && <div className="mailcom-auto-create-stats" role="status" aria-live="polite"><span><small>已有</small><b>{autoCreateResult.existing}</b></span><span><small>本次创建</small><b>{autoCreateResult.created}</b></span><span><small>合计</small><b>{autoCreateResult.total} / 10</b></span></div>}
+            {autoCreateResult && <div className="mailcom-auto-create-stats" role="status" aria-live="polite"><span><small>已有</small><b>{autoCreateResult.existing}</b></span><span><small>本次创建</small><b>{autoCreateResult.created}</b></span><span><small>当前合计</small><b>{autoCreateResult.total}</b></span><span><small>预备目标</small><b>10</b></span></div>}
           </div>
-          <Button className="mailcom-auto-create-button" variant="primary" icon={WandSparkles} loading={autoCreating} disabled={loading || opening || !mailcomDomain || autoCreateResult?.total >= 10} onClick={autoCreateMailcomAliases}>{autoCreating ? "正在创建，请稍候" : autoCreateResult?.total >= 10 ? "已达到上限" : "一键补满别名"}</Button>
+          <Button className="mailcom-auto-create-button" variant="primary" icon={WandSparkles} loading={autoCreating} disabled={loading || opening || !mailcomDomain || autoCreateResult?.total >= 10} onClick={autoCreateMailcomAliases}>{autoCreating ? "正在创建，请稍候" : autoCreateResult?.total >= 10 ? "预备已完成" : "一键预备别名"}</Button>
         </section>}
         <label className="form-field">
           <span className="field-label">{isIcloud ? cloudType.fieldLabel : isMailcom ? MAILCOM_IMPORT.fieldLabel : "官网已创建的别名（每行一个）"}</span>

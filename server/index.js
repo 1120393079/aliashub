@@ -14,6 +14,7 @@ import { GoogleGmailClient } from "./google-gmail.js";
 import { ICloudImapClient, icloudImapConfiguration } from "./icloud-imap.js";
 import { IcloudPrivacyClient } from "./icloud-privacy-client.js";
 import { InboxLinkMailboxService } from "./inbox-link-pool.js";
+import { InventoryApiService } from "./inventory-api-service.js";
 import { IcRegistrationPipelineService } from "./ic-registration-pipeline-service.js";
 import { importMailcomAccounts } from "./mailcom-import.js";
 import { MailcomAliasAutomationService } from "./mailcom-alias-service.js";
@@ -103,6 +104,167 @@ function sendProxyResult(res, result) {
 
 function publicJob(row) {
   return row ? { ...row, config: parseJson(row.config), result: parseJson(row.result) } : null;
+}
+
+function inventoryIdList(value, label = "账号") {
+  if (!Array.isArray(value)) throw Object.assign(new Error(`请选择要导入的${label}`), { status: 400 });
+  const ids = [...new Set(value.map(Number))];
+  if (!ids.length) throw Object.assign(new Error(`请选择要导入的${label}`), { status: 400 });
+  if (ids.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
+    throw Object.assign(new Error(`${label} ID 无效`), { status: 400 });
+  }
+  if (ids.length > 100) throw Object.assign(new Error("单次最多导入 100 个账号"), { status: 400 });
+  return ids;
+}
+
+function inventoryPayloadFromBody(body = {}) {
+  if (body.payload !== undefined) {
+    if (body.payload === null || typeof body.payload !== "object") {
+      throw Object.assign(new Error("库存账号 JSON 必须是对象、数组或 files 结构"), { status: 400 });
+    }
+    return body.payload;
+  }
+  for (const key of ["data", "cards", "files", "card_ids"]) {
+    if (body[key] === undefined) continue;
+    const value = body[key];
+    if (value === null || typeof value !== "object") {
+      throw Object.assign(new Error("库存账号 JSON 必须是对象、数组或 files 结构"), { status: 400 });
+    }
+    return { [key]: value };
+  }
+  return null;
+}
+
+async function collectInventoryCards(registration, ids) {
+  const uniqueIds = inventoryIdList(ids, "注册账号");
+  const settled = await Promise.all(uniqueIds.map(async (id) => {
+    try {
+      let exported;
+      try {
+        exported = await registration.registeredAccountSub2Export(id);
+      } catch (fullExportError) {
+        // An account may have a valid AT but no RT yet.  nvtokens can still
+        // inspect an AT-only Codex card, so keep that useful fallback instead
+        // of dropping the account from a bulk submission.
+        const access = await registration.registeredAccountAccessToken(id);
+        exported = { ...access, credentials: { email: access.email, access_token: access.access_token } };
+        if (!exported.access_token) throw fullExportError;
+      }
+      const credentials = exported?.credentials && typeof exported.credentials === "object"
+        ? { ...exported.credentials }
+        : {};
+      const email = String(exported?.email || credentials.email || "").trim().toLowerCase();
+      if (!email || !credentials.access_token) {
+        throw Object.assign(new Error("账号缺少 Access Token"), { status: 409 });
+      }
+      // nvtokens accepts a plain Codex credential object and computes its
+      // license identity from the signed credentials.  Keep all optional
+      // fields from the server-side export intact.
+      return {
+        ok: true,
+        id,
+        entry: { ...credentials, email, type: "codex" },
+      };
+    } catch (error) {
+      return { ok: false, id, error: String(error?.message || "账号凭据读取失败").slice(0, 240) };
+    }
+  }));
+  const entries = settled.filter((item) => item.ok).map((item) => item.entry);
+  const failed = settled.filter((item) => !item.ok).map(({ id, error }) => ({ id, error }));
+  return { payload: { data: entries }, entries, failed, requestedCount: uniqueIds.length };
+}
+
+function inventoryLocalResult(generated) {
+  if (!Number.isSafeInteger(generated?.requestedCount)) return null;
+  const credentialFailures = Array.isArray(generated.failed) ? generated.failed : [];
+  return {
+    requested_count: generated.requestedCount,
+    source_count: Array.isArray(generated.entries) ? generated.entries.length : 0,
+    local_failed_count: credentialFailures.length,
+    credential_failures: credentialFailures,
+  };
+}
+
+async function collectInventoryMailboxes(registration, inboxLinkMailboxes, body = {}) {
+  if (body.tokens !== undefined) {
+    if (!Array.isArray(body.tokens) || body.tokens.length > 1_000) {
+      throw Object.assign(new Error("邮箱凭证 tokens 必须是最多 1000 条的数组"), { status: 400 });
+    }
+    const tokens = body.tokens.map((token) => {
+      if (typeof token !== "string") return token;
+      const match = token.trim().match(/^(\S+@\S+)\s+(https:\/\/\S+)$/i);
+      return match ? `${match[1]}----${match[2]}` : token;
+    });
+    return { payload: { tokens }, missing: [], source: "tokens", sourceCount: tokens.length };
+  }
+  const text = typeof body.text === "string" ? body.text.trim() : "";
+  if (text) {
+    if (Buffer.byteLength(text, "utf8") > 900_000) {
+      throw Object.assign(new Error("邮箱凭证内容超过 900 KB"), { status: 413 });
+    }
+    // Accept the convenient `email https://...` spelling used by AliasHub's
+    // own link-mailbox pool in addition to nvtokens' `email----https://...`
+    // spelling.  Other credential formats are forwarded byte-for-byte.
+    const textLines = text.split(/\r?\n/);
+    const sourceCount = textLines.filter((line) => line.trim()).length;
+    if (sourceCount > 1_000) {
+      throw Object.assign(new Error("单次最多导入 1000 个邮箱凭证"), { status: 400 });
+    }
+    const normalizedText = textLines.map((line) => {
+      const match = line.trim().match(/^(\S+@\S+)\s+(https:\/\/\S+)$/i);
+      return match ? `${match[1]}----${match[2]}` : line;
+    }).join("\n");
+    return { payload: { text: normalizedText }, missing: [], source: "text", sourceCount };
+  }
+  if (body.all_linked === true) {
+    if (!inboxLinkMailboxes || typeof inboxLinkMailboxes.exportAllActiveEntries !== "function") {
+      throw Object.assign(new Error("链接取件邮箱服务尚未配置"), { status: 503 });
+    }
+    const exported = inboxLinkMailboxes.exportAllActiveEntries({ maximum: 1_000 });
+    const lines = exported.entries.map((item) => `${item.email}----${item.inboxLink}`);
+    if (!lines.length) {
+      throw Object.assign(new Error("当前没有已启用的链接取件邮箱"), { status: 409 });
+    }
+    return {
+      payload: { text: lines.join("\n") },
+      missing: [],
+      source: "all_linked",
+      sourceCount: lines.length,
+    };
+  }
+  let emails = Array.isArray(body.emails)
+    ? body.emails.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean)
+    : [];
+  if (Array.isArray(body.ids) && body.ids.length) {
+    const ids = inventoryIdList(body.ids, "注册账号");
+    const listed = await registration.listRegisteredAccounts({ refreshUnchecked: false });
+    const byId = new Map((listed?.items || []).map((item) => [Number(item.id), item]));
+    emails = ids.map((id) => String(byId.get(id)?.email || "").trim().toLowerCase()).filter(Boolean);
+    const missingAccounts = ids.filter((id) => !byId.has(id));
+    if (missingAccounts.length) {
+      throw Object.assign(new Error(`部分注册账号不存在：${missingAccounts.join(", ")}`), { status: 404 });
+    }
+  }
+  emails = [...new Set(emails)];
+  if (!emails.length) throw Object.assign(new Error("请选择注册账号或粘贴邮箱凭证"), { status: 400 });
+  if (emails.length > 1_000) throw Object.assign(new Error("单次最多匹配 1000 个邮箱凭证"), { status: 400 });
+  if (!inboxLinkMailboxes || typeof inboxLinkMailboxes.exportEntriesByEmails !== "function") {
+    throw Object.assign(new Error("链接取件邮箱服务尚未配置"), { status: 503 });
+  }
+  const exported = inboxLinkMailboxes.exportEntriesByEmails(emails);
+  const lines = exported.entries.map((item) => `${item.email}----${item.inboxLink}`);
+  if (!lines.length) {
+    throw Object.assign(new Error("所选账号没有已绑定的 HTTPS 取件链接"), {
+      status: 409,
+      missing_emails: exported.missing,
+    });
+  }
+  return {
+    payload: { text: lines.join("\n") },
+    missing: exported.missing,
+    source: "linked_mailboxes",
+    sourceCount: lines.length,
+  };
 }
 
 export function inboxLinkChatgptStatus(account) {
@@ -682,6 +844,9 @@ export function createApp(options = {}) {
       browserSemaphore: options.mailcomAliasBrowserSemaphore,
       maxConcurrentBrowsers: options.mailcomAliasMaxBrowsers,
       browserWaitTimeoutMs: options.mailcomAliasBrowserWaitTimeoutMs,
+      openTimeoutMs: options.mailcomAliasOpenTimeoutMs,
+      openAttempts: options.mailcomAliasOpenAttempts,
+      retryDelayMs: options.mailcomAliasRetryDelayMs,
     }),
     randomBytesFn: options.mailcomAliasRandomBytesFn,
     maxValidationAttempts: options.mailcomAliasMaxValidationAttempts,
@@ -789,6 +954,12 @@ export function createApp(options = {}) {
       pollIntervalMs: options.mailcomRegistrationPipelinePollIntervalMs,
       retryBaseMs: options.mailcomRegistrationPipelineRetryBaseMs,
       retryMaximumMs: options.mailcomRegistrationPipelineRetryMaximumMs,
+      trialCheckConcurrency: options.mailcomRegistrationPipelineTrialCheckConcurrency
+        ?? process.env.MAILCOM_REGISTRATION_PIPELINE_TRIAL_CHECK_CONCURRENCY,
+      trialCheckAttemptLimit: options.mailcomRegistrationPipelineTrialCheckAttemptLimit
+        ?? process.env.MAILCOM_REGISTRATION_PIPELINE_TRIAL_CHECK_ATTEMPT_LIMIT,
+      aliasOperationConcurrency: options.mailcomRegistrationPipelineAliasOperationConcurrency
+        ?? process.env.MAILCOM_REGISTRATION_PIPELINE_ALIAS_OPERATION_CONCURRENCY,
       sleepFn: options.mailcomRegistrationPipelineSleepFn,
     });
   const icRegistrationPipelines = options.icRegistrationPipelines || new IcRegistrationPipelineService({
@@ -828,6 +999,17 @@ export function createApp(options = {}) {
     agentIdentityPendingTtlMs: options.agentIdentityPendingTtlMs,
     baseUrl: options.nfapiBaseUrl || process.env.SUB2_BASE_URL || process.env.NFAPI_BASE_URL,
     apiKey: options.nfapiApiKey || process.env.SUB2_ADMIN_API_KEY || process.env.NFAPI_ADMIN_API_KEY,
+  });
+  const inventory = options.inventory || new InventoryApiService({
+    db,
+    encryptionKey: options.dataEncryptionKey || process.env.DATA_ENCRYPTION_KEY,
+    fetchFn: options.inventoryFetchFn || options.fetchFn,
+    cardsUrl: options.inventoryCardsUrl || process.env.NVTOKENS_CARDS_IMPORT_URL,
+    mailboxesUrl: options.inventoryMailboxesUrl || process.env.NVTOKENS_MAILBOXES_IMPORT_URL,
+    poolUrl: options.inventoryPoolUrl || process.env.NVTOKENS_CARDS_POOL_URL,
+    apiKey: options.inventoryApiKey || process.env.NVTOKENS_API_KEY,
+    timeoutMs: options.inventoryTimeoutMs || process.env.NVTOKENS_API_TIMEOUT_MS,
+    allowHttp: options.inventoryAllowHttp === true,
   });
   let nfapiCredentialSync = Object.hasOwn(options, "nfapiCredentialSync")
     ? options.nfapiCredentialSync : null;
@@ -1358,11 +1540,22 @@ export function createApp(options = {}) {
   app.get("/api/registration/accounts/:id/emails", async (req, res, next) => {
     try { res.json(await registration.registeredAccountEmails(req.params.id, req.query)); } catch (error) { next(error); }
   });
+  const deleteRegistrationAccounts = async (input) => {
+    const result = await registration.deleteRegisteredAccounts(input);
+    const released = mailcomRegistrationPipelines.releaseBlockedAccounts(
+      result.deleted_accounts || [],
+    );
+    return {
+      ...result,
+      released_mailcom_blocked: released.released,
+      resumed_mailcom_slots: released.resumed,
+    };
+  };
   app.delete("/api/registration/accounts/:id", async (req, res, next) => {
-    try { res.json(await registration.deleteRegisteredAccounts({ ids: [req.params.id] })); } catch (error) { next(error); }
+    try { res.json(await deleteRegistrationAccounts({ ids: [req.params.id] })); } catch (error) { next(error); }
   });
   app.post("/api/registration/accounts/bulk-delete", async (req, res, next) => {
-    try { res.json(await registration.deleteRegisteredAccounts(req.body || {})); } catch (error) { next(error); }
+    try { res.json(await deleteRegistrationAccounts(req.body || {})); } catch (error) { next(error); }
   });
   app.post("/api/registration/accounts/:id/set-password", async (req, res, next) => {
     try { res.status(202).json(await registration.startPasswordSetup(req.params.id, req.body || {})); } catch (error) { next(error); }
@@ -1414,6 +1607,126 @@ export function createApp(options = {}) {
   });
   app.get("/api/nfapi/options", async (_req, res, next) => {
     try { res.json(await nfapi.options()); } catch (error) { next(error); }
+  });
+
+  app.get("/api/inventory/config", (_req, res, next) => {
+    try { res.json(inventory.configuration()); } catch (error) { next(error); }
+  });
+  app.patch("/api/inventory/config", (req, res, next) => {
+    try { res.json(inventory.updateConfiguration(req.body || {})); } catch (error) { next(error); }
+  });
+  app.post("/api/inventory/test", async (_req, res, next) => {
+    try { res.json(await inventory.testConnection()); } catch (error) { next(error); }
+  });
+  app.post("/api/inventory/cards/import", async (req, res, next) => {
+    try {
+      const input = req.body || {};
+      const directPayload = inventoryPayloadFromBody(input);
+      const generated = directPayload === null
+        ? await collectInventoryCards(registration, input.ids)
+        : { payload: directPayload, failed: [] };
+      const localResult = inventoryLocalResult(generated);
+      if (localResult && localResult.source_count === 0) {
+        audit(db, null, "inventory", "提交账号到库存 API", "", {
+          requested_count: localResult.requested_count,
+          source_count: 0,
+          local_failed_count: localResult.local_failed_count,
+          accepted: 0,
+          rejected: 0,
+        });
+        return res.status(409).json({
+          error: localResult.credential_failures[0]?.error || "所选账号没有可导入的 AT/Refresh Token",
+          code: "INVENTORY_LOCAL_CREDENTIALS_UNAVAILABLE",
+          ...localResult,
+        });
+      }
+      const upstream = await inventory.importCards(generated.payload, {
+        idempotencyKey: String(req.get("Idempotency-Key") || "").trim().slice(0, 200),
+      });
+      const summary = inventory.resultSummary(upstream, generated.payload);
+      audit(db, null, "inventory", "提交账号到库存 API", "", {
+        requested_count: localResult?.requested_count || 0,
+        source_count: localResult?.source_count || 0,
+        local_failed_count: localResult?.local_failed_count || 0,
+        accepted: Number(summary.accepted || summary.summary?.accepted || 0),
+        rejected: Number(summary.rejected || summary.summary?.rejected || 0),
+      });
+      res.status(201).json({
+        ...summary,
+        ...(localResult || { credential_failures: [] }),
+      });
+    } catch (error) { next(error); }
+  });
+  app.post("/api/inventory/cards/pool", async (req, res, next) => {
+    try {
+      const input = req.body || {};
+      const directPayload = inventoryPayloadFromBody(input);
+      const generated = directPayload === null
+        ? await collectInventoryCards(registration, input.ids)
+        : { payload: directPayload, failed: [] };
+      const localResult = inventoryLocalResult(generated);
+      if (localResult && localResult.source_count === 0) {
+        audit(db, null, "inventory", "提交账号到库存号池", "", {
+          requested_count: localResult.requested_count,
+          source_count: 0,
+          local_failed_count: localResult.local_failed_count,
+          accepted: 0,
+          rejected: 0,
+        });
+        return res.status(409).json({
+          error: localResult.credential_failures[0]?.error || "所选账号没有可导入的 AT/Refresh Token",
+          code: "INVENTORY_LOCAL_CREDENTIALS_UNAVAILABLE",
+          ...localResult,
+        });
+      }
+      const payload = {
+        ...((generated.payload && typeof generated.payload === "object" && !Array.isArray(generated.payload))
+          ? generated.payload : { data: generated.payload }),
+        ...(input.price_yuan !== undefined ? { price_yuan: input.price_yuan } : {}),
+        ...(input.price_cents !== undefined ? { price_cents: input.price_cents } : {}),
+        ...(input.warranty_channel_id !== undefined ? { warranty_channel_id: input.warranty_channel_id } : {}),
+        ...(input.warranty_name !== undefined ? { warranty_name: input.warranty_name } : {}),
+      };
+      const upstream = await inventory.importCards(payload, {
+        pool: true,
+        idempotencyKey: String(req.get("Idempotency-Key") || "").trim().slice(0, 200),
+      });
+      const summary = inventory.resultSummary(upstream, payload);
+      audit(db, null, "inventory", "提交账号到库存号池", "", {
+        requested_count: localResult?.requested_count || 0,
+        source_count: localResult?.source_count || 0,
+        local_failed_count: localResult?.local_failed_count || 0,
+        accepted: Number(summary.accepted || summary.summary?.accepted || 0),
+        rejected: Number(summary.rejected || summary.summary?.rejected || 0),
+      });
+      res.status(201).json({
+        ...summary,
+        ...(localResult || { credential_failures: [] }),
+      });
+    } catch (error) { next(error); }
+  });
+  app.post("/api/inventory/mailboxes/import", async (req, res, next) => {
+    try {
+      const generated = await collectInventoryMailboxes(registration, inboxLinkMailboxes, req.body || {});
+      const upstream = await inventory.importMailboxes(generated.payload, {
+        idempotencyKey: String(req.get("Idempotency-Key") || "").trim().slice(0, 200),
+      });
+      const summary = inventory.resultSummary(upstream, generated.payload);
+      audit(db, null, "inventory", "提交邮箱凭证到库存 API", "", {
+        source: generated.source,
+        source_count: generated.sourceCount || 0,
+        matched: Number(summary.matched || 0),
+        updated: Number(summary.updated || 0),
+        invalid: Number(summary.invalid || 0),
+        unmatched: Number(summary.unmatched || 0),
+      });
+      res.status(201).json({
+        ...summary,
+        source: generated.source,
+        source_count: generated.sourceCount || 0,
+        missing_emails: generated.missing || [],
+      });
+    } catch (error) { next(error); }
   });
 
   app.post("/api/microsoft/oauth/start", async (req, res, next) => {
@@ -1586,7 +1899,7 @@ export function createApp(options = {}) {
         microsoft: { authMode: "oauth", supportsOfficialAliases: true, supportsPlusAliases: true, supportsImportedAliases: false, supportsDirectRegistration: false },
         google: { authMode: "oauth", supportsOfficialAliases: false, supportsPlusAliases: true, supportsImportedAliases: false, supportsDirectRegistration: false },
         icloud: { authMode: "app_password", supportsOfficialAliases: false, supportsPlusAliases: false, supportsImportedAliases: true, supportsDirectRegistration: true },
-        mailcom: { authMode: "password", supportsOfficialAliases: false, supportsPlusAliases: false, supportsImportedAliases: true, supportsDirectRegistration: true, supportsMailcomAliases: true, aliasLimit: 10 },
+        mailcom: { authMode: "password", supportsOfficialAliases: false, supportsPlusAliases: false, supportsImportedAliases: true, supportsDirectRegistration: true, supportsMailcomAliases: true, aliasPreparationTarget: 10 },
         netease: { authMode: "imap_auth_code", supportsOfficialAliases: false, supportsPlusAliases: false, supportsImportedAliases: true, supportsDirectRegistration: true, supportsNeteaseAliases: true, aliasDomain: neteaseAliasDomain },
         inbox_link: { authMode: "inbox_link", supportsOfficialAliases: false, supportsPlusAliases: false, supportsImportedAliases: false, supportsDirectRegistration: false },
       },
@@ -2365,6 +2678,7 @@ export function createApp(options = {}) {
     const settings = getSettings(db);
     delete settings.google_oauth_client_secret_encrypted;
     delete settings.nfapi_admin_api_key_encrypted;
+    delete settings.inventory_api_key_encrypted;
     delete settings.payment_agreement_herosms_api_key_encrypted;
     delete settings.payment_agreement_country;
     delete settings.payment_agreement_proxy_pool;
@@ -2410,14 +2724,15 @@ export function createApp(options = {}) {
     const publicMailcomError = String(error?.code || "").startsWith("MAILCOM_");
     const publicNeteaseError = String(error?.code || "").startsWith("NETEASE_") || String(error?.code || "").startsWith("INVALID_NETEASE_");
     const publicIcPipelineError = String(error?.code || "").startsWith("IC_PIPELINE_");
-    const body = { error: status >= 500 && !publicMailcomError && !publicNeteaseError && !publicIcPipelineError ? "服务器处理请求失败" : error.message };
-    if (PUBLIC_AGENT_IDENTITY_ERROR_CODES.has(error?.code) || publicMailcomError || publicNeteaseError || publicIcPipelineError) {
+    const publicInventoryError = String(error?.code || "").startsWith("INVENTORY_");
+    const body = { error: status >= 500 && !publicMailcomError && !publicNeteaseError && !publicIcPipelineError && !publicInventoryError ? "服务器处理请求失败" : error.message };
+    if (PUBLIC_AGENT_IDENTITY_ERROR_CODES.has(error?.code) || publicMailcomError || publicNeteaseError || publicIcPipelineError || publicInventoryError) {
       body.code = error.code;
     }
     if (publicMailcomError && error?.partial) Object.assign(body, safeMailcomPartialError(error));
     res.status(status).json(body);
   });
-  return { app, db, graph, gmail, icloud, icloudPrivacy, mailcom, mailcomAliases, netease, inbox, inboxLinkMailboxes, extension, jobs, registration, pickup, paymentLinks, paymentAgreements, icRegistrationPipelines, mailcomRegistrationPipelines, openAiSms, nfapi, nfapiCredentialSync, microsoftRegistration, microsoftRegistrationRunner };
+  return { app, db, graph, gmail, icloud, icloudPrivacy, mailcom, mailcomAliases, netease, inbox, inboxLinkMailboxes, extension, jobs, registration, pickup, paymentLinks, paymentAgreements, icRegistrationPipelines, mailcomRegistrationPipelines, openAiSms, nfapi, inventory, nfapiCredentialSync, microsoftRegistration, microsoftRegistrationRunner };
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

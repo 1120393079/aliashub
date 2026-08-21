@@ -5,6 +5,7 @@ from unittest.mock import patch
 from payment_link_extractor.checkout import merge_checkout_payload, require_country_currency
 from payment_link_extractor.config import country_config
 from payment_link_extractor.errors import ProtocolError
+from payment_link_extractor.flows.oaics import custom_payment_method_type
 from payment_link_extractor.models import ExtractionConfig
 from payment_link_extractor.transport import normalize_proxy_url
 from payment_link_extractor.web.app import create_app
@@ -64,6 +65,20 @@ class PaymentLinkExtractorSmokeTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["country"], "GB")
         self.assertEqual(response.get_json()["force_country"], "")
+
+    def test_gcash_custom_payment_method_uses_the_elements_cpmt_id(self):
+        payload = {
+            "custom_payment_method_data": [{
+                "display_name": "GCash",
+                "type": "cpmt_fixture_gcash",
+            }],
+        }
+        self.assertEqual(
+            custom_payment_method_type(payload, "gcash"),
+            "cpmt_fixture_gcash",
+        )
+        with self.assertRaises(ProtocolError):
+            custom_payment_method_type(payload, "gopay")
 
 
 if __name__ == "__main__":

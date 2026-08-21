@@ -158,6 +158,12 @@ test("JP zero-price probe reports bounded checkout errors", async (t) => {
       message: /HTTP 429/,
     },
     {
+      name: "deterministic invalid request",
+      requestFn: async () => response(400, { detail: { code: "invalid_request" } }),
+      status: 400,
+      message: /HTTP 400/,
+    },
+    {
       name: "invalid json",
       requestFn: async () => response(200, "not-json"),
       status: 502,

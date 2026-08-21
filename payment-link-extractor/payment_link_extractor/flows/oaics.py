@@ -37,6 +37,9 @@ from ..stripe_common import (
 from ..transport import response_json, stage_http_request
 
 
+CUSTOM_PAYMENT_METHOD_PREFIX = "cpmt_"
+
+
 def openai_checkout_init_payload(checkout: CheckoutData) -> dict[str, Any]:
     state = checkout.get("checkout_state") if isinstance(checkout.get("checkout_state"), dict) else {}
     total = state.get("total") if isinstance(state.get("total"), dict) else {}
@@ -52,6 +55,34 @@ def openai_checkout_init_payload(checkout: CheckoutData) -> dict[str, Any]:
             "total": due.get("minorUnitsAmount"),
         },
     }
+
+
+def custom_payment_method_type(payload: Any, payment_method: str, checkout: Any = None) -> str:
+    """Resolve a Stripe custom payment method such as GCash to its cpmt id."""
+    requested = normalize_payment_method(payment_method)
+    if requested not in {"gcash", "gopay"}:
+        return requested
+    sources: list[Any] = []
+    for candidate in (payload, checkout):
+        if isinstance(candidate, dict):
+            sources.extend([
+                candidate.get("custom_payment_method_data"),
+                candidate.get("custom_payment_methods"),
+            ])
+    for source in sources:
+        if not isinstance(source, list):
+            continue
+        for item in source:
+            if isinstance(item, str):
+                custom_id, label = item, ""
+            elif isinstance(item, dict):
+                custom_id = str(item.get("type") or item.get("id") or "")
+                label = str(item.get("display_name") or item.get("name") or "").lower()
+            else:
+                continue
+            if custom_id.startswith(CUSTOM_PAYMENT_METHOD_PREFIX) and requested in label:
+                return custom_id
+    raise ProtocolError(409, f"oaics checkout does not offer {requested}")
 
 
 def openai_elements_session(
@@ -352,7 +383,8 @@ def extract_oaics_provider(
 
     require_country_currency(checkout, config, require_observed_currency=True)
     init_payload = openai_checkout_init_payload(checkout)
-    ensure_payment_method_offered(init_payload, payment_method, "oaics checkout")
+    if payment_method not in {"gcash", "gopay"}:
+        ensure_payment_method_offered(init_payload, payment_method, "oaics checkout")
     ctx = stripe_context(init_payload, checkout)
     ctx.update(
         {
@@ -364,12 +396,11 @@ def extract_oaics_provider(
     )
     if stage_callback:
         stage_callback("elements_session")
-    openai_elements_session(stripe, config, checkout, init_payload, ctx, log)
+    initial_elements = openai_elements_session(stripe, config, checkout, init_payload, ctx, log)
     if stage_callback:
         stage_callback("taxes")
     openai_checkout_taxes(config, chatgpt, checkout, billing, log)
     refreshed = openai_checkout_init_payload(checkout)
-    ensure_payment_method_offered(refreshed, payment_method, "oaics taxes refresh")
     ctx["checkout_amount"] = expected_amount(refreshed)
     ctx["currency"] = config_currency(config).lower()
     session = checkout.get("checkout_session")
@@ -378,14 +409,23 @@ def extract_oaics_provider(
     refreshed_elements = openai_elements_session(
         stripe, config, checkout, refreshed, ctx, log, reuse_session=True
     )
-    ensure_payment_method_offered(refreshed_elements, payment_method, "oaics refreshed Elements session")
+    selected_payment_method = payment_method
+    if payment_method in {"gcash", "gopay"}:
+        selected_payment_method = custom_payment_method_type(
+            refreshed_elements or initial_elements,
+            payment_method,
+            checkout,
+        )
+    else:
+        ensure_payment_method_offered(refreshed, payment_method, "oaics taxes refresh")
+        ensure_payment_method_offered(refreshed_elements, payment_method, "oaics refreshed Elements session")
     if stage_callback:
         stage_callback("payment_confirmation")
     confirmation_token = openai_confirmation_token(
-        stripe, config, checkout, billing, ctx, payment_method, log
+        stripe, config, checkout, billing, ctx, selected_payment_method, log
     )
     confirm_payload = openai_checkout_confirm(
-        chatgpt, checkout, confirmation_token, payment_method, log
+        chatgpt, checkout, confirmation_token, selected_payment_method, log
     )
     intent_payload = openai_intent_confirm(
         stripe, checkout, confirmation_token, confirm_payload, ctx, log

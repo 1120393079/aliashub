@@ -1,6 +1,11 @@
 import crypto from "node:crypto";
 import { MAILCOM_ALIAS_STRATEGY, mailcomDomains } from "./address-generator.js";
-import { MAILCOM_RANDOM_DOMAIN, MAILCOM_WEB_AUTH_REASON_PREFIX } from "./mailcom-alias-service.js";
+import {
+  MAILCOM_RANDOM_DOMAIN,
+  MAILCOM_WEB_AUTH_REASON_PREFIX,
+  mailcomAliasHistoryLimit,
+  mailcomAliasPreparedAddressTarget,
+} from "./mailcom-alias-service.js";
 import { nowIso } from "./db.js";
 import { redactProxySecrets } from "./registration-proxy.js";
 
@@ -12,6 +17,39 @@ const ACTIVE_ITEM_STATUSES = new Set(["queued", "running", "retry_wait", "cancel
 const TERMINAL_ITEM_STATUSES = new Set(["completed", "failed", "cancelled", "interrupted"]);
 const TERMINAL_ATTEMPT_STATUSES = new Set(["succeeded", "failed", "cancelled", "interrupted"]);
 const PAYMENT_LINK_COUNTRIES = new Set(["DE", "TR", "GB", "US", "BR", "TH", "JP"]);
+const ACCOUNT_POOL_DELETE_PENDING_STAGES = new Set([
+  "account_pool_delete_started",
+  "account_pool_delete_retry_wait",
+]);
+const TRIAL_CHECKS = Object.freeze({
+  JP: Object.freeze({
+    table: "registered_account_trial_checks",
+    statusField: "trial_status",
+    eligibleField: "trial_eligible",
+    errorField: "trial_error",
+    httpStatusField: "trial_http_status",
+    errorCodeField: "trial_error_code",
+    label: "日本 0 元",
+  }),
+  GB: Object.freeze({
+    table: "registered_account_gb_trial_checks",
+    statusField: "gb_trial_status",
+    eligibleField: "gb_trial_eligible",
+    errorField: "gb_trial_error",
+    httpStatusField: "gb_trial_http_status",
+    errorCodeField: "gb_trial_error_code",
+    label: "英国 0 元",
+  }),
+  US: Object.freeze({
+    table: "registered_account_us_trial_checks",
+    statusField: "us_trial_status",
+    eligibleField: "us_trial_eligible",
+    errorField: "us_trial_error",
+    httpStatusField: "us_trial_http_status",
+    errorCodeField: "us_trial_error_code",
+    label: "美国 0 元",
+  }),
+});
 const BROWSER_MODES = new Set(["headed", "headless"]);
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{8,128}$/;
 const UNAVAILABLE_REGISTRATION_REASONS = new Set([
@@ -36,12 +74,46 @@ const ALIAS_ACCOUNT_ACTION_REQUIRED_CODES = new Set([
   "MAILCOM_ALIAS_SETTINGS_AUTH_MISSING",
   "MAILCOM_WEB_AUTH_FAILED",
   "MAILCOM_WEB_CHALLENGE_REQUIRED",
-  "MAILCOM_WEB_LOGIN_TIMEOUT",
   "MAILCOM_CREDENTIAL_REQUIRED",
   "MAILCOM_CREDENTIAL_DECRYPT_FAILED",
   "MAILCOM_ALIAS_ACCOUNT_MISMATCH",
 ]);
+const ALIAS_ACCOUNT_TRANSIENT_CODES = new Set([
+  "MAILCOM_ALIAS_OPEN_TRANSIENT",
+  "MAILCOM_ALIAS_OPEN_TIMEOUT",
+  "MAILCOM_ALIAS_NAVIGATION_TIMEOUT",
+  "MAILCOM_ALIAS_NAVIGATION_FAILED",
+  "MAILCOM_ALIAS_PAGE_NOT_READY",
+  "MAILCOM_ALIAS_BROWSER_BUSY",
+  "MAILCOM_ALIAS_BROWSER_DISCONNECTED",
+  "MAILCOM_ALIAS_BROWSER_FAILED",
+  "MAILCOM_WEB_LOGIN_TIMEOUT",
+]);
 const ALIAS_ACTION_REQUIRED_REASON_PREFIX = MAILCOM_WEB_AUTH_REASON_PREFIX;
+const ALIAS_CREATE_CONFLICT_ERROR = "Mail.com 拒绝创建官方别名，请求与当前官网地址状态冲突";
+const ALIAS_CREATE_CONFLICT_CODES = new Set([
+  "MAILCOM_ALIAS_CONFLICT",
+  "MAILCOM_ALIAS_CREATE_CONFLICT",
+]);
+const ALIAS_CREATE_CONFLICT_RECONCILE_STAGE = "alias_conflict_reconcile_wait";
+const ORPHAN_ALIAS_CREATE_CONFLICT_RECONCILE_STAGE = "orphan_alias_conflict_reconcile_wait";
+const DEFAULT_TRIAL_CHECK_ATTEMPT_LIMIT = 3;
+const DELETABLE_MOTHER_ALIAS_OUTCOMES = new Set([
+  "trial_ineligible",
+  "trial_account_not_found",
+  "account_not_found",
+  "link_failed",
+  "registration_failed",
+  "unavailable",
+]);
+const MOTHER_ALIAS_CANDIDATE_PROTECTION_CODES = new Set([
+  "MAILCOM_ALIAS_REMOTE_PROTECTED",
+  "MAILCOM_ALIAS_REGISTERED_ACCOUNT_PROTECTED",
+  "MAILCOM_ALIAS_AGREEMENT_PROTECTED",
+  "MAILCOM_ALIAS_RECYCLE_PROTECTED",
+  "MAILCOM_ALIAS_NOT_FOUND",
+  "MAILCOM_ALIAS_REPLACEMENT_CAPACITY_FULL",
+]);
 
 function failure(message, status = 400, code = "MAILCOM_PIPELINE_INVALID") {
   return Object.assign(new Error(message), { status, code });
@@ -94,8 +166,11 @@ function normalizeInput(input = {}) {
   if (!new Set(["auto", "direct"]).has(proxySelection) && !/^proxy:\d+$/.test(proxySelection)) {
     throw failure("注册代理选择无效");
   }
-  const paymentLinkCountry = String(input.paymentLinkCountry || "DE").trim().toUpperCase();
+  const paymentLinkCountry = String(input.paymentLinkCountry || "GB").trim().toUpperCase();
   if (!PAYMENT_LINK_COUNTRIES.has(paymentLinkCountry)) throw failure("提链国家无效");
+  if (!TRIAL_CHECKS[paymentLinkCountry]) {
+    throw failure("Mail.com 流水线仅支持 JP、GB 或 US：这三个国家可在提链前独立检测 0 元试用资格");
+  }
   const linkAttempts = positiveInteger(
     input.linkAttempts ?? input.paymentLinkAttempts ?? 3,
     "提链次数",
@@ -138,6 +213,105 @@ function unavailableRegistration(value = {}) {
     return "user_already_exists";
   }
   return "";
+}
+
+function registeredAccountUnavailable(value = {}) {
+  const code = String(value?.code || value?.failure_reason || value?.failureReason || "")
+    .trim().toLowerCase();
+  if (new Set([
+    "account_not_found", "account_deleted", "account_deactivated",
+    "registered_account_not_found", "registered_account_deleted",
+    "remote_account_not_found",
+  ]).has(code)) {
+    return true;
+  }
+  const details = [
+    typeof value === "string" ? value : "",
+    value?.message,
+    value?.error,
+  ].map((entry) => String(entry || "").trim()).filter(Boolean);
+  const exactMessages = new Set([
+    "账号不存在", "账户不存在", "注册账号不存在",
+    "账号已删除", "账户已删除", "账号已停用", "账户已停用",
+    "账号已从本地账号池删除",
+  ]);
+  return details.some((detail) => {
+    const normalized = detail.replace(/^Error:\s*/i, "").replace(/[。.!?；;]+$/g, "").trim();
+    if (exactMessages.has(normalized)) return true;
+    return /^(?:you do not have an account(?: because it has been deleted or deactivated)?|(?:your |remote )?account (?:(?:has been|was|is) )?(?:not found|does not exist|deleted|deactivated|deleted or deactivated))$/i
+      .test(normalized);
+  });
+}
+
+function trialRegisteredAccountUnavailable(value = {}) {
+  if (registeredAccountUnavailable(value)) return true;
+  if (Number(value?.status || 0) === 401) return true;
+  const details = [
+    typeof value === "string" ? value : "",
+    value?.message,
+    value?.error,
+  ].map((entry) => String(entry || "").trim()).filter(Boolean);
+  return details.some((detail) => /\bHTTP\s*401\b/i.test(detail));
+}
+
+function registeredAccountMismatch(value = {}) {
+  const code = String(value?.code || value?.failure_reason || value?.failureReason || "")
+    .trim().toLowerCase();
+  if (code === "registered_account_mismatch") return true;
+  const details = [
+    typeof value === "string" ? value : "",
+    value?.message,
+    value?.error,
+  ].map((entry) => String(entry || "").replace(/^Error:\s*/i, "").trim()).filter(Boolean);
+  return details.some((detail) => new Set([
+    "注册账号与远端账号不匹配",
+    "注册账号与任务记录不匹配",
+  ]).has(detail.replace(/[。.!?；;]+$/g, "").trim()));
+}
+
+function paymentLinkFailureText(value, fallback = "提链失败") {
+  if (value && typeof value === "object" && !(value instanceof Error)) {
+    return safeError(value.error || value.message || fallback, fallback);
+  }
+  return safeError(value, fallback);
+}
+
+function paymentLinkBlocked(value = {}) {
+  const category = String(value?.error_category || "").trim().toLowerCase();
+  const stage = String(value?.stage || "").trim().toLowerCase();
+  if (category === "blocked" || stage === "error_blocked") return true;
+  const message = paymentLinkFailureText(value, "").replace(/[。.!?；;]+$/g, "").trim();
+  return /^(?:ChatGPT manual approval blocked(?:\s*:\s*HTTP \d{3})?|manual_approval approve blocked:\s*result=blocked(?:\b.*)?|oaics (?:checkout|confirm) blocked(?:\b.*)?)$/i
+    .test(message);
+}
+
+function paymentLinkRuntimeFailure(value = {}) {
+  const category = String(value?.error_category || "").trim().toLowerCase();
+  const stage = String(value?.stage || "").trim().toLowerCase();
+  const status = Number(
+    value?.http_status
+      || value?.status_code
+      || value?.statusCode
+      || value?.error?.status
+      || value?.status
+      || 0,
+  );
+  if (new Set([
+    "network", "network_error", "timeout", "queue_timeout", "account_busy",
+    "service_unavailable", "service_error", "error_service", "task_context_lost",
+  ]).has(category)) return true;
+  if (new Set([
+    "error_network", "error_network_error", "error_timeout", "error_queue_timeout",
+    "error_account_busy", "timeout", "queue_timeout",
+    "service_error", "error_service", "error_service_error", "error_error_service",
+    "error_service_unavailable", "error_task_context_lost",
+  ]).has(stage)) return true;
+  if (status === 408 || status === 429 || status >= 500) return true;
+  const message = paymentLinkFailureText(value, "");
+  const normalized = message.trim();
+  return /^(?:fetch failed|network (?:error|request failed)|提链服务请求超时|提链任务(?:执行|排队)超时)$/i
+    .test(normalized)
+    || /\bHTTP\s*5\d\d\b/i.test(normalized);
 }
 
 function generatedReplacement(domain) {
@@ -186,6 +360,9 @@ export class MailcomRegistrationPipelineService {
     pollIntervalMs = 2_000,
     retryBaseMs = 2_000,
     retryMaximumMs = 60_000,
+    trialCheckConcurrency = 5,
+    trialCheckAttemptLimit = DEFAULT_TRIAL_CHECK_ATTEMPT_LIMIT,
+    aliasOperationConcurrency = 1,
     sleepFn = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
     randomIntFn = crypto.randomInt,
   } = {}) {
@@ -202,15 +379,25 @@ export class MailcomRegistrationPipelineService {
     this.pollIntervalMs = Math.max(20, Number(pollIntervalMs) || 2_000);
     this.retryBaseMs = Math.max(20, Number(retryBaseMs) || 2_000);
     this.retryMaximumMs = Math.max(this.retryBaseMs, Number(retryMaximumMs) || 60_000);
+    this.trialCheckSemaphore = new Semaphore(Math.max(1, Math.min(20, Number(trialCheckConcurrency) || 5)));
+    this.trialCheckAttemptLimit = Math.max(
+      1,
+      Math.min(20, Number(trialCheckAttemptLimit) || DEFAULT_TRIAL_CHECK_ATTEMPT_LIMIT),
+    );
+    this.aliasOperationSemaphore = new Semaphore(
+      Math.max(1, Math.min(5, Number(aliasOperationConcurrency) || 1)),
+    );
     this.sleepFn = sleepFn;
     this.randomIntFn = typeof randomIntFn === "function" ? randomIntFn : crypto.randomInt;
     this.trackers = new Map();
+    this.trackerRestarts = new Set();
     this.orphanTrackers = new Map();
     this.authorizationRecoveries = new Map();
     this.authorizationBatches = new Set();
     this.cancellations = new Map();
+    this.accountPoolDeletions = new Map();
     this.wakes = new Map();
-    this.aliasQueue = Promise.resolve();
+    this.aliasQueues = new Map();
     this.aliasOperations = new Set();
     this.closed = false;
     this.recoveryPromise = this.recoverActivePipelines();
@@ -266,6 +453,10 @@ export class MailcomRegistrationPipelineService {
       stage: row.stage,
       outcome: row.outcome,
       registration_status: row.registration_status,
+      trial_country: row.trial_country,
+      trial_status: row.trial_status,
+      trial_error: safeError(row.trial_error, ""),
+      trial_checked_at: row.trial_checked_at,
       link_status: row.link_status,
       link_attempt_count: Math.max(0, Number(row.link_attempt_count || 0)),
       agreement_status: row.agreement_status,
@@ -337,7 +528,7 @@ export class MailcomRegistrationPipelineService {
 
   phaseProgress(taskId, items = this.items(taskId)) {
     const attempts = this.db.prepare(`
-      SELECT attempts.registration_status, attempts.link_status, attempts.agreement_status,
+      SELECT attempts.registration_status, attempts.trial_status, attempts.link_status, attempts.agreement_status,
         attempts.recycle_status, attempts.status, attempts.outcome, items.slot_kind
       FROM mailcom_registration_pipeline_attempts AS attempts
       JOIN mailcom_registration_pipeline_items AS items ON items.id = attempts.item_id
@@ -374,6 +565,16 @@ export class MailcomRegistrationPipelineService {
         succeeded: attemptCount("registration_status", "succeeded"),
         failed: attemptCount("registration_status", "failed"),
       },
+      trial: {
+        unit: "slot_attempt",
+        waiting: stageCount("trial_check_queued"),
+        running: stageCount("trial_checking"),
+        retrying: stageCount("trial_runtime_retry_wait"),
+        succeeded: attemptCount("trial_status", "eligible"),
+        ineligible: attemptCount("trial_status", "ineligible"),
+        failed: attemptCount("trial_status", "failed"),
+        skipped: attemptCount("trial_status", "skipped"),
+      },
       link: {
         unit: "slot_attempt",
         waiting: stageCount("link_queued"),
@@ -394,16 +595,29 @@ export class MailcomRegistrationPipelineService {
       recycle: {
         unit: "slot_attempt",
         waiting: 0,
-        running: stageCount("recycling", "recycle_remote_started"),
-        retrying: stageCount("recycle_retry_wait", "account_action_required_remote_uncertain"),
+        running: stageCount(
+          "account_pool_delete_started",
+          "account_pool_deleted",
+          "recycling",
+          "recycle_remote_started",
+        ),
+        retrying: stageCount(
+          "account_pool_delete_retry_wait",
+          "recycle_retry_wait",
+          "account_action_required_remote_uncertain",
+        ),
         succeeded: attemptCount("recycle_status", "succeeded"),
         failed: attemptCount("recycle_status", "failed"),
-        preserved: attempts.filter((attempt) => attempt.status === "succeeded"
-          && attempt.agreement_status === "succeeded" && attempt.recycle_status === "skipped").length,
+        preserved: attempts.filter((attempt) => attempt.recycle_status === "skipped"
+          && attempt.stage !== "link_blocked_released"
+          && (attempt.outcome === "link_blocked" || attempt.link_status === "succeeded"
+            || attempt.agreement_status === "succeeded" || this.registeredAccountIsPlus(attempt))).length
+          + items.filter((item) => ["link_blocked_preserved", "plus_preserved"].includes(item.stage)).length,
       },
     };
     const registrationActive = progress.registration.waiting + progress.registration.running
       + progress.registration.retrying;
+    const trialActive = progress.trial.waiting + progress.trial.running + progress.trial.retrying;
     const linkActive = progress.link.waiting + progress.link.running + progress.link.retrying;
     const agreementActive = progress.agreement.waiting + progress.agreement.running
       + progress.agreement.retrying;
@@ -411,13 +625,14 @@ export class MailcomRegistrationPipelineService {
     const active = [];
     if (preparing.length) active.push(`${preparing.length} 个母号正在准备`);
     if (registrationActive) active.push(`${registrationActive} 个地址正在注册或等待注册`);
+    if (trialActive) active.push(`${trialActive} 个账号正在检测 0 元试用资格`);
     if (linkActive) active.push(`${linkActive} 个账号正在提链或等待提链`);
     if (agreementActive) active.push(`${agreementActive} 个账号正在协议授权`);
     if (recycleActive) active.push(`${recycleActive} 个失败别名正在轮换或等待恢复`);
     return {
       ...progress,
       message: active.length
-        ? `${linkActive ? "" : "当前没有账号在提链；"}${active.join("，")}。注册成功后会自动提链并协议授权。`
+        ? `${linkActive ? "" : "当前没有账号在提链；"}${active.join("，")}。注册成功后先检测试用资格，仅有试用的账号会提链并协议授权。`
         : "当前没有进行中的地址槽。",
     };
   }
@@ -883,6 +1098,28 @@ export class MailcomRegistrationPipelineService {
     if (item) this.validateRegistrationAccount(item);
   }
 
+  async validateTrialRuntime(country) {
+    const normalizedCountry = String(country || "").trim().toUpperCase();
+    const config = TRIAL_CHECKS[normalizedCountry];
+    if (!config || typeof this.registration.resolveRegisteredAccountTrialRoute !== "function") {
+      throw failure(
+        `${normalizedCountry || "当前国家"} 试用资格检测服务不可用`,
+        503,
+        "MAILCOM_PIPELINE_TRIAL_ROUTE_UNAVAILABLE",
+      );
+    }
+    try {
+      const route = await this.registration.resolveRegisteredAccountTrialRoute(normalizedCountry);
+      if (!String(route || "").trim()) throw new Error("试用资格检测出口为空");
+    } catch (error) {
+      throw failure(
+        `${config.label}试用资格检测出口不可用：${safeError(error, "请先配置对应国家的检测代理")}`,
+        409,
+        "MAILCOM_PIPELINE_TRIAL_ROUTE_UNAVAILABLE",
+      );
+    }
+  }
+
   validatePaymentLinkRuntime() {
     let config;
     try {
@@ -954,6 +1191,57 @@ export class MailcomRegistrationPipelineService {
     `).get(account.id, account.email);
   }
 
+  isMotherPrimaryItem(item) {
+    if (!item || item.slot_kind !== "primary") return false;
+    const current = item.current_address_id ? this.db.prepare(`
+      SELECT kind, address FROM addresses WHERE id = ? AND account_id = ?
+    `).get(item.current_address_id, item.account_id) : null;
+    if (current) return current.kind === "primary";
+    const email = String(item.current_email || "").trim().toLowerCase();
+    return Boolean(email) && new Set([
+      String(item.source_email || "").trim().toLowerCase(),
+      String(item.initial_email || "").trim().toLowerCase(),
+    ]).has(email);
+  }
+
+  localMailcomAliasHistoryCount(accountId) {
+    return Number(this.db.prepare(`
+      SELECT COUNT(*) AS count FROM addresses
+      WHERE account_id = ? AND kind = 'official' AND strategy = ?
+        AND status IN ('active', 'disabled')
+    `).get(Number(accountId), MAILCOM_ALIAS_STRATEGY)?.count || 0);
+  }
+
+  localMailcomActiveAddressCount(accountId) {
+    return Number(this.db.prepare(`
+      SELECT COUNT(DISTINCT lower(address)) AS count FROM addresses
+      WHERE account_id = ? AND status = 'active'
+        AND (kind = 'primary' OR (kind = 'official' AND strategy = ?))
+    `).get(Number(accountId), MAILCOM_ALIAS_STRATEGY)?.count || 0);
+  }
+
+  replacementCapacityError(item, { deletableAliasCount = 0 } = {}) {
+    const historyCount = this.localMailcomAliasHistoryCount(item?.account_id);
+    if (historyCount >= mailcomAliasHistoryLimit) {
+      return failure(
+        `Mail.com 历史别名创建额度已耗尽（本地已记录 ${historyCount} 个官方别名），已停止补建以免删除后无法恢复`,
+        409,
+        "MAILCOM_ALIAS_LIFETIME_QUOTA_EXHAUSTED",
+      );
+    }
+    if (this.isMotherPrimaryItem(item)) {
+      const activeCount = this.localMailcomActiveAddressCount(item.account_id);
+      if (activeCount >= mailcomAliasPreparedAddressTarget && Number(deletableAliasCount) < 1) {
+        return failure(
+          `母号主地址已保留；当前 ${activeCount} 个 Mail.com 地址已占满，且其余地址均为 Plus、blocked、已提链或其他受保护账号，没有可安全删除的官方别名`,
+          409,
+          "MAILCOM_ALIAS_REPLACEMENT_CAPACITY_FULL",
+        );
+      }
+    }
+    return null;
+  }
+
   hasSuccessfulAgreement(email) {
     const normalized = String(email || "").trim().toLowerCase();
     if (!normalized) return false;
@@ -964,6 +1252,501 @@ export class MailcomRegistrationPipelineService {
         AND agreement_status = 'succeeded'
       LIMIT 1
     `).get(normalized));
+  }
+
+  latestAttemptForAddress(accountId, email) {
+    const normalizedAccountId = Number(accountId);
+    const normalizedEmail = String(email || "").trim();
+    if (!Number.isSafeInteger(normalizedAccountId) || normalizedAccountId <= 0 || !normalizedEmail) {
+      return null;
+    }
+    return this.db.prepare(`
+      SELECT attempts.*
+      FROM mailcom_registration_pipeline_attempts AS attempts
+      JOIN mailcom_registration_pipeline_items AS items ON items.id = attempts.item_id
+      WHERE items.account_id = ?
+        AND attempts.email = ? COLLATE NOCASE
+      ORDER BY attempts.id DESC
+      LIMIT 1
+    `).get(normalizedAccountId, normalizedEmail);
+  }
+
+  historicalAddressPreservation(accountId, email) {
+    const blocked = this.latestAttemptForAddress(accountId, email);
+    if (blocked
+      && blocked.outcome === "link_blocked"
+      && blocked.stage !== "link_blocked_released"
+      && blocked.recycle_status === "skipped"
+      && String(blocked.external_account_id || "").trim()) {
+      return {
+        stage: "link_blocked_preserved",
+        error: "历史提链 blocked，账号池和邮箱均已保留",
+      };
+    }
+    const latest = this.latestAttemptForAnyAddress(accountId, email);
+    if (this.registeredAccountIsPlus(latest || { email })) {
+      return {
+        stage: "plus_preserved",
+        error: "历史 Plus 账号，账号池和邮箱均已保留",
+      };
+    }
+    if (this.hasSuccessfulAgreement(email)) {
+      return { stage: "agreement_preserved", error: "" };
+    }
+    return null;
+  }
+
+  releaseBlockedAccounts(deletedAccounts = []) {
+    const normalized = [...new Map((Array.isArray(deletedAccounts) ? deletedAccounts : [])
+      .map((value) => ({
+        id: Number(value?.id ?? value),
+        email: String(value?.email || "").trim().toLowerCase(),
+      }))
+      .filter((value) => Number.isSafeInteger(value.id) && value.id > 0 && value.email)
+      .map((value) => [`${value.id}:${value.email}`, value])).values()];
+    if (!normalized.length) return { released: 0, resumed: 0, pipeline_ids: [] };
+
+    const releasedAttempts = [];
+    const pipelineIds = new Set();
+    let resumed = 0;
+    const at = nowIso();
+    this.db.transaction(() => {
+      const find = this.db.prepare(`
+        SELECT attempts.id, attempts.item_id, attempts.pipeline_id, attempts.email,
+          items.account_id, pipelines.status AS pipeline_status
+        FROM mailcom_registration_pipeline_attempts AS attempts
+        JOIN mailcom_registration_pipeline_items AS items ON items.id = attempts.item_id
+        JOIN mailcom_registration_pipelines AS pipelines ON pipelines.id = attempts.pipeline_id
+        WHERE attempts.external_account_id = ?
+          AND attempts.email = ? COLLATE NOCASE
+          AND attempts.outcome = 'link_blocked'
+          AND attempts.recycle_status = 'skipped'
+      `);
+      const releaseAttempt = this.db.prepare(`
+        UPDATE mailcom_registration_pipeline_attempts
+        SET external_account_id = '', stage = 'link_blocked_released', updated_at = ?
+        WHERE id = ? AND external_account_id = ? AND email = ? COLLATE NOCASE
+          AND outcome = 'link_blocked' AND recycle_status = 'skipped'
+      `);
+      const resumeCurrent = this.db.prepare(`
+        UPDATE mailcom_registration_pipeline_items
+        SET current_attempt_id = NULL, status = 'queued', stage = 'registration_queued',
+          error = '', next_retry_at = NULL, finished_at = NULL, updated_at = ?
+        WHERE id = ? AND current_attempt_id = ?
+          AND status IN ('completed', 'failed', 'cancelled', 'interrupted')
+      `);
+      const findPreserved = this.db.prepare(`
+        SELECT items.id, items.pipeline_id
+        FROM mailcom_registration_pipeline_items AS items
+        JOIN mailcom_registration_pipelines AS pipelines ON pipelines.id = items.pipeline_id
+        WHERE items.account_id = ? AND items.current_email = ? COLLATE NOCASE
+          AND items.stage = 'link_blocked_preserved'
+          AND items.status IN ('completed', 'failed', 'cancelled', 'interrupted')
+          AND pipelines.status IN ('queued', 'running')
+      `);
+      const resumePreserved = this.db.prepare(`
+        UPDATE mailcom_registration_pipeline_items
+        SET current_attempt_id = NULL, status = 'queued', stage = 'registration_queued',
+          error = '', next_retry_at = NULL, finished_at = NULL, updated_at = ?
+        WHERE id = ? AND stage = 'link_blocked_preserved'
+          AND status IN ('completed', 'failed', 'cancelled', 'interrupted')
+      `);
+
+      for (const account of normalized) {
+        for (const attempt of find.all(String(account.id), account.email)) {
+          const changed = releaseAttempt.run(
+            at,
+            attempt.id,
+            String(account.id),
+            account.email,
+          ).changes;
+          if (!changed) continue;
+          releasedAttempts.push(attempt);
+          if (new Set(["queued", "running"]).has(attempt.pipeline_status)) {
+            pipelineIds.add(String(attempt.pipeline_id));
+            resumed += resumeCurrent.run(at, attempt.item_id, attempt.id).changes;
+          }
+          for (const item of findPreserved.all(attempt.account_id, attempt.email)) {
+            pipelineIds.add(String(item.pipeline_id));
+            resumed += resumePreserved.run(at, item.id).changes;
+          }
+        }
+      }
+    })();
+
+    for (const pipelineId of pipelineIds) {
+      this.recompute(pipelineId);
+      if (this.trackers.has(pipelineId)) this.trackerRestarts.add(pipelineId);
+      else this.startTracker(pipelineId);
+    }
+    return {
+      released: releasedAttempts.length,
+      resumed,
+      pipeline_ids: [...pipelineIds],
+    };
+  }
+
+  registeredAccountIsPlus(attempt) {
+    if (!attempt) return false;
+    const externalId = String(attempt.external_account_id || "").trim();
+    const email = String(attempt.email || "").trim().toLowerCase();
+    if (!externalId && !email) return false;
+    try {
+      const row = this.db.prepare(`
+        SELECT 1
+        FROM registered_account_status_checks
+        WHERE (
+          (? <> '' AND external_account_id = ?)
+          OR (? <> '' AND email = ? COLLATE NOCASE)
+        )
+          AND (
+            lower(account_type) = 'plus'
+            OR lower(account_type_raw) LIKE '%plus%'
+            OR lower(subscription_status) IN ('active', 'subscribed')
+          )
+        LIMIT 1
+      `).get(externalId, externalId, email, email);
+      return Boolean(row);
+    } catch (error) {
+      throw Object.assign(
+        failure(
+          "无法确认注册账号是否为 Plus，已停止账号池删除和邮箱轮换",
+          503,
+          "MAILCOM_PIPELINE_ACCOUNT_PROTECTION_UNAVAILABLE",
+        ),
+        { cause: error },
+      );
+    }
+  }
+
+  protectedRegisteredAccount(attempt) {
+    if (!attempt) return false;
+    const blockedReleased = attempt.outcome === "link_blocked"
+      && String(attempt.stage || "") === "link_blocked_released"
+      && !String(attempt.external_account_id || "").trim();
+    return (attempt.outcome === "link_blocked" && !blockedReleased)
+      || attempt.link_status === "succeeded"
+      || new Set(["succeeded", "uncertain"]).has(String(attempt.agreement_status || ""))
+      || this.registeredAccountIsPlus(attempt);
+  }
+
+  registeredAccountRemovalOutcome(attempt) {
+    if (!attempt?.external_account_id) return false;
+    return new Set([
+      "trial_ineligible", "trial_account_not_found", "account_not_found", "link_failed",
+    ]).has(String(attempt.outcome || ""));
+  }
+
+  registeredAccountRemovalRequired(attempt) {
+    return this.registeredAccountRemovalOutcome(attempt) && !this.protectedRegisteredAccount(attempt);
+  }
+
+  latestAttemptForAnyAddress(accountId, email) {
+    const normalizedAccountId = Number(accountId);
+    const normalizedEmail = String(email || "").trim();
+    if (!Number.isSafeInteger(normalizedAccountId) || normalizedAccountId <= 0 || !normalizedEmail) {
+      return null;
+    }
+    return this.db.prepare(`
+      SELECT attempts.*
+      FROM mailcom_registration_pipeline_attempts AS attempts
+      JOIN mailcom_registration_pipeline_items AS items ON items.id = attempts.item_id
+      WHERE items.account_id = ?
+        AND attempts.email = ? COLLATE NOCASE
+      ORDER BY attempts.id DESC
+      LIMIT 1
+    `).get(normalizedAccountId, normalizedEmail);
+  }
+
+  addressHasProtectedHistory(accountId, email) {
+    const normalizedAccountId = Number(accountId);
+    const normalizedEmail = String(email || "").trim().toLowerCase();
+    if (!Number.isSafeInteger(normalizedAccountId) || normalizedAccountId <= 0 || !normalizedEmail) {
+      return false;
+    }
+    if (this.hasSuccessfulAgreement(normalizedEmail)) return true;
+    try {
+      return Boolean(this.db.prepare(`
+        SELECT 1
+        FROM mailcom_registration_pipeline_attempts AS attempts
+        JOIN mailcom_registration_pipeline_items AS items ON items.id = attempts.item_id
+        WHERE items.account_id = ?
+          AND attempts.email = ? COLLATE NOCASE
+          AND (
+            (attempts.outcome = 'link_blocked'
+              AND trim(attempts.external_account_id) <> ''
+              AND attempts.stage <> 'link_blocked_released')
+            OR attempts.link_status = 'succeeded'
+            OR attempts.agreement_status IN ('succeeded', 'uncertain')
+          )
+        LIMIT 1
+      `).get(normalizedAccountId, normalizedEmail));
+    } catch (error) {
+      throw Object.assign(
+        failure(
+          "无法确认 Mail.com 地址的历史保护状态，已停止自动删除",
+          503,
+          "MAILCOM_PIPELINE_ACCOUNT_PROTECTION_UNAVAILABLE",
+        ),
+        { cause: error },
+      );
+    }
+  }
+
+  hasActiveRegistrationForAddress(accountId, addressId, email) {
+    return Boolean(this.db.prepare(`
+      SELECT 1
+      FROM registration_jobs
+      WHERE deleted_at IS NULL
+        AND (
+          (account_id = ? AND (address_id = ? OR base_address_id = ?))
+          OR email = ? COLLATE NOCASE
+        )
+        AND lower(status) IN ('queued', 'pending', 'claimed', 'running', 'paused', 'cancel_requested')
+      LIMIT 1
+    `).get(accountId, addressId, addressId, email));
+  }
+
+  motherAliasCandidates(item) {
+    if (!item || !this.isMotherPrimaryItem(item)) return [];
+    const aliases = this.db.prepare(`
+      SELECT * FROM addresses
+      WHERE account_id = ? AND kind = 'official' AND strategy = ? AND status = 'active'
+      ORDER BY created_at, id
+    `).all(item.account_id, MAILCOM_ALIAS_STRATEGY);
+    const activeAssignments = this.db.prepare(`
+      SELECT current_address_id, current_email, replacement_email
+      FROM mailcom_registration_pipeline_items AS items
+      JOIN mailcom_registration_pipelines AS pipelines ON pipelines.id = items.pipeline_id
+      WHERE items.account_id = ?
+        AND items.status IN ('queued', 'running', 'retry_wait', 'cancel_requested')
+        AND pipelines.status IN ('queued', 'running', 'cancel_requested')
+    `).all(item.account_id);
+    const assignedIds = new Set(activeAssignments.map((row) => Number(row.current_address_id)).filter(Boolean));
+    const assignedEmails = new Set(activeAssignments.flatMap((row) => [
+      String(row.current_email || "").trim().toLowerCase(),
+      String(row.replacement_email || "").trim().toLowerCase(),
+    ]).filter(Boolean));
+    const candidates = [];
+    for (const alias of aliases) {
+      const email = String(alias.address || "").trim().toLowerCase();
+      if (!email || assignedIds.has(Number(alias.id)) || assignedEmails.has(email)) continue;
+      if (this.hasActiveRegistrationForAddress(item.account_id, alias.id, email)) continue;
+      if (this.addressHasProtectedHistory(item.account_id, email)) continue;
+      const latest = this.latestAttemptForAnyAddress(item.account_id, email);
+      if (!latest || !TERMINAL_ATTEMPT_STATUSES.has(String(latest.status || ""))) continue;
+      if (this.protectedRegisteredAccount(latest)) continue;
+      if (!DELETABLE_MOTHER_ALIAS_OUTCOMES.has(String(latest.outcome || ""))) continue;
+      if (String(latest.recycle_status || "") === "running"
+        || String(latest.recycle_status || "") === "retry_wait") continue;
+      // An external account is only safe after the account-pool cleanup has
+      // completed.  In practice such an attempt usually points at a disabled
+      // old alias, but retaining this guard prevents deleting a live account
+      // if local state is mid-recovery.
+      if (String(latest.external_account_id || "").trim()
+        && String(latest.stage || "") !== "account_pool_deleted"
+        && String(latest.recycle_status || "") !== "succeeded") continue;
+      candidates.push({ ...alias, latest_attempt: latest });
+    }
+    const rank = new Map([
+      ["trial_ineligible", 0],
+      ["trial_account_not_found", 1],
+      ["account_not_found", 1],
+      ["unavailable", 2],
+      ["registration_failed", 3],
+      ["link_failed", 4],
+    ]);
+    return candidates.sort((left, right) => (
+      (rank.get(String(left.latest_attempt?.outcome || "")) ?? 99)
+      - (rank.get(String(right.latest_attempt?.outcome || "")) ?? 99)
+    ) || Number(left.id) - Number(right.id));
+  }
+
+  motherAliasCandidatePending(item) {
+    if (!item || !this.isMotherPrimaryItem(item)) return false;
+    return Boolean(this.db.prepare(`
+      SELECT 1
+      FROM mailcom_registration_pipeline_items
+      WHERE pipeline_id = ? AND account_id = ? AND slot_kind = 'official'
+        AND status IN ('queued', 'running', 'retry_wait', 'cancel_requested')
+      LIMIT 1
+    `).get(item.pipeline_id, item.account_id));
+  }
+
+  motherAliasCandidateWaitingError(item) {
+    return failure(
+      `母号 ${String(item?.source_email || "").trim()} 当前已有 10 个 Mail.com 地址；正在等待普通官方别名完成检测，确认不是 Plus/blocked 后再安全释放，不会创建第 11 个地址`,
+      409,
+      "MAILCOM_ALIAS_REPLACEMENT_CANDIDATE_PENDING",
+    );
+  }
+
+  candidateProtectionError(error) {
+    return MOTHER_ALIAS_CANDIDATE_PROTECTION_CODES.has(String(error?.code || ""));
+  }
+
+  registeredAccountCleanupCommitted(attempt) {
+    return this.registeredAccountRemovalOutcome(attempt)
+      && attempt.recycle_status === "running"
+      && !this.protectedRegisteredAccount(attempt);
+  }
+
+  async deleteRegisteredAccountForReplacement(attempt) {
+    if (!this.registeredAccountRemovalOutcome(attempt)) return false;
+    const accountId = Number(attempt.external_account_id);
+    if (typeof this.registration.deleteRegisteredAccountForPipeline !== "function") {
+      throw failure(
+        "注册账号池删除服务不可用",
+        503,
+        "MAILCOM_PIPELINE_ACCOUNT_DELETE_UNAVAILABLE",
+      );
+    }
+      await this.registration.deleteRegisteredAccountForPipeline({
+        id: accountId,
+        email: attempt.email,
+        registrationJobId: attempt.registration_job_id,
+      });
+    return true;
+  }
+
+  beginRegisteredAccountDelete(attemptId) {
+    let attempt = this.attemptRow(attemptId);
+    if (!attempt || !this.registeredAccountRemovalRequired(attempt)) return null;
+    if (this.registeredAccountCleanupCommitted(attempt)) return attempt;
+    if (attempt.recycle_status !== "pending") return null;
+    const at = nowIso();
+    let changed = 0;
+    this.db.transaction(() => {
+      changed = this.db.prepare(`
+        UPDATE mailcom_registration_pipeline_attempts
+        SET recycle_status = 'running', stage = 'account_pool_delete_started',
+          recycle_error = '', next_retry_at = NULL, updated_at = ?
+        WHERE id = ? AND recycle_status = 'pending'
+          AND EXISTS (
+            SELECT 1
+            FROM mailcom_registration_pipeline_items AS items
+            JOIN mailcom_registration_pipelines AS pipelines ON pipelines.id = items.pipeline_id
+            WHERE items.id = mailcom_registration_pipeline_attempts.item_id
+              AND items.status IN ('queued', 'running', 'retry_wait')
+              AND pipelines.status IN ('queued', 'running')
+          )
+      `).run(at, attempt.id).changes;
+      if (changed) {
+        this.db.prepare(`
+          UPDATE mailcom_registration_pipeline_items
+          SET status = 'running', stage = 'account_pool_delete_started',
+            error = '', next_retry_at = NULL, updated_at = ?
+          WHERE id = ? AND status IN ('queued', 'running', 'retry_wait')
+        `).run(at, attempt.item_id);
+      }
+    })();
+    if (!changed) return null;
+    this.recomputeItem(attempt.item_id);
+    return this.attemptRow(attempt.id);
+  }
+
+  markRegisteredAccountDeleteMismatch(attempt, error) {
+    const message = safeError(error, "账号池记录与流水线不匹配，未删除邮箱");
+    this.db.prepare(`
+      UPDATE mailcom_registration_pipeline_attempts
+      SET recycle_status = 'failed', stage = 'account_pool_delete_failed',
+        recycle_error = ?, next_retry_at = NULL, updated_at = ?
+      WHERE id = ? AND recycle_status = 'running'
+        AND stage IN ('account_pool_delete_started', 'account_pool_delete_retry_wait')
+    `).run(message, nowIso(), attempt.id);
+    return message;
+  }
+
+  markRegisteredAccountDeleted(attempt) {
+    const at = nowIso();
+    this.db.transaction(() => {
+      this.db.prepare(`
+        UPDATE mailcom_registration_pipeline_attempts
+        SET stage = 'account_pool_deleted', recycle_error = '', next_retry_at = NULL, updated_at = ?
+        WHERE id = ? AND recycle_status = 'running'
+          AND stage IN ('account_pool_delete_started', 'account_pool_delete_retry_wait', 'account_pool_deleted')
+      `).run(at, attempt.id);
+      this.db.prepare(`
+        UPDATE mailcom_registration_pipeline_items
+        SET stage = 'account_pool_deleted', error = '', next_retry_at = NULL, updated_at = ?
+        WHERE id = ? AND status IN ('queued', 'running', 'retry_wait')
+      `).run(at, attempt.item_id);
+    })();
+    this.recomputeItem(attempt.item_id);
+  }
+
+  async ensureRegisteredAccountDeleted(attemptId, { allowStart = true } = {}) {
+    const key = Number(attemptId);
+    if (this.accountPoolDeletions.has(key)) return this.accountPoolDeletions.get(key);
+    const operation = (async () => {
+      let attempt = this.attemptRow(key);
+      if (!attempt || !this.registeredAccountRemovalOutcome(attempt)) {
+        return { status: "not_required", attempt };
+      }
+      if (this.protectedRegisteredAccount(attempt)) {
+        const item = this.itemRow(attempt.item_id);
+        if (item) this.preserveProtectedRecycle(attempt, item);
+        return { status: "protected", attempt: this.attemptRow(key) };
+      }
+      if (attempt.stage === "account_pool_delete_failed" || attempt.recycle_status === "failed") {
+        return { status: "mismatch", attempt, error: attempt.recycle_error || attempt.error };
+      }
+      if (!ACCOUNT_POOL_DELETE_PENDING_STAGES.has(String(attempt.stage || ""))) {
+        if (this.registeredAccountCleanupCommitted(attempt)) {
+          return { status: "deleted", attempt };
+        }
+        if (!allowStart) return { status: "not_started", attempt };
+        attempt = this.beginRegisteredAccountDelete(attempt.id);
+        if (!attempt) return { status: "cancelled", attempt: this.attemptRow(key) };
+      }
+      const retryAt = Date.parse(attempt.next_retry_at || "");
+      if (Number.isFinite(retryAt) && retryAt > Date.now()) {
+        return { status: "retry_wait", attempt };
+      }
+      try {
+        await this.deleteRegisteredAccountForReplacement(attempt);
+      } catch (error) {
+        if (String(error?.code || "") === "PIPELINE_REGISTERED_ACCOUNT_PROTECTED") {
+          attempt = this.attemptRow(key);
+          const item = attempt ? this.itemRow(attempt.item_id) : null;
+          if (attempt && item) this.preserveProtectedRecycle(attempt, item);
+          return { status: "protected", attempt: this.attemptRow(key), error: safeError(error) };
+        }
+        if (String(error?.code || "") === "PIPELINE_REGISTERED_ACCOUNT_MISMATCH") {
+          const message = this.markRegisteredAccountDeleteMismatch(attempt, error);
+          return { status: "mismatch", attempt: this.attemptRow(key), error: message };
+        }
+        const item = this.itemRow(attempt.item_id);
+        this.scheduleRegisteredAccountDeleteRetry(attempt, item, error);
+        return { status: "retry_wait", attempt: this.attemptRow(key), error: safeError(error) };
+      }
+      this.markRegisteredAccountDeleted(attempt);
+      return { status: "deleted", attempt: this.attemptRow(key) };
+    })().finally(() => this.accountPoolDeletions.delete(key));
+    this.accountPoolDeletions.set(key, operation);
+    return operation;
+  }
+
+  scheduleRegisteredAccountDeleteRetry(attempt, item, error) {
+    if (!attempt || !item) return;
+    const retryCount = Number(item.retry_count || 0) + 1;
+    const next = new Date(Date.now() + this.retryDelay(retryCount)).toISOString();
+    const message = safeError(error, "账号池删除失败，等待重试");
+    this.db.transaction(() => {
+      this.db.prepare(`
+        UPDATE mailcom_registration_pipeline_attempts
+        SET stage = 'account_pool_delete_retry_wait', recycle_error = ?, next_retry_at = ?, updated_at = ?
+        WHERE id = ? AND recycle_status = 'running'
+          AND stage IN ('account_pool_delete_started', 'account_pool_delete_retry_wait')
+      `).run(message, next, nowIso(), attempt.id);
+      this.db.prepare(`
+        UPDATE mailcom_registration_pipeline_items
+        SET status = 'retry_wait', stage = 'account_pool_delete_retry_wait', retry_count = ?,
+          next_retry_at = ?, error = ?, updated_at = ?
+        WHERE id = ? AND status IN ('queued', 'running', 'retry_wait')
+      `).run(retryCount, next, message, nowIso(), item.id);
+    })();
+    this.recomputeItem(item.id);
   }
 
   async start(raw = {}) {
@@ -1003,6 +1786,7 @@ export class MailcomRegistrationPipelineService {
     if (!accounts.length) throw failure("没有已连接的 Mail.com 母号", 409, "MAILCOM_PIPELINE_ACCOUNTS_EMPTY");
     await this.validateDependencies();
     this.validateProxySelection(input.proxySelection);
+    await this.validateTrialRuntime(input.paymentLinkCountry);
     const taskId = crypto.randomUUID();
     const at = nowIso();
     try {
@@ -1161,9 +1945,21 @@ export class MailcomRegistrationPipelineService {
   startTracker(taskId) {
     const key = String(taskId);
     if (this.trackers.has(key)) return this.trackers.get(key);
-    const tracker = this.runTask(key)
+    let tracker;
+    tracker = this.runTask(key)
       .catch((error) => this.failActiveItems(key, error))
-      .finally(() => this.trackers.delete(key));
+      .finally(() => {
+        if (this.trackers.get(key) === tracker) this.trackers.delete(key);
+        const restart = this.trackerRestarts.delete(key);
+        if (!restart || this.closed) return;
+        queueMicrotask(() => {
+          const task = this.taskRow(key);
+          if (!task || !new Set(["queued", "running"]).has(task.status)) return;
+          if (this.items(key).some((item) => ACTIVE_ITEM_STATUSES.has(item.status))) {
+            this.startTracker(key);
+          }
+        });
+      });
     this.trackers.set(key, tracker);
     return tracker;
   }
@@ -1187,51 +1983,113 @@ export class MailcomRegistrationPipelineService {
       SET status = 'running', stage = 'preparing_accounts', updated_at = ?
       WHERE id = ? AND status IN ('queued', 'running')
     `).run(nowIso(), taskId);
-    for (const primary of primaries) {
-      if (this.closed) break;
+    const prepareOne = async (primary) => {
+      if (this.closed) return;
       const parent = this.taskRow(taskId);
-      if (!parent || parent.status === "cancel_requested" || TERMINAL_PIPELINE_STATUSES.has(parent.status)) break;
-      await this.prepareAccountItem(primary.id, parent.domain);
+      if (!parent || parent.status === "cancel_requested" || TERMINAL_PIPELINE_STATUSES.has(parent.status)) return;
+      try {
+        await this.prepareAccountItem(primary.id, parent.domain);
+      } catch (error) {
+        try {
+          this.persistPrepareFailure(primary.id, error);
+        } catch (persistError) {
+          // A bookkeeping/sync error must not escape the mother loop and fail every other account.
+          try {
+            await this.isolateSlotFailure(primary.id, persistError);
+          } catch {
+            // Keep advancing even if the isolated failure cannot be persisted right now.
+          }
+        }
+      }
       const ready = this.itemRow(primary.id);
       const current = this.taskRow(taskId);
       if (ready && current && !this.closed
         && !String(ready.stage).startsWith("prepare_")
         && current.status !== "cancel_requested"
         && !TERMINAL_PIPELINE_STATUSES.has(current.status)) {
-        onAccountPrepared(ready.account_id);
+        try {
+          await onAccountPrepared(ready.account_id);
+        } catch (error) {
+          // launchPreparedAccount is intentionally account-scoped; a synchronous setup error
+          // must not reject preparePipeline and trigger the global failActiveItems fallback.
+          try {
+            await this.isolateSlotFailure(ready.id, error);
+          } catch {
+            // The next mother still gets a chance even when this item's audit write fails.
+          }
+        }
       }
-    }
+    };
+    // Queue every mother before the first account can start recycling aliases.
+    // Remote operations remain serialized, but preparation can no longer be
+    // starved behind failures produced by an earlier prepared account.
+    await Promise.allSettled(primaries.map((primary) => prepareOne(primary)));
     this.recompute(taskId);
+  }
+
+  persistPrepareFailure(itemId, error) {
+    if (this.closed) return;
+    let item = this.itemRow(itemId);
+    if (!item || this.itemWasCancelled(itemId)) return;
+    const createConflict = this.tripAliasCreateConflict(item, error);
+    const message = createConflict
+      ? ALIAS_CREATE_CONFLICT_ERROR
+      : safeError(error, "Mail.com 别名准备失败");
+    if (this.aliasAccountActionRequired(error)) this.tripAliasAccount(item, error);
+    this.db.prepare(`
+      UPDATE mailcom_registration_pipeline_items
+      SET status = 'queued', stage = 'registration_queued', prepare_error = ?,
+        updated_at = ? WHERE id = ? AND stage LIKE 'prepare_%'
+    `).run(message, nowIso(), itemId);
+    item = this.itemRow(itemId);
+    if (!item) return;
+    try {
+      this.syncOfficialSlots(item.pipeline_id, item.account_id);
+    } catch (syncError) {
+      this.db.prepare(`
+        UPDATE mailcom_registration_pipeline_items
+        SET prepare_error = ?, updated_at = ? WHERE id = ?
+      `).run(safeError(syncError, message), nowIso(), itemId);
+    }
+    this.recompute(item.pipeline_id);
   }
 
   async prepareAccountItem(itemId, domain) {
     let item = this.itemRow(itemId);
     if (!item || !String(item.stage).startsWith("prepare_")) return;
-    this.db.prepare(`
-      UPDATE mailcom_registration_pipeline_items
-      SET status = 'running', stage = 'prepare_running', updated_at = ?
-      WHERE id = ? AND stage IN ('prepare_queued', 'prepare_running')
-    `).run(nowIso(), itemId);
     let result = null;
     let prepareError = "";
     let created = 0;
     try {
-      result = await this.serializeAliasRemote(async () => {
-        if (this.closed || this.itemWasCancelled(item.id)) {
+      result = await this.serializeAliasRemote(item.account_id, async () => {
+        item = this.itemRow(itemId);
+        if (this.closed || !item || this.itemWasCancelled(item.id)) {
           throw failure("Mail.com 别名准备已取消", 409, "MAILCOM_PIPELINE_CANCELLED");
         }
+        this.db.prepare(`
+          UPDATE mailcom_registration_pipeline_items
+          SET status = 'running', stage = 'prepare_running', updated_at = ?
+          WHERE id = ? AND stage IN ('prepare_queued', 'prepare_running')
+        `).run(nowIso(), itemId);
         return this.mailcomAliases.prepareAccount(item.account_id, { domain });
       });
       created = Math.max(0, Number(result?.counts?.created ?? result?.created ?? 0) || 0);
     } catch (error) {
-      prepareError = safeError(error, "Mail.com 别名准备失败");
+      const createConflict = this.tripAliasCreateConflict(item, error);
+      prepareError = createConflict
+        ? ALIAS_CREATE_CONFLICT_ERROR
+        : safeError(error, "Mail.com 别名准备失败");
       created = Math.max(0, Number(error?.partial?.created || 0) || 0);
       if (this.aliasAccountActionRequired(error)) this.tripAliasAccount(item, error);
     }
     if (this.closed) return;
     item = this.itemRow(itemId);
     if (!item || this.itemWasCancelled(itemId)) return;
-    const preservePrimary = this.hasSuccessfulAgreement(item.current_email || item.source_email);
+    const preservation = this.historicalAddressPreservation(
+      item.account_id,
+      item.current_email || item.source_email,
+    );
+    const preservePrimary = Boolean(preservation);
     const finishedAt = preservePrimary ? nowIso() : null;
     this.db.prepare(`
       UPDATE mailcom_registration_pipeline_items
@@ -1240,7 +2098,7 @@ export class MailcomRegistrationPipelineService {
       WHERE id = ? AND stage = 'prepare_running'
     `).run(
       preservePrimary ? "completed" : "queued",
-      preservePrimary ? "agreement_preserved" : "registration_queued",
+      preservePrimary ? preservation.stage : "registration_queued",
       prepareError,
       created,
       finishedAt,
@@ -1270,13 +2128,14 @@ export class MailcomRegistrationPipelineService {
       INSERT OR IGNORE INTO mailcom_registration_pipeline_items (
         pipeline_id, account_id, source_email, slot_key, slot_kind,
         initial_address_id, initial_email, current_address_id, current_email,
-        status, stage, created_at, updated_at, finished_at
-      ) VALUES (?, ?, ?, ?, 'official', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        status, stage, error, created_at, updated_at, finished_at
+      ) VALUES (?, ?, ?, ?, 'official', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     this.db.transaction(() => {
       aliases.forEach((alias) => {
         if (assignedIds.has(Number(alias.id)) || assignedEmails.has(String(alias.address).toLowerCase())) return;
-        const preserved = this.hasSuccessfulAgreement(alias.address);
+        const preservation = this.historicalAddressPreservation(account.id, alias.address);
+        const preserved = Boolean(preservation);
         insert.run(
           taskId,
           account.id,
@@ -1287,7 +2146,8 @@ export class MailcomRegistrationPipelineService {
           alias.id,
           alias.address,
           preserved ? "completed" : "queued",
-          preserved ? "agreement_preserved" : "registration_queued",
+          preserved ? preservation.stage : "registration_queued",
+          preserved ? preservation.error : "",
           at,
           at,
           preserved ? at : null,
@@ -1321,25 +2181,69 @@ export class MailcomRegistrationPipelineService {
       accountItems.forEach((item) => {
         if (TERMINAL_ITEM_STATUSES.has(item.status)
           || String(item.stage).startsWith("prepare_") || slotRuns.has(item.id)) return;
-        const run = this.runSlot(item.id, registrationSemaphore);
-        run.catch(() => undefined);
+        let run;
+        run = this.runSlot(item.id, registrationSemaphore)
+          .catch(async (error) => {
+            await this.isolateSlotFailure(item.id, error);
+          })
+          .finally(() => {
+            if (slotRuns.get(item.id) === run) slotRuns.delete(item.id);
+          });
         slotRuns.set(item.id, run);
       });
+    };
+    const launchAllPrepared = () => {
+      this.items(taskId)
+        .filter((item) => item.slot_kind === "primary" && !String(item.stage).startsWith("prepare_"))
+        .forEach((item) => launchPreparedAccount(item.account_id));
     };
 
     this.db.prepare(`
       UPDATE mailcom_registration_pipelines SET status = 'running', updated_at = ?
       WHERE id = ? AND status IN ('queued', 'running')
     `).run(nowIso(), taskId);
-    this.items(taskId)
-      .filter((item) => item.slot_kind === "primary" && !String(item.stage).startsWith("prepare_"))
-      .forEach((item) => launchPreparedAccount(item.account_id));
+    launchAllPrepared();
     await this.preparePipeline(taskId, launchPreparedAccount);
-    this.items(taskId)
-      .filter((item) => item.slot_kind === "primary" && !String(item.stage).startsWith("prepare_"))
-      .forEach((item) => launchPreparedAccount(item.account_id));
-    await Promise.all(slotRuns.values());
+    launchAllPrepared();
+    while (slotRuns.size) {
+      await Promise.race([...slotRuns.values()]);
+      launchAllPrepared();
+    }
     this.recompute(taskId);
+  }
+
+  async isolateSlotFailure(itemId, error) {
+    let item = this.itemRow(itemId);
+    if (!item || TERMINAL_ITEM_STATUSES.has(item.status)) return;
+    const message = safeError(error, "Mail.com 母号 slot 执行失败，已切换到下一个母号");
+    const attempt = item.current_attempt_id ? this.attemptRow(item.current_attempt_id) : null;
+    if (attempt && !TERMINAL_ATTEMPT_STATUSES.has(attempt.status)) {
+      const linkStage = String(attempt.stage).startsWith("link_")
+        || String(attempt.stage).startsWith("trial_");
+      const agreementStage = String(attempt.stage).startsWith("agreement_");
+      try {
+        this.finishAttempt(attempt.id, "failed",
+          agreementStage ? "agreement_failed" : linkStage ? "link_failed" : "registration_failed",
+          message, {
+            failureReason: "slot_worker_failed",
+            registrationStatus: agreementStage || linkStage ? "succeeded" : "failed",
+            linkStatus: agreementStage ? "succeeded" : linkStage ? "failed" : "skipped",
+            agreementStatus: agreementStage ? "failed" : "skipped",
+          });
+      } catch {
+        // The item-level terminal state below still isolates this worker from other mothers.
+      }
+    }
+    const currentAttempt = item.current_attempt_id ? this.attemptRow(item.current_attempt_id) : null;
+    if (currentAttempt?.recycle_status === "pending") {
+      this.db.prepare(`
+        UPDATE mailcom_registration_pipeline_attempts
+        SET recycle_status = 'skipped', recycle_error = ?, updated_at = ?
+        WHERE id = ? AND recycle_status = 'pending'
+      `).run(message, nowIso(), currentAttempt.id);
+    }
+    item = this.itemRow(itemId);
+    if (item && !TERMINAL_ITEM_STATUSES.has(item.status)) this.finishItem(item.id, "failed", message);
   }
 
   async runSlot(itemId, registrationSemaphore) {
@@ -1393,20 +2297,31 @@ export class MailcomRegistrationPipelineService {
     return null;
   }
 
-  resumableRegistrationJob(item) {
+  resumableRegistrationJob(item, attempt = null) {
     if (!item?.current_address_id && !item?.current_email) return null;
+    const attemptCreatedAt = String(attempt?.created_at || "");
     return this.db.prepare(`
       SELECT * FROM registration_jobs
       WHERE (address_id = ? OR base_address_id = ? OR email = ? COLLATE NOCASE)
         AND deleted_at IS NULL
-        AND status IN ('queued', 'pending', 'claimed', 'running', 'paused', 'cancel_requested', 'completed')
+        AND (
+          status IN ('queued', 'pending', 'claimed', 'running', 'paused', 'cancel_requested')
+          OR (
+            status = 'completed' AND trim(external_account_id) <> ''
+            AND ? <> '' AND created_at >= ?
+          )
+        )
       ORDER BY CASE
-        WHEN status = 'completed' AND trim(external_account_id) <> '' THEN 0
-        WHEN status <> 'completed' THEN 1
-        ELSE 2 END,
+        WHEN status = 'completed' THEN 0 ELSE 1 END,
         COALESCE(finished_at, updated_at, created_at) DESC, id DESC
       LIMIT 1
-    `).get(item.current_address_id, item.current_address_id, item.current_email);
+    `).get(
+      item.current_address_id,
+      item.current_address_id,
+      item.current_email,
+      attemptCreatedAt,
+      attemptCreatedAt,
+    );
   }
 
   resumeRegistrationJob(attemptId, job) {
@@ -1419,6 +2334,7 @@ export class MailcomRegistrationPipelineService {
           UPDATE mailcom_registration_pipeline_attempts
           SET registration_job_id = NULL, external_account_id = '', status = 'queued',
             stage = 'registration_queued', outcome = '', registration_status = 'queued',
+            trial_country = '', trial_status = 'pending', trial_error = '', trial_checked_at = NULL,
             payment_link_task_id = '', payment_link_url = '', link_status = 'pending',
             link_attempt_count = 0, agreement_job_id = '', agreement_status = 'pending',
             agreement_country = '', agreement_error = '', failure_reason = '', error = '',
@@ -1453,7 +2369,8 @@ export class MailcomRegistrationPipelineService {
     `).all(String(taskId || ""));
     let recovered = 0;
     for (const item of rows) {
-      const job = this.resumableRegistrationJob(item);
+      const attempt = this.attemptRow(item.attempt_id);
+      const job = this.resumableRegistrationJob(item, attempt);
       if (job?.status !== "completed" || !String(job.external_account_id || "").trim()) continue;
       this.resumeRegistrationJob(item.attempt_id, job);
       recovered += 1;
@@ -1462,12 +2379,57 @@ export class MailcomRegistrationPipelineService {
     return recovered;
   }
 
+  recoverCapacityFailedPrimarySlots(taskId) {
+    const rows = this.db.prepare(`
+      SELECT items.id AS item_id, items.account_id, attempts.id AS attempt_id
+      FROM mailcom_registration_pipeline_items AS items
+      JOIN mailcom_registration_pipeline_attempts AS attempts
+        ON attempts.id = items.current_attempt_id AND attempts.item_id = items.id
+      WHERE items.pipeline_id = ? AND items.slot_kind = 'primary'
+        AND items.status IN ('failed', 'interrupted')
+        AND attempts.recycle_status = 'failed'
+        AND attempts.stage IN ('recycle_failed', 'orphan_recycle_failed')
+        AND (
+          attempts.recycle_error LIKE '%不能创建第 %个替代别名%'
+          OR attempts.recycle_error LIKE '%母号保留时没有空位创建替代别名%'
+        )
+      ORDER BY items.id
+    `).all(String(taskId || ""));
+    const recoverable = rows.filter((row) => (
+      this.localMailcomAliasHistoryCount(row.account_id) < mailcomAliasHistoryLimit
+    ));
+    if (!recoverable.length) return 0;
+    const at = nowIso();
+    this.db.transaction(() => {
+      const resetAttempt = this.db.prepare(`
+        UPDATE mailcom_registration_pipeline_attempts
+        SET recycle_status = 'pending', stage = CASE
+            WHEN trim(outcome) <> '' THEN outcome ELSE 'registration_failed' END,
+          recycle_error = '', next_retry_at = NULL, updated_at = ?
+        WHERE id = ? AND recycle_status = 'failed'
+      `);
+      const resetItem = this.db.prepare(`
+        UPDATE mailcom_registration_pipeline_items
+        SET status = 'queued', stage = 'recycle_retry_wait', replacement_email = '',
+          recycle_retry_count = 0, next_retry_at = NULL, error = '',
+          finished_at = NULL, updated_at = ?
+        WHERE id = ? AND status IN ('failed', 'interrupted')
+      `);
+      for (const row of recoverable) {
+        if (!resetAttempt.run(at, row.attempt_id).changes) continue;
+        resetItem.run(at, row.item_id);
+      }
+    })();
+    recoverable.forEach((row) => this.recomputeItem(row.item_id));
+    return recoverable.length;
+  }
+
   ensureCurrentAddress(item) {
     const row = item.current_address_id ? this.db.prepare(`
       SELECT * FROM addresses WHERE id = ? AND account_id = ? AND status = 'active'
     `).get(item.current_address_id, item.account_id) : null;
     if (row && String(row.address).toLowerCase() === String(item.current_email).toLowerCase()) return row;
-    if (item.slot_kind === "primary") return null;
+    if (this.isMotherPrimaryItem(item)) return null;
     const replacement = this.unassignedReplacement(item, "");
     if (!replacement) return null;
     this.db.prepare(`
@@ -1506,7 +2468,7 @@ export class MailcomRegistrationPipelineService {
           next_retry_at = NULL, error = '', updated_at = ? WHERE id = ?
       `).run(attemptId, at, item.id);
     })();
-    const resumable = this.resumableRegistrationJob(item);
+    const resumable = this.resumableRegistrationJob(item, this.attemptRow(attemptId));
     if (resumable && (resumable.status !== "completed" || String(resumable.external_account_id || "").trim())) {
       this.resumeRegistrationJob(attemptId, resumable);
     } else {
@@ -1548,6 +2510,13 @@ export class MailcomRegistrationPipelineService {
     }
     if (!attempt || this.closed || this.itemWasCancelled(itemId)) return;
     if (!TERMINAL_ATTEMPT_STATUSES.has(attempt.status) && attempt.registration_status === "succeeded"
+      && attempt.link_status !== "succeeded" && attempt.trial_status !== "eligible") {
+      await this.ensureTrialEligibility(attempt.id);
+      attempt = this.attemptRow(attempt.id);
+    }
+    if (!attempt || this.closed || this.itemWasCancelled(itemId)) return;
+    if (!TERMINAL_ATTEMPT_STATUSES.has(attempt.status) && attempt.registration_status === "succeeded"
+      && attempt.trial_status === "eligible"
       && attempt.link_status !== "succeeded") {
       await this.ensurePaymentLink(attempt.id);
       attempt = this.attemptRow(attempt.id);
@@ -1678,16 +2647,30 @@ export class MailcomRegistrationPipelineService {
           return;
         }
         const at = nowIso();
+        const trialCheck = TRIAL_CHECKS[task.payment_link_country] || null;
+        const nextStage = trialCheck ? "trial_check_queued" : "link_queued";
         this.db.prepare(`
           UPDATE mailcom_registration_pipeline_attempts
-          SET external_account_id = ?, status = 'running', stage = 'link_queued',
-            registration_status = 'succeeded', registration_finished_at = ?, updated_at = ?
+          SET external_account_id = ?, status = 'running', stage = ?,
+            registration_status = 'succeeded', trial_country = ?, trial_status = ?,
+            trial_error = '', trial_checked_at = CASE WHEN ? = 'skipped' THEN ? ELSE NULL END,
+            registration_finished_at = ?, updated_at = ?
           WHERE id = ? AND status IN ('queued', 'running')
-        `).run(String(job.external_account_id), at, at, attempt.id);
+        `).run(
+          String(job.external_account_id),
+          nextStage,
+          task.payment_link_country,
+          trialCheck ? "pending" : "skipped",
+          trialCheck ? "pending" : "skipped",
+          at,
+          at,
+          at,
+          attempt.id,
+        );
         this.db.prepare(`
-          UPDATE mailcom_registration_pipeline_items SET stage = 'link_queued', updated_at = ?
+          UPDATE mailcom_registration_pipeline_items SET stage = ?, updated_at = ?
           WHERE id = ? AND status = 'running'
-        `).run(at, attempt.item_id);
+        `).run(nextStage, at, attempt.item_id);
         this.recomputeItem(attempt.item_id);
         return;
       }
@@ -1714,30 +2697,358 @@ export class MailcomRegistrationPipelineService {
     }
   }
 
+  persistTrialCheckState(attemptId, {
+    country,
+    status,
+    error = "",
+    checkedAt = null,
+    stage = null,
+  }) {
+    const attempt = this.attemptRow(attemptId);
+    if (!attempt || TERMINAL_ATTEMPT_STATUSES.has(attempt.status)) return attempt;
+    const at = nowIso();
+    const nextStage = stage || attempt.stage;
+    this.db.transaction(() => {
+      this.db.prepare(`
+        UPDATE mailcom_registration_pipeline_attempts
+        SET trial_country = ?, trial_status = ?, trial_error = ?, trial_checked_at = ?,
+          stage = ?, updated_at = ?
+        WHERE id = ? AND status IN ('queued', 'running')
+      `).run(
+        String(country || "").toUpperCase(),
+        status,
+        safeError(error, ""),
+        checkedAt,
+        nextStage,
+        at,
+        attempt.id,
+      );
+      this.db.prepare(`
+        UPDATE mailcom_registration_pipeline_items
+        SET status = 'running', stage = ?, error = ?, next_retry_at = NULL, updated_at = ?
+        WHERE id = ? AND status IN ('queued', 'running', 'retry_wait')
+      `).run(nextStage, status === "failed" ? safeError(error, "") : "", at, attempt.item_id);
+    })();
+    this.recomputeItem(attempt.item_id);
+    return this.attemptRow(attempt.id);
+  }
+
+  finishTrialIneligible(attempt, item, config) {
+    if (!attempt || !item || !config) return null;
+    return this.finishAttempt(
+      attempt.id,
+      "failed",
+      "trial_ineligible",
+      this.isMotherPrimaryItem(item)
+        ? `${config.label}试用资格检测结果：没有试用；账号池记录将删除，母号主地址保留并切换到新官方别名继续`
+        : `${config.label}试用资格检测结果：没有试用，账号池记录及官方别名将直接删除并补建`,
+      {
+        failureReason: "trial_ineligible",
+        registrationStatus: "succeeded",
+        linkStatus: "skipped",
+        agreementStatus: "skipped",
+      },
+    );
+  }
+
+  finishTrialAccountUnavailable(attempt, item, config, error) {
+    if (!attempt || !item || !config) return null;
+    const detail = safeError(error, "账号不存在");
+    return this.finishAttempt(
+      attempt.id,
+      "failed",
+      "trial_account_not_found",
+      this.isMotherPrimaryItem(item)
+        ? `${config.label}检测确认账号不存在：${detail}；账号池残留将清理，母号主地址保留并切换到新官方别名继续`
+        : `${config.label}检测确认账号不存在：${detail}；账号池残留及官方别名将直接删除并补建`,
+      {
+        failureReason: "account_not_found",
+        registrationStatus: "succeeded",
+        linkStatus: "skipped",
+        agreementStatus: "skipped",
+      },
+    );
+  }
+
+  finishTrialAccountMismatch(attempt, item, config, error) {
+    if (!attempt || !item || !config) return null;
+    const detail = safeError(error, "注册账号与远端记录不匹配");
+    return this.finishAttempt(
+      attempt.id,
+      "failed",
+      "trial_account_mismatch",
+      `${config.label}检测拒绝不匹配的账号记录：${detail}；为避免误删，账号池和邮箱均已保留`,
+      {
+        failureReason: "registered_account_mismatch",
+        registrationStatus: "succeeded",
+        linkStatus: "skipped",
+        agreementStatus: "skipped",
+      },
+    );
+  }
+
+  recordedTrialCheck(attempt, config) {
+    if (!attempt?.external_account_id || !attempt.registration_finished_at || !config?.table) return null;
+    const row = this.db.prepare(`
+      SELECT status, eligible, error, checked_at
+      FROM ${config.table}
+      WHERE external_account_id = ? AND email = ? COLLATE NOCASE
+        AND checked_at >= ?
+      LIMIT 1
+    `).get(String(attempt.external_account_id), attempt.email, attempt.registration_finished_at);
+    if (row?.status === "eligible" && Number(row.eligible) === 1) return { ...row, eligible: true };
+    if (row?.status === "ineligible" && Number(row.eligible) === 0) return { ...row, eligible: false };
+    return null;
+  }
+
+  adoptRecordedTrialCheck(attempt, item, country, config) {
+    const recorded = this.recordedTrialCheck(attempt, config);
+    if (!recorded) return null;
+    this.persistTrialCheckState(attempt.id, {
+      country,
+      status: recorded.eligible ? "eligible" : "ineligible",
+      checkedAt: recorded.checked_at || nowIso(),
+      stage: recorded.eligible ? "link_queued" : "trial_ineligible",
+    });
+    if (recorded.eligible) return true;
+    this.finishTrialIneligible(this.attemptRow(attempt.id), item, config);
+    return false;
+  }
+
+  finishTrialCheckFailure(attempt, item, country, config, error) {
+    if (!attempt || !item || !config) return false;
+    const detail = safeError(error, `${config.label}试用资格检测失败`);
+    const message = `${detail}；已停止重复检测，账号池和邮箱均已保留`;
+    this.persistTrialCheckState(attempt.id, {
+      country,
+      status: "failed",
+      error: message,
+      checkedAt: nowIso(),
+      stage: "trial_check_failed",
+    });
+    this.finishAttempt(attempt.id, "failed", "trial_check_failed", message, {
+      failureReason: "trial_check_failed",
+      registrationStatus: "succeeded",
+      linkStatus: "skipped",
+      agreementStatus: "skipped",
+    });
+    return false;
+  }
+
+  retryOrFinishTrialCheck(attempt, item, country, config, error) {
+    const status = Number(error?.status || 0);
+    const retryable = status === 0 || status === 408 || status === 429 || status >= 500;
+    const checksUsed = Number(item?.retry_count || 0) + 1;
+    if (!retryable || checksUsed >= this.trialCheckAttemptLimit) {
+      return this.finishTrialCheckFailure(attempt, item, country, config, error);
+    }
+    this.persistTrialCheckState(attempt.id, {
+      country,
+      status: "failed",
+      error,
+      checkedAt: nowIso(),
+      stage: "trial_runtime_retry_wait",
+    });
+    this.scheduleAttemptRetry(attempt.id, "trial_runtime_retry_wait", error);
+    return false;
+  }
+
+  async ensureTrialEligibility(attemptId) {
+    let attempt = this.attemptRow(attemptId);
+    if (!attempt || TERMINAL_ATTEMPT_STATUSES.has(attempt.status)) return false;
+    let item = this.itemRow(attempt.item_id);
+    const task = item ? this.taskRow(item.pipeline_id) : null;
+    if (!item || !task) return false;
+    const country = String(task.payment_link_country || "").toUpperCase();
+    const config = TRIAL_CHECKS[country] || null;
+    if (!config) {
+      if (attempt.trial_status !== "skipped") {
+        this.persistTrialCheckState(attempt.id, {
+          country,
+          status: "skipped",
+          checkedAt: nowIso(),
+          stage: "link_queued",
+        });
+      }
+      return true;
+    }
+    if (attempt.trial_country === country && attempt.trial_status === "eligible") return true;
+    if (attempt.trial_country === country && attempt.trial_status === "ineligible") {
+      this.finishTrialIneligible(attempt, item, config);
+      return false;
+    }
+    const recorded = this.adoptRecordedTrialCheck(attempt, item, country, config);
+    if (recorded !== null) return recorded;
+
+    await this.trialCheckSemaphore.acquire();
+    try {
+      attempt = this.attemptRow(attempt.id);
+      item = attempt ? this.itemRow(attempt.item_id) : null;
+      if (!attempt || !item || TERMINAL_ATTEMPT_STATUSES.has(attempt.status)) return false;
+      if (this.closed) return false;
+      if (this.itemWasCancelled(item.id)) {
+        await this.cancelItem(item.id);
+        return false;
+      }
+      if (attempt.trial_country === country && attempt.trial_status === "eligible") return true;
+      if (attempt.trial_country === country && attempt.trial_status === "ineligible") {
+        this.finishTrialIneligible(attempt, item, config);
+        return false;
+      }
+      const recordedAfterWait = this.adoptRecordedTrialCheck(attempt, item, country, config);
+      if (recordedAfterWait !== null) return recordedAfterWait;
+      if (typeof this.registration.checkRegisteredAccountTrialForCountry !== "function") {
+        const unavailable = failure(
+          "注册服务尚未提供流水线试用资格检测",
+          503,
+          "MAILCOM_PIPELINE_TRIAL_CHECK_UNAVAILABLE",
+        );
+        return this.retryOrFinishTrialCheck(attempt, item, country, config, unavailable);
+      }
+
+      attempt = this.persistTrialCheckState(attempt.id, {
+        country,
+        status: "running",
+        stage: "trial_checking",
+      });
+      let result;
+      try {
+        result = await this.registration.checkRegisteredAccountTrialForCountry({
+          id: Number(attempt.external_account_id),
+          email: attempt.email,
+        }, country);
+      } catch (error) {
+        if (this.closed) return false;
+        if (this.itemWasCancelled(item.id)) {
+          await this.cancelItem(item.id);
+          return false;
+        }
+        if (trialRegisteredAccountUnavailable(error)) {
+          this.persistTrialCheckState(attempt.id, {
+            country,
+            status: "failed",
+            error,
+            checkedAt: nowIso(),
+            stage: "trial_account_not_found",
+          });
+          this.finishTrialAccountUnavailable(this.attemptRow(attempt.id), item, config, error);
+          return false;
+        }
+        if (registeredAccountMismatch(error)) {
+          this.persistTrialCheckState(attempt.id, {
+            country,
+            status: "failed",
+            error,
+            checkedAt: nowIso(),
+            stage: "trial_account_mismatch",
+          });
+          this.finishTrialAccountMismatch(this.attemptRow(attempt.id), item, config, error);
+          return false;
+        }
+        return this.retryOrFinishTrialCheck(attempt, item, country, config, error);
+      }
+      if (this.closed) return false;
+      if (this.itemWasCancelled(item.id)) {
+        await this.cancelItem(item.id);
+        return false;
+      }
+
+      const status = String(result?.[config.statusField] || "").toLowerCase();
+      const eligible = result?.[config.eligibleField];
+      if (status === "eligible" && eligible === true) {
+        this.persistTrialCheckState(attempt.id, {
+          country,
+          status: "eligible",
+          checkedAt: result?.trial_checked_at
+            || result?.gb_trial_checked_at
+            || result?.us_trial_checked_at
+            || nowIso(),
+          stage: "link_queued",
+        });
+        return true;
+      }
+      if (status === "ineligible" && eligible === false) {
+        const checkedAt = result?.trial_checked_at
+          || result?.gb_trial_checked_at
+          || result?.us_trial_checked_at
+          || nowIso();
+        this.persistTrialCheckState(attempt.id, {
+          country,
+          status: "ineligible",
+          checkedAt,
+          stage: "trial_ineligible",
+        });
+        this.finishTrialIneligible(this.attemptRow(attempt.id), item, config);
+        return false;
+      }
+
+      const resultHttpStatus = Number(result?.[config.httpStatusField] || 0);
+      const resultErrorCode = String(result?.[config.errorCodeField] || "").trim();
+      const error = failure(
+        result?.[config.errorField] || `${config.label}试用资格检测没有返回明确结果`,
+        status === "rate_limited" ? 429 : resultHttpStatus || 502,
+        status === "rate_limited"
+          ? "MAILCOM_PIPELINE_TRIAL_RATE_LIMITED"
+          : resultErrorCode || "MAILCOM_PIPELINE_TRIAL_CHECK_FAILED",
+      );
+      if (trialRegisteredAccountUnavailable(error)) {
+        this.persistTrialCheckState(attempt.id, {
+          country,
+          status: "failed",
+          error,
+          checkedAt: nowIso(),
+          stage: "trial_account_not_found",
+        });
+        this.finishTrialAccountUnavailable(this.attemptRow(attempt.id), item, config, error);
+        return false;
+      }
+      if (registeredAccountMismatch(error)) {
+        this.persistTrialCheckState(attempt.id, {
+          country,
+          status: "failed",
+          error,
+          checkedAt: nowIso(),
+          stage: "trial_account_mismatch",
+        });
+        this.finishTrialAccountMismatch(this.attemptRow(attempt.id), item, config, error);
+        return false;
+      }
+      return this.retryOrFinishTrialCheck(attempt, item, country, config, error);
+    } finally {
+      this.trialCheckSemaphore.release();
+    }
+  }
+
   recentPaymentLink(attempt) {
     if (!attempt.external_account_id) return null;
     const row = this.paymentLinks.row(attempt.external_account_id);
-    if (!row?.task_id || !new Set(["queued", "running", "cancel_requested", "succeeded"]).has(row.status)) return null;
+    const resumable = new Set(["queued", "running", "cancel_requested", "succeeded"]).has(row?.status)
+      || (row?.status === "failed" && paymentLinkBlocked(row));
+    if (!row?.task_id || !resumable) return null;
     return String(row.started_at || row.updated_at || "") >= String(attempt.registration_finished_at || attempt.created_at)
       ? row : null;
   }
 
   persistPaymentLinkTask(attemptId, taskId) {
     const at = nowIso();
-    this.db.prepare(`
-      UPDATE mailcom_registration_pipeline_attempts
-      SET payment_link_task_id = ?, status = 'running', stage = 'link_wait',
-        link_status = 'running', link_attempt_count = CASE
-          WHEN link_attempt_count < 1 THEN 1 ELSE link_attempt_count END,
-        updated_at = ? WHERE id = ?
-    `).run(String(taskId), at, attemptId);
-    const attempt = this.attemptRow(attemptId);
-    if (attempt) {
+    let changed = 0;
+    this.db.transaction(() => {
+      changed = this.db.prepare(`
+        UPDATE mailcom_registration_pipeline_attempts
+        SET payment_link_task_id = ?, status = 'running', stage = 'link_wait',
+          link_status = 'running', link_attempt_count = CASE
+            WHEN link_attempt_count < 1 THEN 1 ELSE link_attempt_count END,
+          updated_at = ? WHERE id = ? AND status IN ('queued', 'running')
+      `).run(String(taskId), at, attemptId).changes;
+      if (!changed) return;
+      const attempt = this.attemptRow(attemptId);
+      if (!attempt) return;
       this.db.prepare(`
         UPDATE mailcom_registration_pipeline_items SET status = 'running', stage = 'link_wait', updated_at = ?
         WHERE id = ? AND status IN ('queued', 'running')
       `).run(at, attempt.item_id);
-    }
+    })();
+    return changed ? this.attemptRow(attemptId) : null;
   }
 
   beginPaymentLinkSubmission(attemptId) {
@@ -1796,15 +3107,86 @@ export class MailcomRegistrationPipelineService {
     return true;
   }
 
+  schedulePaymentLinkRuntimeRetry(attempt, error) {
+    const current = this.attemptRow(attempt?.id);
+    const item = current ? this.itemRow(current.item_id) : null;
+    if (!current || !item || TERMINAL_ATTEMPT_STATUSES.has(current.status)
+      || TERMINAL_ITEM_STATUSES.has(item.status)) return false;
+    const retryCount = Number(item.retry_count || 0) + 1;
+    const next = new Date(Date.now() + this.retryDelay(retryCount)).toISOString();
+    const message = `提链运行依赖异常：${paymentLinkFailureText(error, "等待重试")}`.slice(0, 500);
+    this.db.transaction(() => {
+      this.db.prepare(`
+        UPDATE mailcom_registration_pipeline_attempts
+        SET payment_link_task_id = '', payment_link_url = '', stage = 'link_runtime_retry_wait',
+          link_status = 'pending', link_attempt_count = CASE
+            WHEN link_attempt_count > 0 THEN link_attempt_count - 1 ELSE 0 END,
+          error = ?, next_retry_at = ?, link_finished_at = NULL, updated_at = ?
+        WHERE id = ? AND status = 'running'
+      `).run(message, next, nowIso(), current.id);
+      this.db.prepare(`
+        UPDATE mailcom_registration_pipeline_items
+        SET status = 'retry_wait', stage = 'link_runtime_retry_wait', retry_count = ?,
+          error = ?, next_retry_at = ?, updated_at = ?
+        WHERE id = ? AND status IN ('queued', 'running', 'retry_wait')
+      `).run(retryCount, message, next, nowIso(), item.id);
+    })();
+    this.recomputeItem(item.id);
+    return true;
+  }
+
   finishOrRetryPaymentLink(attempt, task, error, failureReason = "link_failed") {
     if (!attempt) return false;
+    if (registeredAccountUnavailable(error)) {
+      this.finishAttempt(attempt.id, "failed", "account_not_found", paymentLinkFailureText(error, "账号不存在"), {
+        failureReason: "account_not_found",
+        registrationStatus: "succeeded",
+        linkStatus: "failed",
+      });
+      return false;
+    }
+    if (paymentLinkBlocked(error)) {
+      this.finishAttempt(attempt.id, "failed", "link_blocked", paymentLinkFailureText(error, "提链返回 blocked"), {
+        failureReason: "link_blocked",
+        registrationStatus: "succeeded",
+        linkStatus: "failed",
+      });
+      return false;
+    }
+    if (paymentLinkRuntimeFailure(error)) {
+      this.schedulePaymentLinkRuntimeRetry(attempt, error);
+      return true;
+    }
     if (this.schedulePaymentLinkRetry(attempt, task, error)) return true;
-    this.finishAttempt(attempt.id, "failed", "link_failed", error || "提链失败", {
+    this.finishAttempt(attempt.id, "failed", "link_failed", paymentLinkFailureText(error, "提链失败"), {
       failureReason,
       registrationStatus: "succeeded",
       linkStatus: "failed",
     });
     return false;
+  }
+
+  async cancelPaymentLinkTask(accountId, taskId) {
+    const normalizedTaskId = String(taskId || "");
+    if (!normalizedTaskId) return false;
+    const paymentLink = this.paymentLinks.row(accountId);
+    if (!paymentLink || String(paymentLink.task_id) !== normalizedTaskId
+      || !new Set(["queued", "running", "cancel_requested"]).has(paymentLink.status)) return false;
+    this.paymentLinks.persistTracked?.(accountId, normalizedTaskId, {
+      status: "cancel_requested",
+      stage: "cancel_requested",
+      error: "任务已取消",
+    });
+    try {
+      const snapshot = await this.paymentLinks.request(
+        `/api/tasks/${encodeURIComponent(normalizedTaskId)}/cancel`,
+        { method: "POST" },
+      );
+      this.paymentLinks.applySnapshot?.(accountId, snapshot);
+    } catch {
+      // The persisted cancellation remains visible for PaymentLinkService reconciliation.
+    }
+    return true;
   }
 
   async ensurePaymentLink(attemptId) {
@@ -1851,19 +3233,32 @@ export class MailcomRegistrationPipelineService {
         row = (started?.items || []).find((candidate) => (
           String(candidate.external_account_id) === String(attempt.external_account_id)
         )) || this.paymentLinks.row(attempt.external_account_id);
+        const current = this.attemptRow(attempt.id);
+        if (!current || TERMINAL_ATTEMPT_STATUSES.has(current.status)
+          || this.itemWasCancelled(current.item_id)) {
+          if (row?.task_id) {
+            await this.cancelPaymentLinkTask(attempt.external_account_id, row.task_id);
+          }
+          return;
+        }
         if (!row?.task_id || row.accepted === false) {
           this.finishOrRetryPaymentLink(
-            this.attemptRow(attempt.id),
+            current,
             task,
-            row?.error || "提链任务未启动",
+            row || "提链任务未启动",
             "link_not_started",
           );
           return;
         }
       }
-      this.persistPaymentLinkTask(attempt.id, row.task_id);
+      const persisted = this.persistPaymentLinkTask(attempt.id, row.task_id);
+      if (!persisted) {
+        await this.cancelPaymentLinkTask(attempt.external_account_id, row.task_id);
+        return;
+      }
     }
     attempt = this.attemptRow(attempt.id);
+    if (!attempt || TERMINAL_ATTEMPT_STATUSES.has(attempt.status)) return;
     this.paymentLinks.track(attempt.external_account_id, attempt.payment_link_task_id).catch(() => undefined);
     while (!this.closed) {
       attempt = this.attemptRow(attemptId);
@@ -1871,9 +3266,10 @@ export class MailcomRegistrationPipelineService {
       if (this.itemWasCancelled(attempt.item_id)) return this.cancelItem(attempt.item_id);
       const row = this.paymentLinks.row(attempt.external_account_id);
       if (!row || String(row.task_id) !== String(attempt.payment_link_task_id)) {
-        this.finishAttempt(attempt.id, "failed", "link_failed", "提链任务映射已变化", {
-          failureReason: "link_mapping_changed", registrationStatus: "succeeded", linkStatus: "failed",
-        });
+        this.schedulePaymentLinkRuntimeRetry(
+          attempt,
+          Object.assign(new Error("提链任务映射已变化"), { status: 503 }),
+        );
         return;
       }
       if (row.status === "succeeded") {
@@ -1909,13 +3305,15 @@ export class MailcomRegistrationPipelineService {
         return;
       }
       if (row.status === "failed") {
-        this.finishOrRetryPaymentLink(attempt, task, row.error || "提链失败", "link_failed");
+        this.finishOrRetryPaymentLink(attempt, task, row, "link_failed");
         return;
       }
       if (row.status === "cancelled") {
-        this.finishAttempt(attempt.id, "cancelled", "cancelled", row.error || "提链已取消", {
-          failureReason: "cancelled", registrationStatus: "succeeded", linkStatus: "cancelled",
-        });
+        if (this.itemWasCancelled(attempt.item_id)) {
+          await this.cancelItem(attempt.item_id);
+          return;
+        }
+        this.finishOrRetryPaymentLink(attempt, task, row, "link_cancelled");
         return;
       }
       await this.wait(attempt.item_id, this.pollIntervalMs);
@@ -2132,6 +3530,14 @@ export class MailcomRegistrationPipelineService {
       UPDATE mailcom_registration_pipeline_attempts
       SET status = @status, stage = @stage, outcome = @outcome,
         registration_status = COALESCE(@registration_status, registration_status),
+        trial_status = CASE
+          WHEN COALESCE(@registration_status, registration_status) IN ('failed', 'cancelled', 'interrupted')
+            AND trial_status IN ('pending', 'running', 'failed') THEN 'skipped'
+          ELSE trial_status END,
+        trial_checked_at = CASE
+          WHEN COALESCE(@registration_status, registration_status) IN ('failed', 'cancelled', 'interrupted')
+            AND trial_status IN ('pending', 'running', 'failed') THEN COALESCE(trial_checked_at, @at)
+          ELSE trial_checked_at END,
         link_status = COALESCE(@link_status, link_status),
         agreement_status = COALESCE(@agreement_status, agreement_status),
         agreement_error = CASE
@@ -2170,13 +3576,90 @@ export class MailcomRegistrationPipelineService {
     return this.attemptRow(attemptId);
   }
 
+  finishPrimaryAfterRegisteredAccountDelete(attempt, item, { cancelled = false } = {}) {
+    if (!attempt || !item) return;
+    this.db.prepare(`
+      UPDATE mailcom_registration_pipeline_attempts
+      SET recycle_status = 'skipped', stage = 'account_pool_deleted',
+        recycle_error = '', next_retry_at = NULL, updated_at = ?
+      WHERE id = ? AND recycle_status = 'running'
+    `).run(nowIso(), attempt.id);
+    if (cancelled) {
+      this.finishItem(item.id, "cancelled", "任务已取消；账号池记录已清理，母号主地址未轮换");
+    } else if (attempt.status === "succeeded") {
+      this.finishItem(item.id, "completed", "");
+    } else {
+      this.finishItem(item.id, "failed", attempt.error
+        || "Mail.com 母号未完成试用检测、提链或协议授权");
+    }
+  }
+
+  async finishCancelledRegisteredAccountCleanup(attemptId) {
+    let attempt = this.attemptRow(attemptId);
+    let item = attempt ? this.itemRow(attempt.item_id) : null;
+    if (!attempt || !item || !this.registeredAccountRemovalOutcome(attempt)) return false;
+    if (attempt.stage === "account_pool_delete_failed" || attempt.recycle_status === "failed") {
+      this.finishItem(item.id, "cancelled", attempt.recycle_error
+        || "账号池记录与流水线不匹配，已保留账号池和邮箱");
+      return true;
+    }
+    if (!this.registeredAccountCleanupCommitted(attempt)) return false;
+    if (ACCOUNT_POOL_DELETE_PENDING_STAGES.has(String(attempt.stage || ""))) {
+      const deletion = await this.ensureRegisteredAccountDeleted(attempt.id, { allowStart: false });
+      attempt = this.attemptRow(attempt.id);
+      item = attempt ? this.itemRow(attempt.item_id) : null;
+      if (!attempt || !item) return true;
+      if (deletion.status === "protected") return true;
+    }
+    if (attempt.stage === "account_pool_delete_failed" || attempt.recycle_status === "failed") {
+      this.finishItem(item.id, "cancelled", attempt.recycle_error
+        || "账号池记录与流水线不匹配，已保留账号池和邮箱");
+      return true;
+    }
+    if (this.isMotherPrimaryItem(item) && attempt.stage === "account_pool_deleted") {
+      this.finishPrimaryAfterRegisteredAccountDelete(attempt, item, { cancelled: true });
+      return true;
+    }
+    this.finishItem(item.id, "cancelled", "任务已取消；正在完成已启动的账号池与邮箱清理");
+    const current = this.attemptRow(attempt.id);
+    if (current?.recycle_status === "running"
+      && !new Set(["recycling", "recycle_remote_started"]).has(String(current.stage || ""))) {
+      this.startOrphanRecycleRecovery(attempt.id);
+    }
+    return true;
+  }
+
   async afterAttempt(attemptId) {
-    const attempt = this.attemptRow(attemptId);
-    const item = attempt ? this.itemRow(attempt.item_id) : null;
-    const task = item ? this.taskRow(item.pipeline_id) : null;
+    let attempt = this.attemptRow(attemptId);
+    let item = attempt ? this.itemRow(attempt.item_id) : null;
+    let task = item ? this.taskRow(item.pipeline_id) : null;
     if (!attempt || !item || !task) return;
     if (this.itemWasCancelled(item.id) || new Set(["cancelled", "interrupted"]).has(attempt.status)) {
+      if (this.registeredAccountCleanupCommitted(attempt)) {
+        await this.finishCancelledRegisteredAccountCleanup(attempt.id);
+        return;
+      }
       await this.cancelItem(item.id);
+      return;
+    }
+    if (this.registeredAccountCleanupCommitted(attempt)) {
+      const deletion = await this.ensureRegisteredAccountDeleted(attempt.id, { allowStart: false });
+      attempt = this.attemptRow(attempt.id);
+      item = attempt ? this.itemRow(attempt.item_id) : null;
+      task = item ? this.taskRow(item.pipeline_id) : null;
+      if (!attempt || !item || !task) return;
+      if (deletion.status === "mismatch" || attempt.stage === "account_pool_delete_failed") {
+        this.finishItem(item.id, "failed", deletion.error || attempt.recycle_error
+          || "账号池记录与流水线不匹配，未删除邮箱");
+        return;
+      }
+      if (deletion.status === "retry_wait") return;
+      if (deletion.status === "protected") return;
+      if (this.itemWasCancelled(item.id)) {
+        await this.finishCancelledRegisteredAccountCleanup(attempt.id);
+        return;
+      }
+      await this.recycleAttempt(attempt.id);
       return;
     }
     if (attempt.agreement_status === "uncertain" || attempt.outcome === "agreement_unknown") {
@@ -2196,18 +3679,61 @@ export class MailcomRegistrationPipelineService {
       this.finishItem(item.id, "failed", attempt.error || "Mail.com 母号需要重新连接后才能继续");
       return;
     }
-    if (item.slot_kind === "primary") {
+    if (attempt.outcome === "trial_account_mismatch") {
       this.db.prepare(`
         UPDATE mailcom_registration_pipeline_attempts
-        SET recycle_status = 'skipped', updated_at = ? WHERE id = ? AND recycle_status = 'pending'
+        SET recycle_status = 'skipped', updated_at = ? WHERE id = ?
       `).run(nowIso(), attempt.id);
-      if (attempt.status === "succeeded") {
-        this.finishItem(item.id, "completed", "");
-      } else if (new Set(["unavailable", "link_failed", "agreement_failed"]).has(attempt.outcome)) {
-        this.finishItem(item.id, "failed", attempt.error || "Mail.com 母号未完成注册、提链或协议授权");
-      } else {
-        this.scheduleItemRetry(item.id, "registration_retry_wait", attempt.error || "注册失败，等待重试");
+      this.finishItem(item.id, "failed", attempt.error || "注册账号记录不匹配，已保留账号池和邮箱");
+      return;
+    }
+    if (attempt.outcome === "trial_check_failed") {
+      this.db.prepare(`
+        UPDATE mailcom_registration_pipeline_attempts
+        SET recycle_status = 'skipped', next_retry_at = NULL, updated_at = ? WHERE id = ?
+      `).run(nowIso(), attempt.id);
+      this.finishItem(item.id, "failed", attempt.error
+        || "试用资格检测连续失败，账号池和邮箱均已保留");
+      return;
+    }
+    if (this.protectedRegisteredAccount(attempt)) {
+      this.db.prepare(`
+        UPDATE mailcom_registration_pipeline_attempts
+        SET recycle_status = 'skipped', updated_at = ? WHERE id = ?
+      `).run(nowIso(), attempt.id);
+      if (attempt.status === "succeeded") this.finishItem(item.id, "completed", "");
+      else this.finishItem(
+        item.id,
+        "failed",
+        attempt.error || (attempt.outcome === "link_blocked"
+          ? "提链返回 blocked，账号池和邮箱均已保留"
+          : "账号已提链，后续授权未完成；账号池和邮箱均已保留"),
+      );
+      return;
+    }
+    if (this.registeredAccountRemovalRequired(attempt)) {
+      const deletion = await this.ensureRegisteredAccountDeleted(attempt.id);
+      attempt = this.attemptRow(attempt.id);
+      item = attempt ? this.itemRow(attempt.item_id) : null;
+      task = item ? this.taskRow(item.pipeline_id) : null;
+      if (!attempt || !item || !task) return;
+      if (deletion.status === "mismatch" || attempt.stage === "account_pool_delete_failed") {
+        this.finishItem(item.id, "failed", deletion.error || attempt.recycle_error
+          || "账号池记录与流水线不匹配，未删除邮箱");
+        return;
       }
+      if (deletion.status === "retry_wait") return;
+      if (deletion.status === "protected") return;
+      if (deletion.status === "cancelled" || deletion.status === "not_started") {
+        await this.cancelItem(item.id);
+        return;
+      }
+      if (this.closed) return;
+      if (this.itemWasCancelled(item.id)) {
+        await this.finishCancelledRegisteredAccountCleanup(attempt.id);
+        return;
+      }
+      await this.recycleAttempt(attempt.id);
       return;
     }
     if (attempt.status === "succeeded") {
@@ -2284,8 +3810,9 @@ export class MailcomRegistrationPipelineService {
 
   aliasAccountActionRequired(value) {
     const code = String(value?.code || "");
+    if (ALIAS_ACCOUNT_TRANSIENT_CODES.has(code)) return false;
     if (ALIAS_ACCOUNT_ACTION_REQUIRED_CODES.has(code)) return true;
-    return /Mail\.com.*(?:网页授权已失效|网页授权.*缺失|网页登录.*(?:失败|超时)|登录.*超时|人机验证|账号.*不一致)|重新连接母号/i
+    return /Mail\.com.*(?:网页授权已失效|网页授权.*缺失|网页登录.*失败|人机验证|账号.*不一致)|重新连接母号/i
       .test(String(value?.message || value || ""));
   }
 
@@ -2342,7 +3869,7 @@ export class MailcomRegistrationPipelineService {
 
     const key = Number(account.id);
     if (this.authorizationRecoveries.has(key)) return this.authorizationRecoveries.get(key);
-    const recovery = this.serializeAliasRemote(async () => {
+    const recovery = this.serializeAliasRemote(key, async () => {
       if (this.closed) throw failure("Mail.com 流水线服务正在关闭", 503, "MAILCOM_PIPELINE_CLOSED");
       const current = this.aliasAuthorizationAccount(key);
       if (!current) {
@@ -2377,22 +3904,24 @@ export class MailcomRegistrationPipelineService {
         `).run(at, key, expectedReason, expectedCredentialUpdatedAt);
         return { recovered: true, account_id: key, result };
       } catch (error) {
-        const reason = `${ALIAS_ACTION_REQUIRED_REASON_PREFIX}${safeError(
-          error,
-          "Mail.com 网页授权自动恢复失败",
-        )}`.slice(0, 500);
-        this.db.prepare(`
-          UPDATE source_accounts
-          SET status = CASE
-              WHEN status = 'action_required' THEN 'connected'
-              ELSE status END,
-            limit_reason = ?, updated_at = ?
-          WHERE id = ? AND provider = 'mailcom' AND limit_reason = ?
-            AND EXISTS (
-              SELECT 1 FROM mailcom_credentials
-              WHERE account_id = source_accounts.id AND credential_updated_at = ?
-            )
-        `).run(reason, nowIso(), key, expectedReason, expectedCredentialUpdatedAt);
+        if (this.aliasAccountActionRequired(error)) {
+          const reason = `${ALIAS_ACTION_REQUIRED_REASON_PREFIX}${safeError(
+            error,
+            "Mail.com 网页授权自动恢复失败",
+          )}`.slice(0, 500);
+          this.db.prepare(`
+            UPDATE source_accounts
+            SET status = CASE
+                WHEN status = 'action_required' THEN 'connected'
+                ELSE status END,
+              limit_reason = ?, updated_at = ?
+            WHERE id = ? AND provider = 'mailcom' AND limit_reason = ?
+              AND EXISTS (
+                SELECT 1 FROM mailcom_credentials
+                WHERE account_id = source_accounts.id AND credential_updated_at = ?
+              )
+          `).run(reason, nowIso(), key, expectedReason, expectedCredentialUpdatedAt);
+        }
         throw error;
       }
     }).finally(() => this.authorizationRecoveries.delete(key));
@@ -2478,6 +4007,139 @@ export class MailcomRegistrationPipelineService {
     return restored.size;
   }
 
+  aliasCreateConflict(error) {
+    const code = String(error?.code || "");
+    if (Number(error?.status || 0) !== 409 || !ALIAS_CREATE_CONFLICT_CODES.has(code)) return false;
+    return String(error?.mutation_phase || "") === "create_submitting";
+  }
+
+  tripAliasCreateConflict(item, error) {
+    if (!item || !this.aliasCreateConflict(error)) return false;
+    this.db.prepare(`
+      UPDATE mailcom_registration_pipeline_items
+      SET prepare_error = ?, updated_at = ?
+      WHERE pipeline_id = ? AND account_id = ? AND slot_kind = 'primary'
+    `).run(ALIAS_CREATE_CONFLICT_ERROR, nowIso(), item.pipeline_id, item.account_id);
+    return true;
+  }
+
+  aliasCreateConflictForAccount(item) {
+    if (!item) return false;
+    return Boolean(this.db.prepare(`
+      SELECT 1 FROM mailcom_registration_pipeline_items
+      WHERE pipeline_id = ? AND account_id = ? AND slot_kind = 'primary'
+        AND prepare_error = ?
+      LIMIT 1
+    `).get(item.pipeline_id, item.account_id, ALIAS_CREATE_CONFLICT_ERROR));
+  }
+
+  accountAliasCreateConflictError(item) {
+    const source = String(item?.source_email || "").trim();
+    return failure(
+      `${source ? `母号 ${source} ` : ""}已收到官网确定性创建冲突；本次流水线不再删除该母号的其他官方别名`,
+      409,
+      "MAILCOM_PIPELINE_ACCOUNT_ALIAS_CREATE_CONFLICT",
+    );
+  }
+
+  finishDeterministicRecycleFailure(attempt, item, error, { orphan = false } = {}) {
+    if (!attempt || !item) return;
+    const message = safeError(error, ALIAS_CREATE_CONFLICT_ERROR);
+    const at = nowIso();
+    this.db.transaction(() => {
+      this.db.prepare(`
+        UPDATE mailcom_registration_pipeline_attempts
+        SET recycle_status = 'failed', stage = ?, recycle_error = ?,
+          next_retry_at = NULL, updated_at = ?
+        WHERE id = ? AND recycle_status <> 'succeeded'
+      `).run(orphan ? "orphan_recycle_failed" : "recycle_failed", message, at, attempt.id);
+      this.db.prepare(`
+        UPDATE mailcom_registration_pipeline_items
+        SET replacement_email = '', next_retry_at = NULL, updated_at = ? WHERE id = ?
+      `).run(at, item.id);
+    })();
+    if (TERMINAL_ITEM_STATUSES.has(item.status)) this.recomputeItem(item.id);
+    else this.finishItem(item.id, "failed", message);
+  }
+
+  scheduleAliasConflictReconciliation(attempt, item, error, { orphan = false } = {}) {
+    if (!attempt || !item) return;
+    if (orphan) {
+      this.persistOrphanRecycleRetry(attempt, item, error);
+      this.db.prepare(`
+        UPDATE mailcom_registration_pipeline_attempts SET stage = ?, updated_at = ?
+        WHERE id = ? AND recycle_status = 'running'
+      `).run(ORPHAN_ALIAS_CREATE_CONFLICT_RECONCILE_STAGE, nowIso(), attempt.id);
+      return;
+    }
+    const retries = Math.max(1, Number(attempt.recycle_attempts || 1));
+    const next = new Date(Date.now() + this.retryDelay(retries)).toISOString();
+    const message = safeError(error, "Mail.com 创建冲突后的官网状态尚未确认");
+    this.db.transaction(() => {
+      this.db.prepare(`
+        UPDATE mailcom_registration_pipeline_attempts
+        SET recycle_status = 'running', stage = ?, recycle_error = ?,
+          next_retry_at = ?, updated_at = ?
+        WHERE id = ? AND recycle_status <> 'succeeded'
+      `).run(ALIAS_CREATE_CONFLICT_RECONCILE_STAGE, message, next, nowIso(), attempt.id);
+      this.db.prepare(`
+        UPDATE mailcom_registration_pipeline_items
+        SET status = 'retry_wait', stage = 'recycle_retry_wait',
+          recycle_retry_count = recycle_retry_count + 1,
+          next_retry_at = ?, error = ?, updated_at = ?
+        WHERE id = ? AND status NOT IN ('completed', 'failed', 'cancelled', 'interrupted')
+      `).run(next, message, nowIso(), item.id);
+    })();
+  }
+
+  async reconcileAliasCreateConflict(attempt, item, { orphan = false } = {}) {
+    if (!attempt || !item) return false;
+    let result;
+    try {
+      if (typeof this.mailcomAliases.reconcileAccount !== "function") {
+        throw failure(
+          "Mail.com 官网状态恢复组件不可用",
+          503,
+          "MAILCOM_PIPELINE_ALIAS_RECONCILE_UNAVAILABLE",
+        );
+      }
+      result = await this.serializeAliasRemote(item.account_id, () => {
+        if (this.closed) {
+          throw failure("Mail.com 流水线服务正在关闭", 503, "MAILCOM_PIPELINE_CLOSED");
+        }
+        return this.mailcomAliases.reconcileAccount(
+          item.account_id,
+          { purpose: "Mail.com 流水线创建冲突恢复" },
+        );
+      });
+    } catch (error) {
+      attempt = this.attemptRow(attempt.id);
+      item = this.itemRow(item.id);
+      if (!attempt || !item) return false;
+      if (this.closed) return false;
+      if (this.aliasAccountActionRequired(error)) this.tripAliasAccount(item, error);
+      const currentOrphan = orphan || this.itemWasCancelled(item.id);
+      this.scheduleAliasConflictReconciliation(attempt, item, error, { orphan: currentOrphan });
+      if (currentOrphan) this.startOrphanRecycleRecovery(attempt.id);
+      return false;
+    }
+    attempt = this.attemptRow(attempt.id);
+    item = this.itemRow(item.id);
+    if (!attempt || !item) return false;
+    const replacement = this.replacementFromResult(item, result);
+    if (replacement) {
+      this.activateReplacement(item, attempt, replacement);
+    } else {
+      this.finishDeterministicRecycleFailure(
+        attempt,
+        item,
+        this.accountAliasCreateConflictError(item),
+        { orphan: orphan || this.itemWasCancelled(item.id) },
+      );
+    }
+    return true;
+  }
+
   aliasAccountBlock(item) {
     if (!item) return null;
     const account = this.db.prepare(`
@@ -2529,6 +4191,28 @@ export class MailcomRegistrationPipelineService {
     else this.recomputeItem(item.id);
   }
 
+  preserveProtectedRecycle(attempt, item) {
+    if (!attempt || !item) return;
+    const at = nowIso();
+    this.db.transaction(() => {
+      this.db.prepare(`
+        UPDATE mailcom_registration_pipeline_attempts
+        SET recycle_status = 'skipped', recycle_error = '', next_retry_at = NULL, updated_at = ?
+        WHERE id = ? AND recycle_status <> 'succeeded'
+      `).run(at, attempt.id);
+      this.db.prepare(`
+        UPDATE mailcom_registration_pipeline_items
+        SET replacement_email = '', next_retry_at = NULL, updated_at = ? WHERE id = ?
+      `).run(at, item.id);
+    })();
+    if (TERMINAL_ITEM_STATUSES.has(item.status)) {
+      this.recomputeItem(item.id);
+      return;
+    }
+    const detail = safeError(attempt.error, "提链或协议授权结果要求保留账号");
+    this.finishItem(item.id, "failed", `${detail}；账号池和邮箱均已保留`);
+  }
+
   waitForBlockedRecycle(attempt, item, error) {
     if (!attempt || !item) return;
     const message = safeError(error, "Mail.com 远端轮换结果待确认，请重新连接母号");
@@ -2550,16 +4234,21 @@ export class MailcomRegistrationPipelineService {
 
   scheduleRecycleRetry(attempt, item, error, { clearReplacement = false } = {}) {
     if (!attempt || !item) return;
-    const retries = Math.max(1, Number(attempt.recycle_attempts || 1));
+    const retries = Math.max(
+      1,
+      Number(attempt.recycle_attempts || 0),
+      Number(item.recycle_retry_count || 0) + 1,
+    );
     const next = new Date(Date.now() + this.retryDelay(retries)).toISOString();
     const message = safeError(error, "Mail.com 网页授权正在自动恢复");
+    const recycleStatus = this.registeredAccountRemovalOutcome(attempt) ? "running" : "retry_wait";
     this.db.transaction(() => {
       this.db.prepare(`
         UPDATE mailcom_registration_pipeline_attempts
-        SET recycle_status = 'retry_wait', stage = 'recycle_retry_wait', recycle_error = ?,
+        SET recycle_status = ?, stage = 'recycle_retry_wait', recycle_error = ?,
           next_retry_at = ?, updated_at = ?
         WHERE id = ? AND recycle_status <> 'succeeded'
-      `).run(message, next, nowIso(), attempt.id);
+      `).run(recycleStatus, message, next, nowIso(), attempt.id);
       this.db.prepare(`
         UPDATE mailcom_registration_pipeline_items
         SET replacement_email = CASE WHEN ? THEN '' ELSE replacement_email END,
@@ -2635,11 +4324,48 @@ export class MailcomRegistrationPipelineService {
     return domain;
   }
 
-  serializeAliasRemote(operation) {
-    const current = this.aliasQueue.catch(() => undefined).then(operation);
-    this.aliasQueue = current.catch(() => undefined);
+  async replaceAliasRemote(item, attempt, task, replacementAddress, recycleAddress = "") {
+    const domain = this.recycleDomain(task.domain, replacementAddress);
+    if (this.isMotherPrimaryItem(item)) {
+      if (typeof this.mailcomAliases.createReplacementAlias !== "function") {
+        throw failure(
+          "Mail.com 母号替代别名创建服务不可用",
+          503,
+          "MAILCOM_ALIAS_CREATE_REPLACEMENT_UNAVAILABLE",
+        );
+      }
+      return this.mailcomAliases.createReplacementAlias(item.account_id, {
+        domain,
+        replacementAddress,
+        ...(recycleAddress ? { recycleAddress } : {}),
+      });
+    }
+    return this.mailcomAliases.recycleAlias(item.account_id, {
+      address: attempt.email,
+      domain,
+      replacementAddress,
+    });
+  }
+
+  serializeAliasRemote(accountId, operation) {
+    const key = Number(accountId);
+    const queueKey = Number.isSafeInteger(key) && key > 0 ? key : String(accountId || "global");
+    const previous = this.aliasQueues.get(queueKey) || Promise.resolve();
+    const current = previous.catch(() => undefined).then(async () => {
+      await this.aliasOperationSemaphore.acquire();
+      try {
+        return await operation();
+      } finally {
+        this.aliasOperationSemaphore.release();
+      }
+    });
+    const settled = current.catch(() => undefined);
+    this.aliasQueues.set(queueKey, settled);
     this.aliasOperations.add(current);
-    return current.finally(() => this.aliasOperations.delete(current));
+    return current.finally(() => {
+      this.aliasOperations.delete(current);
+      if (this.aliasQueues.get(queueKey) === settled) this.aliasQueues.delete(queueKey);
+    });
   }
 
   unassignedReplacement(item, preferred = "") {
@@ -2693,7 +4419,9 @@ export class MailcomRegistrationPipelineService {
 
   orphanRecycleSafeToRelease(error) {
     return error?.remote_mutation_possible === false
-      || String(error?.code || "") === "MAILCOM_ALIAS_REMOTE_PROTECTED";
+      || String(error?.code || "") === "MAILCOM_ALIAS_REMOTE_PROTECTED"
+      || (String(error?.code || "") === "MAILCOM_ALIAS_CONFLICT"
+        && error?.remote_state_reconciled === true);
   }
 
   async recycleAttempt(attemptId) {
@@ -2701,6 +4429,10 @@ export class MailcomRegistrationPipelineService {
     let item = attempt ? this.itemRow(attempt.item_id) : null;
     const task = item ? this.taskRow(item.pipeline_id) : null;
     if (!attempt || !item || !task) return;
+    if (this.protectedRegisteredAccount(attempt)) {
+      this.preserveProtectedRecycle(attempt, item);
+      return;
+    }
     if (this.hasSuccessfulAgreement(attempt.email)) {
       this.preserveSuccessfulRecycle(attempt, item, { completeItem: true });
       return;
@@ -2710,7 +4442,36 @@ export class MailcomRegistrationPipelineService {
       if (replacement) this.activateReplacement(item, attempt, replacement);
       return;
     }
-    if (this.itemWasCancelled(item.id) || this.closed) return;
+    if (this.itemWasCancelled(item.id) || this.closed) {
+      if (!this.closed && this.registeredAccountCleanupCommitted(attempt)) {
+        this.startOrphanRecycleRecovery(attempt.id);
+      }
+      return;
+    }
+    const plannedReplacement = item.replacement_email
+      ? this.unassignedReplacement(item, item.replacement_email) : null;
+    // A primary slot is the only path that needs an extra official address.
+    // At the ten-address remote limit it may proceed only with a candidate
+    // that the account/alias history proves safe to remove.
+    const initialMotherCandidates = this.isMotherPrimaryItem(item)
+      ? this.motherAliasCandidates(item) : [];
+    const capacityError = plannedReplacement ? null : this.replacementCapacityError(item, {
+      deletableAliasCount: initialMotherCandidates.length,
+    });
+    if (capacityError) {
+      if (this.motherAliasCandidatePending(item)) {
+        this.scheduleRecycleRetry(attempt, item, this.motherAliasCandidateWaitingError(item));
+        return;
+      }
+      const finalCandidates = this.motherAliasCandidates(item);
+      const finalCapacityError = this.replacementCapacityError(item, {
+        deletableAliasCount: finalCandidates.length,
+      });
+      if (finalCapacityError) {
+        this.finishDeterministicRecycleFailure(attempt, item, finalCapacityError);
+        return;
+      }
+    }
     if (this.aliasAccountBlock(item)) {
       try {
         await this.ensureAliasWebAuthorization(item);
@@ -2731,6 +4492,18 @@ export class MailcomRegistrationPipelineService {
         return;
       }
     }
+    if (attempt.stage === ALIAS_CREATE_CONFLICT_RECONCILE_STAGE) {
+      await this.reconcileAliasCreateConflict(attempt, item);
+      return;
+    }
+    if (this.aliasCreateConflictForAccount(item)) {
+      this.finishDeterministicRecycleFailure(
+        attempt,
+        item,
+        this.accountAliasCreateConflictError(item),
+      );
+      return;
+    }
     const replacementAddress = this.stableReplacement(item, task.domain);
     const at = nowIso();
     this.db.prepare(`
@@ -2746,14 +4519,45 @@ export class MailcomRegistrationPipelineService {
     `).run(at, item.id);
     attempt = this.attemptRow(attempt.id);
     item = this.itemRow(item.id);
+    let motherCandidates = this.isMotherPrimaryItem(item) && !plannedReplacement
+      ? this.motherAliasCandidates(item) : [];
+    const refreshedCapacityError = !plannedReplacement && this.isMotherPrimaryItem(item)
+      ? this.replacementCapacityError(item, { deletableAliasCount: motherCandidates.length }) : null;
+    if (refreshedCapacityError) {
+      if (this.motherAliasCandidatePending(item)) {
+        this.scheduleRecycleRetry(attempt, item, this.motherAliasCandidateWaitingError(item));
+        return;
+      }
+      motherCandidates = this.motherAliasCandidates(item);
+      const finalCapacityError = this.replacementCapacityError(item, {
+        deletableAliasCount: motherCandidates.length,
+      });
+      if (finalCapacityError) {
+        this.finishDeterministicRecycleFailure(attempt, item, finalCapacityError);
+        return;
+      }
+    }
     let result;
-    try {
-      result = await this.serializeAliasRemote(async () => {
+    let candidateIndex = 0;
+    const attemptedMotherCandidates = new Set();
+    while (true) {
+      const recycleAddress = motherCandidates[candidateIndex]?.address || "";
+      if (recycleAddress) attemptedMotherCandidates.add(String(recycleAddress).toLowerCase());
+      try {
+        result = await this.serializeAliasRemote(item.account_id, async () => {
         const latestItem = this.itemRow(item.id);
         const latestTask = latestItem ? this.taskRow(latestItem.pipeline_id) : null;
+        const latestAttempt = this.attemptRow(attempt.id);
         if (this.closed || !latestItem || !latestTask || this.itemWasCancelled(latestItem.id)
           || TERMINAL_PIPELINE_STATUSES.has(latestTask.status)) {
           throw failure("Mail.com 别名轮换已取消", 409, "MAILCOM_PIPELINE_CANCELLED");
+        }
+        if (this.protectedRegisteredAccount(latestAttempt)) {
+          throw failure(
+            "blocked 或已提链账号必须保留，禁止轮换邮箱",
+            409,
+            "MAILCOM_ALIAS_REGISTERED_ACCOUNT_PROTECTED",
+          );
         }
         if (this.hasSuccessfulAgreement(attempt.email)) {
           throw failure(
@@ -2766,24 +4570,70 @@ export class MailcomRegistrationPipelineService {
         if (queuedAccountBlock) {
           throw this.accountAliasBlockedError(latestItem);
         }
+        if (this.aliasCreateConflictForAccount(latestItem)) {
+          throw this.accountAliasCreateConflictError(latestItem);
+        }
         this.db.prepare(`
           UPDATE mailcom_registration_pipeline_attempts
           SET stage = 'recycle_remote_started', updated_at = ?
           WHERE id = ? AND recycle_status = 'running'
         `).run(nowIso(), attempt.id);
         try {
-          return await this.mailcomAliases.recycleAlias(item.account_id, {
-            address: attempt.email,
-            domain: this.recycleDomain(task.domain, replacementAddress),
+          return await this.replaceAliasRemote(
+            latestItem,
+            latestAttempt,
+            latestTask,
             replacementAddress,
-          });
+            recycleAddress,
+          );
         } catch (error) {
+          this.tripAliasCreateConflict(latestItem, error);
           if (this.aliasAccountActionRequired(error)) this.tripAliasAccount(latestItem, error);
           throw error;
         }
-      });
-    } catch (error) {
+        });
+        break;
+      } catch (error) {
+        const guardedAttempt = this.attemptRow(attempt.id);
+        if (this.protectedRegisteredAccount(guardedAttempt)) {
+          this.preserveProtectedRecycle(guardedAttempt, this.itemRow(item.id));
+          return;
+        }
+        if (this.hasSuccessfulAgreement(guardedAttempt?.email)) {
+          this.preserveSuccessfulRecycle(guardedAttempt, this.itemRow(item.id), { completeItem: true });
+          return;
+        }
+        if (this.isMotherPrimaryItem(item)
+          && !plannedReplacement
+          && this.candidateProtectionError(error)) {
+          const refreshed = this.motherAliasCandidates(item);
+          const nextIndex = refreshed.findIndex((candidate) => (
+            !attemptedMotherCandidates.has(String(candidate.address || "").toLowerCase())
+          ));
+          if (nextIndex >= 0) {
+            motherCandidates = refreshed;
+            candidateIndex = nextIndex;
+            continue;
+          }
+          const exhausted = this.replacementCapacityError(item, { deletableAliasCount: 0 });
+          if (exhausted) {
+            this.finishDeterministicRecycleFailure(
+              this.attemptRow(attempt.id),
+              this.itemRow(item.id),
+              exhausted,
+            );
+            return;
+          }
+          motherCandidates = [];
+          candidateIndex = 0;
+          continue;
+        }
       item = this.itemRow(item.id);
+      if (String(error?.code || "") === "MAILCOM_ALIAS_REGISTERED_ACCOUNT_PROTECTED"
+        || this.protectedRegisteredAccount(this.attemptRow(attempt.id))) {
+        this.preserveProtectedRecycle(this.attemptRow(attempt.id), item);
+        return;
+      }
       if (String(error?.code || "") === "MAILCOM_ALIAS_AGREEMENT_PROTECTED"
         || this.hasSuccessfulAgreement(attempt.email)) {
         this.preserveSuccessfulRecycle(this.attemptRow(attempt.id), item, { completeItem: true });
@@ -2794,12 +4644,44 @@ export class MailcomRegistrationPipelineService {
         this.activateReplacement(item, this.attemptRow(attempt.id), recovered);
         return;
       }
+      const createConflict = this.tripAliasCreateConflict(item, error);
+      if (createConflict) {
+        const currentAttempt = this.attemptRow(attempt.id);
+        const orphan = this.itemWasCancelled(item.id);
+        if (this.orphanRecycleSafeToRelease(error)) {
+          this.finishDeterministicRecycleFailure(currentAttempt, item, error, { orphan });
+        } else {
+          this.scheduleAliasConflictReconciliation(currentAttempt, item, error, { orphan });
+          if (orphan) this.startOrphanRecycleRecovery(attempt.id);
+        }
+        return;
+      }
+      if (String(error?.code || "") === "MAILCOM_PIPELINE_ACCOUNT_ALIAS_CREATE_CONFLICT") {
+        this.finishDeterministicRecycleFailure(
+          this.attemptRow(attempt.id),
+          item,
+          this.accountAliasCreateConflictError(item),
+          { orphan: this.itemWasCancelled(item.id) },
+        );
+        return;
+      }
       if (this.itemWasCancelled(item.id)) {
+        const currentAttempt = this.attemptRow(attempt.id);
+        if (this.registeredAccountRemovalOutcome(currentAttempt)) {
+          if (this.orphanRecycleSafeToRelease(error)) {
+            this.finishDeterministicRecycleFailure(currentAttempt, item, error, { orphan: true });
+            return;
+          }
+          this.persistOrphanRecycleRetry(currentAttempt, item, error, {
+            clearReplacement: String(error?.code || "") === "MAILCOM_ALIAS_REPLACEMENT_UNAVAILABLE",
+          });
+          this.startOrphanRecycleRecovery(attempt.id);
+          return;
+        }
         const remoteStarted = new Set([
           "recycle_remote_started", "orphan_recycle_retry_wait",
-        ]).has(String(this.attemptRow(attempt.id)?.stage || ""));
+        ]).has(String(currentAttempt?.stage || ""));
         if (remoteStarted && !this.orphanRecycleSafeToRelease(error)) {
-          const currentAttempt = this.attemptRow(attempt.id);
           this.persistOrphanRecycleRetry(currentAttempt, item, error, {
             clearReplacement: String(error?.code || "") === "MAILCOM_ALIAS_REPLACEMENT_UNAVAILABLE",
           });
@@ -2836,38 +4718,11 @@ export class MailcomRegistrationPipelineService {
       const randomDomainUnavailable = task.domain === MAILCOM_RANDOM_DOMAIN
         && String(error?.code || "") === "MAILCOM_ALIAS_DOMAIN_UNAVAILABLE";
       if (replacementUnavailable || randomDomainUnavailable) {
-        const retries = Number(this.attemptRow(attempt.id)?.recycle_attempts || 1);
-        const next = new Date(Date.now() + this.retryDelay(retries)).toISOString();
-        this.db.transaction(() => {
-          this.db.prepare(`
-            UPDATE mailcom_registration_pipeline_attempts
-            SET recycle_status = 'retry_wait', stage = 'recycle_retry_wait', recycle_error = ?,
-              next_retry_at = ?, updated_at = ? WHERE id = ?
-          `).run(safeError(error), next, nowIso(), attempt.id);
-          this.db.prepare(`
-            UPDATE mailcom_registration_pipeline_items
-            SET replacement_email = '', status = 'retry_wait', stage = 'recycle_retry_wait',
-              recycle_retry_count = recycle_retry_count + 1, next_retry_at = ?, error = ?, updated_at = ?
-            WHERE id = ?
-          `).run(next, safeError(error), nowIso(), item.id);
-        })();
+        this.scheduleRecycleRetry(this.attemptRow(attempt.id), item, error, { clearReplacement: true });
         return;
       }
       if (this.transientRecycleError(error)) {
-        const retries = Number(this.attemptRow(attempt.id)?.recycle_attempts || 1);
-        const next = new Date(Date.now() + this.retryDelay(retries)).toISOString();
-        this.db.transaction(() => {
-          this.db.prepare(`
-            UPDATE mailcom_registration_pipeline_attempts
-            SET recycle_status = 'retry_wait', stage = 'recycle_retry_wait', recycle_error = ?,
-              next_retry_at = ?, updated_at = ? WHERE id = ?
-          `).run(safeError(error, "Mail.com 别名轮换失败"), next, nowIso(), attempt.id);
-          this.db.prepare(`
-            UPDATE mailcom_registration_pipeline_items
-            SET status = 'retry_wait', stage = 'recycle_retry_wait', recycle_retry_count = recycle_retry_count + 1,
-              next_retry_at = ?, error = ?, updated_at = ? WHERE id = ?
-          `).run(next, safeError(error, "Mail.com 别名轮换失败"), nowIso(), item.id);
-        })();
+        this.scheduleRecycleRetry(this.attemptRow(attempt.id), item, error);
         return;
       }
       this.db.prepare(`
@@ -2876,8 +4731,13 @@ export class MailcomRegistrationPipelineService {
       `).run(safeError(error), nowIso(), attempt.id);
       this.finishItem(item.id, "failed", safeError(error, "Mail.com 别名轮换失败"));
       return;
+      }
     }
     item = this.itemRow(item.id);
+    if (this.protectedRegisteredAccount(this.attemptRow(attempt.id))) {
+      this.preserveProtectedRecycle(this.attemptRow(attempt.id), item);
+      return;
+    }
     if (this.hasSuccessfulAgreement(attempt.email)) {
       this.preserveSuccessfulRecycle(this.attemptRow(attempt.id), item, { completeItem: true });
       return;
@@ -2885,26 +4745,17 @@ export class MailcomRegistrationPipelineService {
     const replacement = this.replacementFromResult(item, result);
     if (!replacement) {
       const missing = failure("Mail.com 别名已轮换但本地未找到新地址", 502, "MAILCOM_PIPELINE_REPLACEMENT_NOT_FOUND");
-      const retries = Number(this.attemptRow(attempt.id)?.recycle_attempts || 1);
-      const next = new Date(Date.now() + this.retryDelay(retries)).toISOString();
-      this.db.transaction(() => {
-        this.db.prepare(`
-          UPDATE mailcom_registration_pipeline_attempts
-          SET recycle_status = 'retry_wait', stage = 'recycle_retry_wait', recycle_error = ?,
-            next_retry_at = ?, updated_at = ? WHERE id = ?
-        `).run(missing.message, next, nowIso(), attempt.id);
-        this.db.prepare(`
-          UPDATE mailcom_registration_pipeline_items
-          SET status = 'retry_wait', stage = 'recycle_retry_wait', recycle_retry_count = recycle_retry_count + 1,
-            next_retry_at = ?, error = ?, updated_at = ? WHERE id = ?
-        `).run(next, missing.message, nowIso(), item.id);
-      })();
+      this.scheduleRecycleRetry(this.attemptRow(attempt.id), item, missing);
       return;
     }
     this.activateReplacement(item, this.attemptRow(attempt.id), replacement);
   }
 
   activateReplacement(item, attempt, replacement) {
+    if (this.protectedRegisteredAccount(attempt)) {
+      this.preserveProtectedRecycle(attempt, this.itemRow(item.id));
+      return;
+    }
     if (this.hasSuccessfulAgreement(attempt?.email)) {
       this.preserveSuccessfulRecycle(attempt, this.itemRow(item.id), { completeItem: true });
       return;
@@ -2914,6 +4765,9 @@ export class MailcomRegistrationPipelineService {
       const currentItem = this.itemRow(item.id);
       const parent = currentItem ? this.taskRow(currentItem.pipeline_id) : null;
       if (!currentItem || !parent) return;
+      const confirmedPlannedReplacement = Boolean(currentItem.replacement_email)
+        && String(currentItem.replacement_email).toLowerCase()
+          === String(replacement.address || "").toLowerCase();
       const changed = this.db.prepare(`
         UPDATE mailcom_registration_pipeline_attempts
         SET recycle_status = 'succeeded', stage = 'recycled',
@@ -2953,6 +4807,14 @@ export class MailcomRegistrationPipelineService {
           item.id,
         );
       }
+      if (confirmedPlannedReplacement) {
+        this.db.prepare(`
+          UPDATE mailcom_registration_pipeline_items
+          SET prepare_error = '', updated_at = ?
+          WHERE pipeline_id = ? AND account_id = ? AND slot_kind = 'primary'
+            AND prepare_error = ?
+        `).run(at, currentItem.pipeline_id, currentItem.account_id, ALIAS_CREATE_CONFLICT_ERROR);
+      }
     })();
     this.recomputeItem(item.id);
   }
@@ -2963,7 +4825,8 @@ export class MailcomRegistrationPipelineService {
     if (this.itemWasCancelled(itemId)) return this.cancelItem(itemId);
     const attempt = item.current_attempt_id ? this.attemptRow(item.current_attempt_id) : null;
     if (attempt && !TERMINAL_ATTEMPT_STATUSES.has(attempt.status)) {
-      const linkStage = String(attempt.stage).startsWith("link_");
+      const linkStage = String(attempt.stage).startsWith("link_")
+        || String(attempt.stage).startsWith("trial_");
       const agreementStage = String(attempt.stage).startsWith("agreement_");
       this.finishAttempt(attempt.id, "failed",
         agreementStage ? "agreement_failed" : linkStage ? "link_failed" : "registration_failed",
@@ -3131,25 +4994,17 @@ export class MailcomRegistrationPipelineService {
     if (registrationJob && !new Set(["completed", "failed", "cancelled", "interrupted"]).has(registrationJob.status)) {
       await this.registration.cancelJob(attempt.registration_job_id).catch(() => undefined);
     }
-    const paymentLink = attempt.payment_link_task_id
-      ? this.paymentLinks.row(attempt.external_account_id) : null;
-    if (paymentLink && String(paymentLink.task_id) === String(attempt.payment_link_task_id)
-      && new Set(["queued", "running", "cancel_requested"]).has(paymentLink.status)) {
-      this.paymentLinks.persistTracked?.(attempt.external_account_id, attempt.payment_link_task_id, {
-        status: "cancel_requested",
-        stage: "cancel_requested",
-        error: "任务已取消",
-      });
-      try {
-        const snapshot = await this.paymentLinks.request(
-          `/api/tasks/${encodeURIComponent(attempt.payment_link_task_id)}/cancel`,
-          { method: "POST" },
-        );
-        this.paymentLinks.applySnapshot?.(attempt.external_account_id, snapshot);
-      } catch {
-        // The persisted cancellation remains visible for PaymentLinkService reconciliation.
-      }
-    }
+    const paymentLink = this.paymentLinks.row(attempt.external_account_id);
+    const submittedTaskId = String(attempt.payment_link_task_id || "");
+    const inFlightTaskId = !submittedTaskId && attempt.stage === "link_submitting"
+      && paymentLink?.task_id
+      && String(paymentLink.started_at || paymentLink.updated_at || "")
+        >= String(attempt.registration_finished_at || attempt.created_at || "")
+      ? String(paymentLink.task_id) : "";
+    await this.cancelPaymentLinkTask(
+      attempt.external_account_id,
+      submittedTaskId || inFlightTaskId,
+    );
     if (attempt.agreement_job_id && this.paymentAgreements.context?.(attempt.agreement_job_id)) {
       try {
         await this.paymentAgreements.cancelJob(attempt.agreement_job_id);
@@ -3165,16 +5020,50 @@ export class MailcomRegistrationPipelineService {
     const key = Number(itemId);
     if (this.cancellations.has(key)) return this.cancellations.get(key);
     const cancellation = (async () => {
-      const item = this.itemRow(key);
+      let item = this.itemRow(key);
       if (!item || TERMINAL_ITEM_STATUSES.has(item.status)) return item;
-      const attempt = item.current_attempt_id ? this.attemptRow(item.current_attempt_id) : null;
+      let attempt = item.current_attempt_id ? this.attemptRow(item.current_attempt_id) : null;
       await this.cancelKnownChildren(attempt);
+      item = this.itemRow(key);
+      attempt = item?.current_attempt_id ? this.attemptRow(item.current_attempt_id) : null;
+      if (!item) return item;
+      if (attempt && this.registeredAccountCleanupCommitted(attempt)) {
+        await this.finishCancelledRegisteredAccountCleanup(attempt.id);
+        return this.itemRow(key);
+      }
+      if (attempt?.stage === "account_pool_delete_failed") {
+        this.finishItem(item.id, "cancelled", attempt.recycle_error
+          || "账号池记录与流水线不匹配，已保留账号池和邮箱");
+        return this.itemRow(key);
+      }
+      if (attempt && new Set([
+        ALIAS_CREATE_CONFLICT_RECONCILE_STAGE,
+        ORPHAN_ALIAS_CREATE_CONFLICT_RECONCILE_STAGE,
+      ]).has(String(attempt.stage || "")) && attempt.recycle_status === "running") {
+        this.scheduleAliasConflictReconciliation(
+          attempt,
+          item,
+          failure(
+            attempt.recycle_error || "Mail.com 创建冲突后的官网状态尚未确认",
+            503,
+            "MAILCOM_PIPELINE_ALIAS_RECONCILE_PENDING",
+          ),
+          { orphan: true },
+        );
+        const cancelled = this.finishItem(item.id, "cancelled", "任务已取消；正在确认 Mail.com 官网地址状态");
+        this.startOrphanRecycleRecovery(attempt.id);
+        return cancelled;
+      }
       const at = nowIso();
       if (attempt && !TERMINAL_ATTEMPT_STATUSES.has(attempt.status)) {
         this.db.prepare(`
           UPDATE mailcom_registration_pipeline_attempts
           SET status = 'cancelled', stage = 'cancelled', outcome = 'cancelled',
             registration_status = CASE WHEN registration_status = 'succeeded' THEN registration_status ELSE 'cancelled' END,
+            trial_status = CASE
+              WHEN trial_status IN ('eligible', 'ineligible', 'skipped') THEN trial_status
+              ELSE 'skipped' END,
+            trial_checked_at = COALESCE(trial_checked_at, ?),
             link_status = CASE WHEN link_status = 'succeeded' THEN link_status ELSE 'cancelled' END,
             agreement_status = CASE
               WHEN agreement_status = 'succeeded' THEN agreement_status
@@ -3184,7 +5073,7 @@ export class MailcomRegistrationPipelineService {
             recycle_status = CASE WHEN recycle_status = 'succeeded' THEN recycle_status ELSE 'skipped' END,
             error = '任务已取消', agreement_finished_at = COALESCE(agreement_finished_at, ?),
             finished_at = ?, updated_at = ? WHERE id = ? AND status IN ('queued', 'running')
-        `).run(at, at, at, attempt.id);
+        `).run(at, at, at, at, attempt.id);
       } else if (attempt && attempt.recycle_status === "running" && attempt.stage === "recycling") {
         this.db.transaction(() => {
           this.db.prepare(`
@@ -3287,16 +5176,12 @@ export class MailcomRegistrationPipelineService {
   }
 
   async runOrphanRecycleRecovery(attemptId) {
-    while (!this.closed) {
+    recoveryLoop: while (!this.closed) {
       let attempt = this.attemptRow(attemptId);
       let item = attempt ? this.itemRow(attempt.item_id) : null;
       let task = item ? this.taskRow(item.pipeline_id) : null;
       if (!attempt || !item || !task || attempt.recycle_status !== "running"
         || !(task.status === "cancel_requested" || TERMINAL_PIPELINE_STATUSES.has(task.status))) return;
-      if (this.hasSuccessfulAgreement(attempt.email)) {
-        this.preserveSuccessfulRecycle(attempt, item);
-        return;
-      }
       const retryDelay = Date.parse(attempt.next_retry_at || "") - Date.now();
       if (retryDelay > 0) {
         await this.wait(item.id, retryDelay);
@@ -3306,6 +5191,37 @@ export class MailcomRegistrationPipelineService {
         task = item ? this.taskRow(item.pipeline_id) : null;
         if (!attempt || !item || !task || attempt.recycle_status !== "running"
           || !(task.status === "cancel_requested" || TERMINAL_PIPELINE_STATUSES.has(task.status))) return;
+      }
+      if (ACCOUNT_POOL_DELETE_PENDING_STAGES.has(String(attempt.stage || ""))) {
+        const deletion = await this.ensureRegisteredAccountDeleted(attempt.id, { allowStart: false });
+        attempt = this.attemptRow(attempt.id);
+        item = attempt ? this.itemRow(attempt.item_id) : null;
+        task = item ? this.taskRow(item.pipeline_id) : null;
+        if (!attempt || !item || !task) return;
+        if (deletion.status === "mismatch" || attempt.stage === "account_pool_delete_failed") return;
+        if (deletion.status === "retry_wait") continue;
+        if (deletion.status === "protected") return;
+      }
+      if (this.isMotherPrimaryItem(item) && attempt.stage === "account_pool_deleted"
+        && this.registeredAccountRemovalOutcome(attempt)) {
+        this.finishPrimaryAfterRegisteredAccountDelete(attempt, item, { cancelled: true });
+        return;
+      }
+      if (this.protectedRegisteredAccount(attempt)) {
+        this.preserveProtectedRecycle(attempt, item);
+        return;
+      }
+      if (this.hasSuccessfulAgreement(attempt.email)) {
+        this.preserveSuccessfulRecycle(attempt, item);
+        return;
+      }
+      if (new Set([
+        ALIAS_CREATE_CONFLICT_RECONCILE_STAGE,
+        ORPHAN_ALIAS_CREATE_CONFLICT_RECONCILE_STAGE,
+      ]).has(String(attempt.stage || ""))) {
+        const resolved = await this.reconcileAliasCreateConflict(attempt, item, { orphan: true });
+        if (resolved) return;
+        continue;
       }
       const accountBlock = this.aliasAccountBlock(item);
       if (accountBlock) {
@@ -3324,6 +5240,15 @@ export class MailcomRegistrationPipelineService {
           continue;
         }
       }
+      if (this.aliasCreateConflictForAccount(item)) {
+        this.finishDeterministicRecycleFailure(
+          attempt,
+          item,
+          this.accountAliasCreateConflictError(item),
+          { orphan: true },
+        );
+        return;
+      }
       let replacementAddress;
       try {
         replacementAddress = this.stableReplacement(item, task.domain);
@@ -3332,10 +5257,34 @@ export class MailcomRegistrationPipelineService {
         continue;
       }
 
+      const plannedReplacement = item.replacement_email
+        ? this.unassignedReplacement(item, item.replacement_email) : null;
+      let motherCandidates = this.isMotherPrimaryItem(item) && !plannedReplacement
+        ? this.motherAliasCandidates(item) : [];
+      const orphanCapacityError = !plannedReplacement && this.isMotherPrimaryItem(item)
+        ? this.replacementCapacityError(item, { deletableAliasCount: motherCandidates.length }) : null;
+      if (orphanCapacityError) {
+        this.finishDeterministicRecycleFailure(attempt, item, orphanCapacityError, { orphan: true });
+        return;
+      }
+
       let result;
-      try {
-        result = await this.serializeAliasRemote(async () => {
+      let candidateIndex = 0;
+      const attemptedMotherCandidates = new Set();
+      while (true) {
+        const recycleAddress = motherCandidates[candidateIndex]?.address || "";
+        if (recycleAddress) attemptedMotherCandidates.add(String(recycleAddress).toLowerCase());
+        try {
+          result = await this.serializeAliasRemote(item.account_id, async () => {
           if (this.closed) throw failure("Mail.com 流水线服务正在关闭", 503, "MAILCOM_PIPELINE_CLOSED");
+          const latestAttempt = this.attemptRow(attempt.id);
+          if (this.protectedRegisteredAccount(latestAttempt)) {
+            throw failure(
+              "blocked 或已提链账号必须保留，禁止恢复轮换邮箱",
+              409,
+              "MAILCOM_ALIAS_REGISTERED_ACCOUNT_PROTECTED",
+            );
+          }
           if (this.hasSuccessfulAgreement(attempt.email)) {
             throw failure(
               "协议授权成功账号永久保留，禁止恢复轮换邮箱",
@@ -3344,6 +5293,9 @@ export class MailcomRegistrationPipelineService {
             );
           }
           if (this.aliasAccountBlock(item)) throw this.accountAliasBlockedError(item);
+          if (this.aliasCreateConflictForAccount(item)) {
+            throw this.accountAliasCreateConflictError(item);
+          }
           this.db.prepare(`
             UPDATE mailcom_registration_pipeline_attempts
             SET stage = 'recycle_remote_started', recycle_attempts = recycle_attempts + 1,
@@ -3351,20 +5303,64 @@ export class MailcomRegistrationPipelineService {
             WHERE id = ? AND recycle_status = 'running'
           `).run(nowIso(), attempt.id);
           try {
-            return await this.mailcomAliases.recycleAlias(item.account_id, {
-              address: attempt.email,
-              domain: this.recycleDomain(task.domain, replacementAddress),
+            return await this.replaceAliasRemote(
+              item,
+              attempt,
+              task,
               replacementAddress,
-            });
+              recycleAddress,
+            );
           } catch (error) {
+            this.tripAliasCreateConflict(item, error);
             if (this.aliasAccountActionRequired(error)) this.tripAliasAccount(item, error);
             throw error;
           }
-        });
-      } catch (error) {
+          });
+          break;
+        } catch (error) {
+          const guardedAttempt = this.attemptRow(attempt.id);
+          if (this.protectedRegisteredAccount(guardedAttempt)) {
+            this.preserveProtectedRecycle(guardedAttempt, this.itemRow(item.id));
+            return;
+          }
+          if (this.hasSuccessfulAgreement(guardedAttempt?.email)) {
+            this.preserveSuccessfulRecycle(guardedAttempt, this.itemRow(item.id));
+            return;
+          }
+          if (this.isMotherPrimaryItem(item)
+            && !plannedReplacement
+            && this.candidateProtectionError(error)) {
+            const refreshed = this.motherAliasCandidates(item);
+            const nextIndex = refreshed.findIndex((candidate) => (
+              !attemptedMotherCandidates.has(String(candidate.address || "").toLowerCase())
+            ));
+            if (nextIndex >= 0) {
+              motherCandidates = refreshed;
+              candidateIndex = nextIndex;
+              continue;
+            }
+            const exhausted = this.replacementCapacityError(item, { deletableAliasCount: 0 });
+            if (exhausted) {
+              this.finishDeterministicRecycleFailure(
+                this.attemptRow(attempt.id),
+                this.itemRow(item.id),
+                exhausted,
+                { orphan: true },
+              );
+              return;
+            }
+            motherCandidates = [];
+            candidateIndex = 0;
+            continue;
+          }
         attempt = this.attemptRow(attempt.id);
         item = this.itemRow(item.id);
         if (!attempt || !item || attempt.recycle_status !== "running") return;
+        if (String(error?.code || "") === "MAILCOM_ALIAS_REGISTERED_ACCOUNT_PROTECTED"
+          || this.protectedRegisteredAccount(attempt)) {
+          this.preserveProtectedRecycle(attempt, item);
+          return;
+        }
         if (String(error?.code || "") === "MAILCOM_ALIAS_AGREEMENT_PROTECTED"
           || this.hasSuccessfulAgreement(attempt.email)) {
           this.preserveSuccessfulRecycle(attempt, item);
@@ -3373,6 +5369,24 @@ export class MailcomRegistrationPipelineService {
         const recovered = this.unassignedReplacement(item, replacementAddress);
         if (recovered) {
           this.activateReplacement(item, attempt, recovered);
+          return;
+        }
+        const createConflict = this.tripAliasCreateConflict(item, error);
+        if (createConflict) {
+          if (this.orphanRecycleSafeToRelease(error)) {
+            this.finishDeterministicRecycleFailure(attempt, item, error, { orphan: true });
+            return;
+          }
+          this.scheduleAliasConflictReconciliation(attempt, item, error, { orphan: true });
+          continue recoveryLoop;
+        }
+        if (String(error?.code || "") === "MAILCOM_PIPELINE_ACCOUNT_ALIAS_CREATE_CONFLICT") {
+          this.finishDeterministicRecycleFailure(
+            attempt,
+            item,
+            this.accountAliasCreateConflictError(item),
+            { orphan: true },
+          );
           return;
         }
         if (this.closed) return;
@@ -3391,7 +5405,7 @@ export class MailcomRegistrationPipelineService {
               { orphan: true },
             );
           }
-          continue;
+          continue recoveryLoop;
         }
         const replacementUnavailable = String(error?.code || "") === "MAILCOM_ALIAS_REPLACEMENT_UNAVAILABLE";
         const randomDomainUnavailable = task.domain === MAILCOM_RANDOM_DOMAIN
@@ -3400,7 +5414,7 @@ export class MailcomRegistrationPipelineService {
           this.persistOrphanRecycleRetry(attempt, item, error, {
             clearReplacement: replacementUnavailable || randomDomainUnavailable,
           });
-          continue;
+          continue recoveryLoop;
         }
         this.db.prepare(`
           UPDATE mailcom_registration_pipeline_attempts
@@ -3412,11 +5426,16 @@ export class MailcomRegistrationPipelineService {
         `).run(nowIso(), item.id);
         this.recomputeItem(item.id);
         return;
+        }
       }
 
       attempt = this.attemptRow(attempt.id);
       item = this.itemRow(item.id);
       if (!attempt || !item || attempt.recycle_status !== "running") return;
+      if (this.protectedRegisteredAccount(attempt)) {
+        this.preserveProtectedRecycle(attempt, item);
+        return;
+      }
       if (this.hasSuccessfulAgreement(attempt.email)) {
         this.preserveSuccessfulRecycle(attempt, item);
         return;
@@ -3437,7 +5456,8 @@ export class MailcomRegistrationPipelineService {
 
   recoverOrphanedRecycles() {
     const rows = this.db.prepare(`
-      SELECT attempts.id, attempts.stage, attempts.item_id,
+      SELECT attempts.id, attempts.stage, attempts.item_id, attempts.outcome,
+        attempts.external_account_id, attempts.link_status, attempts.agreement_status,
         items.account_id, items.source_email
       FROM mailcom_registration_pipeline_attempts AS attempts
       JOIN mailcom_registration_pipeline_items AS items ON items.id = attempts.item_id
@@ -3454,7 +5474,7 @@ export class MailcomRegistrationPipelineService {
         });
         continue;
       }
-      if (row.stage === "recycling") {
+      if (row.stage === "recycling" && !this.registeredAccountRemovalOutcome(row)) {
         const at = nowIso();
         this.db.transaction(() => {
           this.db.prepare(`
@@ -3489,6 +5509,7 @@ export class MailcomRegistrationPipelineService {
         await this.cancel(task.id, { skipRecovery: true }).catch(() => undefined);
       } else {
         this.recoverMisclassifiedCompletedRegistrations(task.id);
+        this.recoverCapacityFailedPrimarySlots(task.id);
         this.startTracker(task.id);
       }
     }
@@ -3502,6 +5523,7 @@ export class MailcomRegistrationPipelineService {
     this.wakes.clear();
     await Promise.allSettled([...this.trackers.values()]);
     await Promise.allSettled([...this.cancellations.values()]);
+    await Promise.allSettled([...this.accountPoolDeletions.values()]);
     await Promise.allSettled([...this.orphanTrackers.values()]);
     await Promise.allSettled([...this.authorizationBatches]);
     await Promise.allSettled([...this.authorizationRecoveries.values()]);

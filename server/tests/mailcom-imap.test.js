@@ -181,7 +181,7 @@ test("explains Mail.com IMAP authentication failures without persisting the atte
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM mailcom_credentials").get().count, 0);
 });
 
-test("Mail.com APIs redact bulk passwords, enforce alias quota, and register aliases directly", async (t) => {
+test("Mail.com APIs redact bulk passwords, allow address growth, and register aliases directly", async (t) => {
   const { db } = context(t);
   const connectedInputs = [];
   const scanCalls = [];
@@ -255,7 +255,18 @@ test("Mail.com APIs redact bulk passwords, enforce alias quota, and register ali
     method: "POST",
     body: JSON.stringify({ aliases: ["overflow@post.com"] }),
   });
-  assert.equal(overflow.response.status, 400);
+  assert.equal(overflow.response.status, 200);
+  assert.equal(overflow.body.account.mailcom_aliases, 10);
+  assert.equal(overflow.body.account.official_used, 11);
+
+  const oversizedBatch = await jsonRequest(runtime.app, `/api/accounts/${account.id}/mailcom-aliases/import`, {
+    method: "POST",
+    body: JSON.stringify({
+      aliases: Array.from({ length: 101 }, (_, index) => `manual-bulk${index}@mail.com`),
+    }),
+  });
+  assert.equal(oversizedBatch.response.status, 400);
+  assert.match(oversizedBatch.body.error, /单次最多提交 100 个/);
 
   const split = await jsonRequest(runtime.app, `/api/accounts/${account.id}/splits`, {
     method: "POST",
@@ -266,7 +277,7 @@ test("Mail.com APIs redact bulk passwords, enforce alias quota, and register ali
   const options = await jsonRequest(runtime.app, "/api/registration/options");
   const direct = options.body.accounts.find((item) => item.id === account.id);
   assert.equal(direct.registration_mode, "direct");
-  assert.equal(direct.bases.length, 10);
+  assert.equal(direct.bases.length, 11);
   const registered = await jsonRequest(runtime.app, "/api/registration/jobs", {
     method: "POST",
     body: JSON.stringify({

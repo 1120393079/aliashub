@@ -361,7 +361,7 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .mc-registration-pipeline-bar.is-completed .mc-pipeline-activity-track i { background: var(--green); }
 .mc-registration-pipeline-bar.is-failed .mc-pipeline-activity-track i, .mc-registration-pipeline-bar.is-interrupted .mc-pipeline-activity-track i { background: var(--coral); }
 .mc-registration-pipeline-bar.is-partial_failed .mc-pipeline-activity-track i { background: var(--amber); }
-.mc-pipeline-phases { min-width: 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 7px; }
+.mc-pipeline-phases { min-width: 0; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 7px; }
 .mc-pipeline-phases article { min-width: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px 7px; padding: 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-2); }
 .mc-pipeline-phases article.is-active { border-color: color-mix(in srgb, var(--blue) 35%, var(--line)); background: color-mix(in srgb, var(--blue-soft) 58%, var(--surface-2)); }
 .mc-pipeline-phases header { grid-column: 1 / -1; min-width: 0; display: flex; align-items: center; gap: 5px; color: var(--text-soft); }
@@ -1447,7 +1447,7 @@ div.registration-launch-form .registration-source-selection.is-direct > .form-fi
 .label-purpose b { font-size: 10px; }
 .label-purpose small, .muted-cell { margin-top: 2px; color: var(--text-faint); font-size: 8px; }
 .row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 1px; }
-.table-footer { min-height: 50px; display: flex; align-items: center; justify-content: space-between; padding: 8px 13px; border-top: 1px solid var(--line); color: var(--text-soft); font-size: 10px; }
+.table-footer { min-height: 50px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 14px; padding: 8px 13px; border-top: 1px solid var(--line); color: var(--text-soft); font-size: 10px; }
 .pagination { display: flex; align-items: center; gap: 7px; }
 .registration-account-footer { min-height: 60px; gap: 14px; background: var(--surface-2); }
 .registration-account-range { min-width: 0; display: flex; align-items: baseline; gap: 8px; }
@@ -1479,6 +1479,8 @@ div.registration-launch-form .registration-source-selection.is-direct > .form-fi
 .nfapi-connection-state b { font-size: 11px; }
 .nfapi-connection-state small { margin-top: 3px; color: var(--text-soft); font-size: 9px; }
 .nfapi-connection-actions { display: flex; align-items: center; gap: 8px; }
+.inventory-settings-note { display: flex; align-items: flex-start; gap: 8px; padding: 9px 10px; border: 1px solid color-mix(in srgb, var(--blue) 24%, var(--line)); border-radius: 6px; background: var(--blue-soft); color: var(--text-soft); font-size: 9px; line-height: 1.5; }
+.inventory-settings-note > svg { flex: 0 0 auto; color: var(--blue); margin-top: 1px; }
 .oauth-config-status { min-height: 52px; display: flex; align-items: center; gap: 12px; padding: 10px 11px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-2); }
 .oauth-config-status > span:first-child { display: grid; min-width: 0; flex: 1; }
 .oauth-config-status b { font-size: 11px; }
@@ -1520,6 +1522,35 @@ div.registration-launch-form .registration-source-selection.is-direct > .form-fi
 .modal-header p { margin-top: 4px; color: var(--text-soft); font-size: 10px; overflow-wrap: anywhere; }
 .modal-body { min-height: 0; padding: 18px; overflow-y: auto; }
 .modal-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 18px; border-top: 1px solid var(--line); background: var(--surface-2); }
+.inventory-api-modal { display: grid; gap: 14px; }
+.inventory-api-config { display: grid; gap: 11px; padding: 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-2); }
+.inventory-api-config > header { display: flex; align-items: flex-start; gap: 10px; }
+.inventory-api-config > header > div:first-child { display: grid; gap: 3px; min-width: 0; flex: 1; }
+.inventory-api-config h3, .inventory-api-input h3, .inventory-api-result h3 { font-size: 12px; }
+.inventory-api-config p { color: var(--text-soft); font-size: 9px; }
+.inventory-api-config-actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+.inventory-api-config details { border-top: 1px solid var(--line); padding-top: 8px; }
+.inventory-api-config summary { cursor: pointer; color: var(--text-soft); font-size: 9px; }
+.inventory-api-config details[open] summary { margin-bottom: 9px; }
+.inventory-api-curl { margin-top: 8px; padding: 10px; border-radius: 6px; background: #101923; color: #d8e5ef; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 9px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.inventory-api-input { display: grid; gap: 10px; }
+.inventory-api-input textarea { min-height: 150px; resize: vertical; font: 10px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.inventory-api-hint { display: flex; align-items: flex-start; gap: 7px; padding: 9px 10px; border: 1px solid color-mix(in srgb, var(--blue) 24%, var(--line)); border-radius: 6px; background: var(--blue-soft); color: var(--text-soft); font-size: 9px; line-height: 1.5; }
+.inventory-api-hint > svg { flex: 0 0 auto; color: var(--blue); margin-top: 1px; }
+.inventory-api-hint code { color: var(--text); font-size: 9px; }
+.inventory-api-price-note { align-self: end; padding: 9px 0; color: var(--text-soft); font-size: 9px; }
+.inventory-api-result { border: 1px solid color-mix(in srgb, var(--green) 30%, var(--line)); border-radius: 7px; background: var(--green-soft); overflow: hidden; }
+.inventory-api-result > header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 11px; border-bottom: 1px solid color-mix(in srgb, var(--green) 20%, var(--line)); }
+.inventory-api-result > header > span { color: var(--text-soft); font-size: 9px; }
+.inventory-api-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(82px, 1fr)); }
+.inventory-api-metrics > span { display: grid; gap: 2px; padding: 9px 10px; border-right: 1px solid color-mix(in srgb, var(--green) 20%, var(--line)); color: var(--text-soft); font-size: 9px; }
+.inventory-api-metrics > span:last-child { border-right: 0; }
+.inventory-api-metrics b { color: var(--text); font-size: 15px; }
+.inventory-api-failures { display: grid; gap: 4px; padding: 9px 11px; border-top: 1px solid color-mix(in srgb, var(--green) 20%, var(--line)); }
+.inventory-api-failures > div { display: flex; gap: 8px; font-size: 9px; }
+.inventory-api-failures b { min-width: 150px; color: var(--text); overflow-wrap: anywhere; }
+.inventory-api-failures span { color: var(--coral); overflow-wrap: anywhere; }
+.inventory-api-missing { padding: 8px 11px; border-top: 1px solid color-mix(in srgb, var(--green) 20%, var(--line)); color: var(--amber); font-size: 9px; overflow-wrap: anywhere; }
 .nfapi-import-form { display: grid; gap: 18px; }
 .nfapi-import-form.is-importing { opacity: 0.76; }
 .nfapi-import-form.is-reauthorizing > .nfapi-import-section { display: none; }

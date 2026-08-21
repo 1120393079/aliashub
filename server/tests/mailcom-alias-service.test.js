@@ -69,8 +69,10 @@ function fakeAdapter({
   const unavailable = new Set(unavailableAddresses);
   const state = {
     remote: [...initial],
+    maxRemoteCount: initial.length,
     created: [],
     deleted: [],
+    mutations: [],
     validations: [],
     opens: [],
     closed: 0,
@@ -87,6 +89,7 @@ function fakeAdapter({
             state.pending.remaining -= 1;
             if (state.pending.remaining <= 0) {
               state.remote.push(state.pending.address);
+              state.maxRemoteCount = Math.max(state.maxRemoteCount, state.remote.length);
               state.pending = null;
             }
           }
@@ -111,15 +114,18 @@ function fakeAdapter({
             throw new Error(`upstream echoed ${credentials.password}`);
           }
           state.created.push(candidate);
+          state.mutations.push(`create:${candidate.address}`);
           if (confirmationLagReads) {
             state.pending = { address: candidate.address, remaining: confirmationLagReads };
           } else {
             state.remote.push(candidate.address);
+            state.maxRemoteCount = Math.max(state.maxRemoteCount, state.remote.length);
           }
           return { emailAddress: candidate.address };
         },
         async deleteAlias({ address }) {
           state.deleted.push(address);
+          state.mutations.push(`delete:${address}`);
           state.remote = state.remote.filter((candidate) => candidate !== address);
           return { address };
         },
@@ -278,10 +284,14 @@ test("Playwright adapter uses a minimal isolated environment and cleans launch f
     browserSemaphore: semaphore,
     browserExecutable: "/usr/bin/google-chrome",
     cleanupTimeoutMs: 100,
+    openAttempts: 1,
+    logger: null,
   });
   await assert.rejects(
     () => adapter.open({ username: "mother@techie.com", password: PASSWORD }),
-    (error) => error.code === "MAILCOM_ALIAS_BROWSER_FAILED"
+    (error) => error.code === "MAILCOM_ALIAS_OPEN_TRANSIENT"
+      && error.status === 503
+      && error.retryable === true
       && !error.message.includes(PASSWORD),
   );
   assert.equal(launchOptions.args.includes("--no-sandbox"), false);
@@ -295,6 +305,283 @@ test("Playwright adapter uses a minimal isolated environment and cleans launch f
   ].includes(key)));
   assert.equal(fs.existsSync(path.dirname(launchOptions.env.HOME)), false);
   assert.equal(serverClosed, 1);
+  assert.equal(semaphore.active, 0);
+});
+
+test("Playwright adapter retries a transient navigation failure with a fresh session and redacted diagnostics", async () => {
+  const semaphore = new MailcomBrowserSemaphore();
+  const sessionRoots = [];
+  const waits = [];
+  const logs = [];
+  const settingsSelectors = [];
+  const senderSelectors = [];
+  let attempt = 0;
+  let requestListener;
+
+  const clickable = (onClick = () => {}, visible = true) => ({
+    first() { return this; },
+    async isVisible() { return visible; },
+    async click() { onClick(); },
+    async fill() {},
+  });
+  const webmailer = {
+    url: () => "https://webmailer.mail.com/index.html",
+    locator(selector) {
+      if (selector.includes("Settings")) settingsSelectors.push(selector);
+      return clickable(
+        () => {},
+        selector === 'button[aria-label="Settings for your mail.com account"]',
+      );
+    },
+  };
+  const settings = {
+    url: () => "https://mailset-root.mail.com/",
+    locator(selector) {
+      if (selector.includes("sender-address") || selector.includes("Sender addresses")) {
+        senderSelectors.push(selector);
+      }
+      return clickable(() => requestListener?.({
+        url: () => "https://settings-cats.mail.com/domains",
+        headers: () => ({
+          authorization: "Bearer in-memory-token",
+          "x-ui-app": "mailcom.test",
+        }),
+      }), selector === '[data-action="sender-addresses"]');
+    },
+  };
+  const chromiumLauncher = {
+    async launchServer(options) {
+      attempt += 1;
+      sessionRoots.push(path.dirname(options.env.HOME));
+      return {
+        wsEndpoint: () => `ws://127.0.0.1/fake-${attempt}`,
+        async close() {},
+        async kill() {},
+        process: () => ({ kill() {} }),
+      };
+    },
+    async connect() {
+      const currentAttempt = attempt;
+      return {
+        async newContext() {
+          return {
+            request: {},
+            on(event, listener) { if (event === "request") requestListener = listener; },
+            async newPage() {
+              return {
+                frames: () => [webmailer, settings],
+                locator: () => clickable(),
+                async goto() {
+                  if (currentAttempt === 1) {
+                    const error = new Error(`page.goto: Timeout 60000ms exceeded ${PASSWORD} Bearer private-token`);
+                    error.name = "TimeoutError";
+                    throw error;
+                  }
+                },
+                async waitForURL() {},
+                async waitForTimeout() {},
+              };
+            },
+            async close() {},
+          };
+        },
+        async close() {},
+      };
+    },
+  };
+  const logger = {
+    warn(value) { logs.push(value); },
+    info(value) { logs.push(value); },
+    error(value) { logs.push(value); },
+  };
+  const adapter = new MailcomAliasPlaywrightAdapter({
+    chromiumLauncher,
+    browserSemaphore: semaphore,
+    browserExecutable: "/usr/bin/google-chrome",
+    openAttempts: 2,
+    retryDelayMs: 25,
+    randomFn: () => 0,
+    sleepFn: async (milliseconds) => { waits.push(milliseconds); },
+    logger,
+  });
+
+  const session = await adapter.open({
+    username: "mother@techie.com",
+    password: PASSWORD,
+    accountId: 73,
+  });
+
+  assert.equal(attempt, 2);
+  assert.deepEqual(waits, [25]);
+  assert.equal(semaphore.active, 1);
+  assert.equal(logs.some((value) => value.includes('"retrying":true')), true);
+  assert.equal(logs.some((value) => value.includes('"event":"open_recovered"')), true);
+  assert.equal(logs.some((value) => value.includes(PASSWORD)), false);
+  assert.equal(logs.some((value) => value.includes("private-token")), false);
+  assert.equal(logs.some((value) => value.includes("[REDACTED]")), true);
+  assert.deepEqual(settingsSelectors.slice(-2), [
+    'button[title="Settings for your mail.com account"]',
+    'button[aria-label="Settings for your mail.com account"]',
+  ]);
+  assert.deepEqual(senderSelectors.slice(-2), [
+    'lux-sidebar-item[data-action="sender-addresses"]',
+    '[data-action="sender-addresses"]',
+  ]);
+  assert.equal(fs.existsSync(sessionRoots[0]), false);
+
+  await session.close();
+  assert.equal(semaphore.active, 0);
+  assert.ok(sessionRoots.every((root) => !fs.existsSync(root)));
+});
+
+test("Playwright adapter returns one transient error after retryable login failures are exhausted", async () => {
+  const semaphore = new MailcomBrowserSemaphore();
+  const sessionRoots = [];
+  const logs = [];
+  let launches = 0;
+  const adapter = new MailcomAliasPlaywrightAdapter({
+    chromiumLauncher: {
+      async launchServer(options) {
+        launches += 1;
+        sessionRoots.push(path.dirname(options.env.HOME));
+        throw Object.assign(new Error(`login stalled ${PASSWORD} Bearer private-token`), {
+          status: 504,
+          code: "MAILCOM_WEB_LOGIN_TIMEOUT",
+        });
+      },
+    },
+    browserSemaphore: semaphore,
+    browserExecutable: "/usr/bin/google-chrome",
+    openAttempts: 2,
+    retryDelayMs: 0,
+    sleepFn: async () => {},
+    logger: {
+      warn(value) { logs.push(value); },
+      error(value) { logs.push(value); },
+    },
+  });
+
+  await assert.rejects(
+    () => adapter.open({ username: "mother@techie.com", password: PASSWORD, accountId: 73 }),
+    (error) => error.code === "MAILCOM_ALIAS_OPEN_TRANSIENT"
+      && error.status === 503
+      && error.retryable === true
+      && error.attempts === 2
+      && error.stage === "launch_browser"
+      && !/网页登录.*(?:失败|超时)|登录.*超时|重新连接母号/i.test(error.message),
+  );
+
+  assert.equal(launches, 2);
+  assert.equal(semaphore.active, 0);
+  assert.ok(sessionRoots.every((root) => !fs.existsSync(root)));
+  assert.equal(logs.some((value) => value.includes(PASSWORD) || value.includes("private-token")), false);
+  assert.equal(logs.some((value) => value.includes('"public_error_code":"MAILCOM_ALIAS_OPEN_TRANSIENT"')), true);
+});
+
+test("Playwright adapter skips a retry that cannot fit inside the total open deadline", async () => {
+  const semaphore = new MailcomBrowserSemaphore();
+  let launches = 0;
+  let sleeps = 0;
+  const adapter = new MailcomAliasPlaywrightAdapter({
+    chromiumLauncher: {
+      async launchServer() {
+        launches += 1;
+        throw new Error("net::ERR_NETWORK_CHANGED");
+      },
+    },
+    browserSemaphore: semaphore,
+    browserExecutable: "/usr/bin/google-chrome",
+    openAttempts: 2,
+    openTimeoutMs: 5_000,
+    retryDelayMs: 0,
+    sleepFn: async () => { sleeps += 1; },
+    logger: null,
+  });
+
+  await assert.rejects(
+    () => adapter.open({ username: "mother@techie.com", password: PASSWORD }),
+    (error) => error.code === "MAILCOM_ALIAS_OPEN_TRANSIENT"
+      && error.attempts === 1
+      && !error.message.includes("已自动重试"),
+  );
+  assert.equal(launches, 1);
+  assert.equal(sleeps, 0);
+  assert.equal(semaphore.active, 0);
+});
+
+test("Playwright adapter enforces the total deadline inside a hung browser stage before releasing its slot", async () => {
+  const semaphore = new MailcomBrowserSemaphore();
+  const sessionRoots = [];
+  let browserClosed = 0;
+  let serverClosed = 0;
+  let launches = 0;
+  const adapter = new MailcomAliasPlaywrightAdapter({
+    chromiumLauncher: {
+      async launchServer(options) {
+        launches += 1;
+        sessionRoots.push(path.dirname(options.env.HOME));
+        return {
+          wsEndpoint: () => "ws://127.0.0.1/hung-context",
+          async close() { serverClosed += 1; },
+          async kill() {},
+          process: () => ({ kill() {} }),
+        };
+      },
+      async connect() {
+        return {
+          newContext: () => new Promise(() => {}),
+          async close() { browserClosed += 1; },
+        };
+      },
+    },
+    browserSemaphore: semaphore,
+    browserExecutable: "/usr/bin/google-chrome",
+    openAttempts: 2,
+    openTimeoutMs: 500,
+    cleanupTimeoutMs: 20,
+    retryDelayMs: 0,
+    logger: null,
+  });
+
+  await assert.rejects(
+    () => adapter.open({ username: "mother@techie.com", password: PASSWORD }),
+    (error) => error.code === "MAILCOM_ALIAS_OPEN_TRANSIENT"
+      && error.stage === "create_browser_context",
+  );
+  assert.equal(launches, 1);
+  assert.equal(browserClosed, 1);
+  assert.equal(serverClosed, 1);
+  assert.equal(semaphore.active, 0);
+  assert.ok(sessionRoots.every((root) => !fs.existsSync(root)));
+});
+
+test("Playwright adapter does not retry a deterministic Mail.com authorization failure", async () => {
+  const semaphore = new MailcomBrowserSemaphore();
+  let launches = 0;
+  const adapter = new MailcomAliasPlaywrightAdapter({
+    chromiumLauncher: {
+      async launchServer() {
+        launches += 1;
+        throw Object.assign(new Error("saved login rejected"), {
+          status: 409,
+          code: "MAILCOM_WEB_AUTH_FAILED",
+        });
+      },
+    },
+    browserSemaphore: semaphore,
+    browserExecutable: "/usr/bin/google-chrome",
+    openAttempts: 2,
+    retryDelayMs: 0,
+    logger: null,
+  });
+
+  await assert.rejects(
+    () => adapter.open({ username: "mother@techie.com", password: PASSWORD, accountId: 73 }),
+    (error) => error.code === "MAILCOM_WEB_AUTH_FAILED"
+      && error.retryable === false
+      && !error.message.includes("自动重试"),
+  );
+  assert.equal(launches, 1);
   assert.equal(semaphore.active, 0);
 });
 
@@ -349,6 +636,32 @@ test("global browser semaphore waits or returns one stable busy error", async ()
   const secondRelease = await semaphore.acquire({ limit: 1, timeoutMs: 100 });
   assert.equal(semaphore.active, 1);
   secondRelease();
+  assert.equal(semaphore.active, 0);
+});
+
+test("Playwright adapter total deadline also bounds browser queue waiting", async () => {
+  const semaphore = new MailcomBrowserSemaphore();
+  const occupiedRelease = await semaphore.acquire({ limit: 1, timeoutMs: 100 });
+  let launches = 0;
+  const adapter = new MailcomAliasPlaywrightAdapter({
+    chromiumLauncher: {
+      async launchServer() { launches += 1; },
+    },
+    browserSemaphore: semaphore,
+    browserExecutable: "/usr/bin/google-chrome",
+    browserWaitTimeoutMs: 1_000,
+    openTimeoutMs: 20,
+    logger: null,
+  });
+
+  await assert.rejects(
+    () => adapter.open({ username: "mother@techie.com", password: PASSWORD }),
+    (error) => error.code === "MAILCOM_ALIAS_BROWSER_BUSY",
+  );
+  assert.equal(launches, 0);
+  assert.equal(semaphore.queue.length, 0);
+  assert.equal(semaphore.active, 1);
+  occupiedRelease();
   assert.equal(semaphore.active, 0);
 });
 
@@ -501,6 +814,33 @@ test("verifyAuthorization closes a failed read-only session and never leaks the 
   );
 });
 
+test("verifyAuthorization preserves safe transient browser diagnostics through the service boundary", async (t) => {
+  const { db, mailcom, account } = context(t);
+  const adapter = {
+    async open() {
+      throw Object.assign(new Error("temporary browser connection failure"), {
+        status: 503,
+        code: "MAILCOM_ALIAS_OPEN_TRANSIENT",
+        retryable: true,
+        stage: "navigate_home",
+        requestId: "browser-request-73",
+        attempts: 2,
+      });
+    },
+  };
+  const service = new MailcomAliasAutomationService({ db, mailcom, adapter });
+
+  await assert.rejects(
+    () => service.verifyAuthorization(account.id),
+    (error) => error.code === "MAILCOM_ALIAS_OPEN_TRANSIENT"
+      && error.status === 503
+      && error.retryable === true
+      && error.stage === "navigate_home"
+      && error.requestId === "browser-request-73"
+      && error.attempts === 2,
+  );
+});
+
 test("prepareAccount validates the requested active suffix and fills every missing slot with it", async (t) => {
   const { db, mailcom, account } = context(t);
   const existing = Array.from({ length: 8 }, (_, index) => `prepared${index}@mail.com`);
@@ -524,7 +864,7 @@ test("prepareAccount validates the requested active suffix and fills every missi
     aliases: 9,
     total: 10,
     remaining: 0,
-    limit: 10,
+    target: 10,
   });
   assert.equal(result.items.length, 10);
   assert.equal(result.account.mailcom_aliases, 9);
@@ -585,6 +925,206 @@ test("prepareAccount recognizes a verified Mail.com login domain outside the ali
   assert.equal(result.counts.aliases, 9);
   assert.equal(result.account.mailcom_aliases, 9);
   assert.equal(adapter.state.created[0].domain, "email.com");
+});
+
+test("prepareAccount stops before create when the local lifetime alias quota is exhausted", async (t) => {
+  const { db, mailcom, account } = context(t);
+  const insert = db.prepare(`
+    INSERT INTO addresses (
+      account_id, address, kind, status, strategy, label, purpose,
+      remote_confirmed, created_at, updated_at
+    ) VALUES (?, ?, 'official', 'disabled', ?, 'Historical alias', '测试', 1, ?, ?)
+  `);
+  db.transaction(() => {
+    for (let index = 0; index < 99; index += 1) {
+      const at = nowIso();
+      insert.run(account.id, `historical-${index}@mail.com`, MAILCOM_ALIAS_STRATEGY, at, at);
+    }
+  })();
+  const adapter = fakeAdapter({ initial: [account.email], domains: ["mail.com"] });
+  const service = new MailcomAliasAutomationService({
+    db,
+    mailcom,
+    adapter,
+    randomBytesFn: randomSequence(),
+  });
+
+  await assert.rejects(
+    () => service.prepareAccount(account.id, { domain: "mail.com" }),
+    (error) => error.status === 409 && error.code === "MAILCOM_ALIAS_LIFETIME_QUOTA_EXHAUSTED",
+  );
+  assert.equal(adapter.state.validations.length, 0);
+  assert.equal(adapter.state.created.length, 0);
+  assert.equal(adapter.state.deleted.length, 0);
+});
+
+test("createReplacementAlias refuses an eleventh address without sending a create request", async (t) => {
+  const { db, mailcom, account } = context(t);
+  const aliases = Array.from({ length: 9 }, (_, index) => `full-${index}@mail.com`);
+  const adapter = fakeAdapter({
+    initial: [account.email, ...aliases],
+    domains: ["mail.com"],
+  });
+  const service = new MailcomAliasAutomationService({ db, mailcom, adapter });
+
+  await assert.rejects(
+    () => service.createReplacementAlias(account.id, {
+      domain: "mail.com",
+      replacementAddress: "eleventh@mail.com",
+    }),
+    (error) => error.status === 409 && error.code === "MAILCOM_ALIAS_REPLACEMENT_CAPACITY_FULL",
+  );
+  assert.equal(adapter.state.validations.length, 0);
+  assert.equal(adapter.state.created.length, 0);
+  assert.equal(adapter.state.deleted.length, 0);
+  assert.equal(db.prepare(`
+    SELECT COUNT(*) AS count FROM addresses
+    WHERE account_id = ? AND kind = 'official' AND status = 'active'
+  `).get(account.id).count, 9);
+});
+
+test("a fresh capacity check counts a legacy login primary and never races an eleventh create", async (t) => {
+  const { db, mailcom, account } = context(t, "mother@legacy-login.example");
+  const aliases = Array.from({ length: 8 }, (_, index) => `legacy-cap-${index}@mail.com`);
+  const adapter = fakeAdapter({ initial: [account.email, ...aliases], domains: ["mail.com"] });
+  const originalOpen = adapter.open.bind(adapter);
+  adapter.open = async (credentials) => {
+    const session = await originalOpen(credentials);
+    const originalList = session.listAddresses.bind(session);
+    let reads = 0;
+    session.listAddresses = async () => {
+      reads += 1;
+      if (reads === 2) adapter.state.remote.push("legacy-cap-race@mail.com");
+      return originalList();
+    };
+    return session;
+  };
+  const service = new MailcomAliasAutomationService({ db, mailcom, adapter });
+
+  await assert.rejects(
+    () => service.createReplacementAlias(account.id, {
+      domain: "mail.com",
+      replacementAddress: "legacy-eleventh@mail.com",
+    }),
+    (error) => error.code === "MAILCOM_ALIAS_REPLACEMENT_CAPACITY_FULL",
+  );
+  assert.equal(adapter.state.remote.length, 10);
+  assert.equal(adapter.state.created.length, 0);
+  assert.equal(adapter.state.deleted.length, 0);
+});
+
+test("createReplacementAlias at ten addresses deletes the supplied safe alias before creating its replacement", async (t) => {
+  const { db, mailcom, account } = context(t);
+  const removed = "safe-failed-slot@mail.com";
+  const aliases = [
+    removed,
+    ...Array.from({ length: 8 }, (_, index) => `full-safe-keep-${index}@mail.com`),
+  ];
+  importMailcomAliases(db, account, aliases);
+  const adapter = fakeAdapter({
+    initial: [account.email, ...aliases],
+    domains: ["mail.com"],
+  });
+  const service = new MailcomAliasAutomationService({ db, mailcom, adapter });
+  const replacement = "safe-primary-replacement@mail.com";
+
+  const result = await service.createReplacementAlias(account.id, {
+    domain: "mail.com",
+    replacementAddress: replacement,
+    recycleAddress: removed,
+  });
+
+  assert.equal(result.removed, removed);
+  assert.equal(result.created, replacement);
+  assert.deepEqual(adapter.state.mutations, [
+    `delete:${removed}`,
+    `create:${replacement}`,
+  ]);
+  assert.equal(adapter.state.remote.length, 10);
+  assert.equal(adapter.state.maxRemoteCount, 10);
+  assert.equal(adapter.state.remote.includes(removed), false);
+  assert.equal(adapter.state.remote.includes(replacement), true);
+  assert.deepEqual(
+    db.prepare(`
+      SELECT status, remote_confirmed FROM addresses
+      WHERE account_id = ? AND address = ? COLLATE NOCASE
+    `).get(account.id, removed),
+    { status: "disabled", remote_confirmed: 0 },
+  );
+  assert.equal(db.prepare(`
+    SELECT COUNT(*) AS count FROM addresses
+    WHERE account_id = ? AND status = 'active'
+      AND (kind = 'primary' OR (kind = 'official' AND strategy = ?))
+  `).get(account.id, MAILCOM_ALIAS_STRATEGY).count, 10);
+});
+
+test("a nine-address replacement retry adopts the created alias without deleting its safe candidate", async (t) => {
+  const { db, mailcom, account } = context(t);
+  const recycled = "safe-retry@mail.com";
+  const aliases = [
+    recycled,
+    ...Array.from({ length: 7 }, (_, index) => `safe-retry-keep-${index}@mail.com`),
+  ];
+  importMailcomAliases(db, account, aliases);
+  const adapter = fakeAdapter({ initial: [account.email, ...aliases], domains: ["mail.com"] });
+  const service = new MailcomAliasAutomationService({ db, mailcom, adapter });
+  const options = {
+    domain: "mail.com",
+    replacementAddress: "safe-retry-new@mail.com",
+    recycleAddress: recycled,
+  };
+
+  const first = await service.createReplacementAlias(account.id, options);
+  const second = await service.createReplacementAlias(account.id, options);
+
+  assert.equal(first.created, options.replacementAddress);
+  assert.equal(second.created, options.replacementAddress);
+  assert.equal(adapter.state.remote.length, 10);
+  assert.deepEqual(adapter.state.created.map((entry) => entry.address), [options.replacementAddress]);
+  assert.deepEqual(adapter.state.deleted, []);
+  assert.ok(adapter.state.remote.includes(recycled));
+});
+
+test("createReplacementAlias refuses a Plus recycle candidate before any remote mutation", async (t) => {
+  const { db, mailcom, account } = context(t);
+  const plusAlias = "protected-plus-slot@mail.com";
+  const aliases = [
+    plusAlias,
+    ...Array.from({ length: 8 }, (_, index) => `plus-safe-keep-${index}@mail.com`),
+  ];
+  importMailcomAliases(db, account, aliases);
+  const at = nowIso();
+  db.prepare(`
+    INSERT INTO registered_account_status_checks (
+      external_account_id, email, detection_status, subscription_status,
+      account_type, checked_at, created_at, updated_at
+    ) VALUES ('plus-fixture-account', ?, 'completed', 'active', 'plus', ?, ?, ?)
+  `).run(plusAlias, at, at, at);
+  const adapter = fakeAdapter({
+    initial: [account.email, ...aliases],
+    domains: ["mail.com"],
+  });
+  const service = new MailcomAliasAutomationService({ db, mailcom, adapter });
+
+  await assert.rejects(
+    () => service.createReplacementAlias(account.id, {
+      domain: "mail.com",
+      replacementAddress: "must-not-replace-plus@mail.com",
+      recycleAddress: plusAlias,
+    }),
+    (error) => error.status === 409
+      && error.code === "MAILCOM_ALIAS_REGISTERED_ACCOUNT_PROTECTED"
+      && /Plus/.test(error.message),
+  );
+
+  assert.equal(adapter.state.opens.length, 0);
+  assert.deepEqual(adapter.state.mutations, []);
+  assert.equal(adapter.state.remote.length, 10);
+  assert.equal(
+    db.prepare("SELECT status FROM addresses WHERE account_id = ? AND address = ? COLLATE NOCASE")
+      .get(account.id, plusAlias).status,
+    "active",
+  );
 });
 
 test("recycleAlias removes one remote alias and creates a confirmed replacement on the requested suffix", async (t) => {
@@ -689,6 +1229,35 @@ test("recycleAlias validates a stable replacement before deleting the old alias"
   assert.deepEqual(adapter.state.created, []);
   assert.equal(adapter.state.remote.includes(removed), true);
   assert.equal(adapter.state.closed, 1);
+  assert.deepEqual(
+    db.prepare("SELECT status, remote_confirmed FROM addresses WHERE account_id = ? AND address = ? COLLATE NOCASE")
+      .get(account.id, removed),
+    { status: "active", remote_confirmed: 1 },
+  );
+});
+
+test("recycleAlias creates first when a spare slot exists so create failure keeps the old alias", async (t) => {
+  const { db, mailcom, account } = context(t);
+  const removed = "keep-on-create-conflict@mail.com";
+  const aliases = [removed, "spare-keep-one@mail.com", "spare-keep-two@mail.com"];
+  importMailcomAliases(db, account, aliases);
+  const adapter = fakeAdapter({
+    initial: [account.email, ...aliases],
+    domains: ["mail.com", "email.com"],
+    failCreateAt: 1,
+  });
+  const service = new MailcomAliasAutomationService({ db, mailcom, adapter });
+
+  await assert.rejects(
+    () => service.recycleAlias(account.id, {
+      address: removed,
+      domain: "email.com",
+      replacementAddress: "spare-create-first@email.com",
+    }),
+    (error) => error.code === "MAILCOM_ALIAS_AUTOMATION_FAILED",
+  );
+  assert.deepEqual(adapter.state.deleted, []);
+  assert.equal(adapter.state.remote.includes(removed), true);
   assert.deepEqual(
     db.prepare("SELECT status, remote_confirmed FROM addresses WHERE account_id = ? AND address = ? COLLATE NOCASE")
       .get(account.id, removed),

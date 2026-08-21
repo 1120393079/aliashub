@@ -9,6 +9,7 @@ import {
   ChevronUp,
   CircleStop,
   Clock3,
+  Gift,
   Link2,
   LoaderCircle,
   MailPlus,
@@ -26,6 +27,16 @@ import { proxySelectLabel } from "./proxy-model.js";
 const activeStatuses = new Set(["queued", "running", "cancel_requested", "stopping"]);
 const terminalStatuses = new Set(["completed", "partial_failed", "failed", "cancelled", "stopped", "interrupted"]);
 const successfulAccountsPageSize = 12;
+const trialPipelineCountries = new Set(["JP", "GB", "US"]);
+const trialPipelineCurrencies = { JP: "JPY", GB: "GBP", US: "USD" };
+
+function preferredTrialPipelineCountry(...values) {
+  for (const value of values) {
+    const country = String(value || "").trim().toUpperCase();
+    if (trialPipelineCountries.has(country)) return country;
+  }
+  return "GB";
+}
 
 const statusLabels = {
   queued: "等待启动",
@@ -44,7 +55,7 @@ const stageLabels = {
   queued: "等待调度",
   preparation_queued: "等待汇总 mail.com 地址",
   preparing_accounts: "汇总并补建官方别名",
-  processing_parallel: "注册、提链、协议与轮换并行处理中",
+  processing_parallel: "注册、试用检测、提链、协议与轮换并行处理中",
   prepare_queued: "等待准备母号",
   prepare_running: "同步母号与官方别名",
   prepare_failed: "母号别名准备失败",
@@ -59,11 +70,20 @@ const stageLabels = {
   registration_retry_wait: "等待重试注册",
   registering: "注册账号",
   registered: "注册完成",
+  trial_check_queued: "等待检测 0 元试用资格",
+  trial_checking: "检测 0 元试用资格",
+  trial_runtime_retry_wait: "试用检测依赖恢复后重试",
+  trial_ineligible: "没有 0 元试用资格",
+  trial_account_not_found: "试用检测确认账号不存在",
+  trial_account_mismatch: "账号记录不匹配，已安全保留",
   link_queued: "等待提链",
   link_submitting: "提交提链任务",
   link_wait: "等待提链结果",
   link_retry_wait: "等待重试提链",
   link_runtime_retry_wait: "提链依赖恢复后重试",
+  link_blocked: "提链 blocked，等待账号页处理",
+  link_blocked_preserved: "blocked 账号仍在账号池，暂缓轮换",
+  link_blocked_released: "账号已删除，别名保护已释放",
   extracting_link: "提取 PayPal 链接",
   extracting_links: "提取 PayPal 链接",
   linked: "提链完成",
@@ -77,6 +97,10 @@ const stageLabels = {
   agreement_preserved: "协议成功账号已保留",
   agreement_failed: "自动协议授权失败",
   deleting_alias: "删除已结束的别名",
+  account_pool_delete_started: "正在删除账号池记录",
+  account_pool_delete_retry_wait: "等待重试删除账号池记录",
+  account_pool_deleted: "账号池记录已删除",
+  account_pool_delete_failed: "账号池记录删除失败",
   recycling: "轮换官方别名",
   recycle_retry_wait: "等待重试轮换别名",
   recycle_failed: "官方别名轮换失败",
@@ -86,10 +110,11 @@ const stageLabels = {
   recycle_cancelled: "官方别名轮换已取消",
   recycled: "官方别名已轮换",
   creating_alias: "补建官方别名",
-  succeeded: "注册、提链与协议授权完成",
+  succeeded: "试用检测、提链与协议授权完成",
   unavailable: "地址已被占用",
   registration_failed: "注册失败",
   link_failed: "提链失败",
+  account_not_found: "账号不存在",
   cancel_requested: "停止新任务并收尾",
   stopping: "停止新任务并收尾",
   completed: "流水线已结束",
@@ -297,6 +322,7 @@ function stageLabel(value) {
   if (stage.includes("alias") && (stage.includes("creat") || stage.includes("new"))) return "补建官方别名";
   if (stage.includes("alias") || stage.includes("address")) return "分配官方别名";
   if (stage.includes("agreement") || stage.includes("protocol") || stage.includes("authoriz")) return "自动协议授权";
+  if (stage.includes("trial")) return "检测 0 元试用资格";
   if (stage.includes("register")) return "注册账号";
   if (stage.includes("link") || stage.includes("extract")) return "提取 PayPal 链接";
   return stage;
@@ -339,6 +365,13 @@ function successfulAccountTime(value) {
   return formatDate(value);
 }
 
+function successfulAccountSourceLabel(item) {
+  if (String(item?.slot_kind || "").toLowerCase() !== "primary") return "官方别名";
+  const email = String(item?.email || "").trim().toLowerCase();
+  const sourceEmail = String(item?.source_email || "").trim().toLowerCase();
+  return email && sourceEmail && email !== sourceEmail ? "官方别名" : "母号地址";
+}
+
 function makeRequestId() {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
   return `mailcom-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
@@ -366,7 +399,10 @@ export default function MailcomRegistrationPipelineBar({
     browserMode: "headed",
     proxySelection: "auto",
   });
-  const [country, setCountry] = useState(paymentLinkCountry || paymentLinks?.country || "DE");
+  const [country, setCountry] = useState(() => preferredTrialPipelineCountry(
+    paymentLinkCountry,
+    paymentLinks?.country,
+  ));
   const [summary, setSummary] = useState(null);
   const [pipeline, setPipeline] = useState(null);
   const [stateLoaded, setStateLoaded] = useState(false);
@@ -471,10 +507,13 @@ export default function MailcomRegistrationPipelineBar({
     const result = new Map();
     for (const item of paymentLinks?.countries || []) {
       const code = String(item?.code || "").trim().toUpperCase();
-      if (code) result.set(code, { code, currency: String(item?.currency || "") });
+      if (trialPipelineCountries.has(code)) result.set(code, { code, currency: String(item?.currency || "") });
+    }
+    for (const code of trialPipelineCountries) {
+      if (!result.has(code)) result.set(code, { code, currency: trialPipelineCurrencies[code] });
     }
     const submittedCountry = pipeline?.payment_link_country || pipeline?.paymentLinkCountry;
-    const current = String(submittedCountry || country || paymentLinkCountry || paymentLinks?.country || "DE").trim().toUpperCase();
+    const current = String(submittedCountry || country || "GB").trim().toUpperCase();
     if (current && !result.has(current)) result.set(current, { code: current, currency: "" });
     return [...result.values()];
   }, [country, paymentLinkCountry, paymentLinks?.countries, paymentLinks?.country, pipeline?.payment_link_country, pipeline?.paymentLinkCountry]);
@@ -738,7 +777,7 @@ export default function MailcomRegistrationPipelineBar({
 
   useEffect(() => {
     if (pipelineActive) return;
-    const nextCountry = String(paymentLinkCountry || paymentLinks?.country || "DE").trim().toUpperCase();
+    const nextCountry = preferredTrialPipelineCountry(paymentLinkCountry, paymentLinks?.country);
     if (nextCountry) setCountry(nextCountry);
   }, [paymentLinkCountry, paymentLinks?.country, pipelineActive]);
 
@@ -769,7 +808,7 @@ export default function MailcomRegistrationPipelineBar({
 
   useEffect(() => {
     if (!pipelineActive) return;
-    const submittedCountry = String(pipeline?.payment_link_country || pipeline?.paymentLinkCountry || country || "DE").toUpperCase();
+    const submittedCountry = String(pipeline?.payment_link_country || pipeline?.paymentLinkCountry || country || "GB").toUpperCase();
     setForm((current) => ({
       ...current,
       domain: String(pipeline?.domain || current.domain || "").replace(/^@+/, "").toLowerCase(),
@@ -794,6 +833,8 @@ export default function MailcomRegistrationPipelineBar({
     : "";
   const fixedProxy = String(form.proxySelection || "").match(/^proxy:(\d+)$/);
   const proxyCount = options?.proxies?.length || 0;
+  const normalizedTrialCountry = String(country || "").trim().toUpperCase();
+  const trialRouteCandidateReady = normalizedTrialCountry === "US" || proxyCount > 0;
   const proxyInvalid = form.proxySelection === "auto" && !proxyCount
     ? "注册代理池为空，请改用直连"
     : fixedProxy && Number(fixedProxy[1]) >= proxyCount
@@ -843,6 +884,13 @@ export default function MailcomRegistrationPipelineBar({
     }] : []),
     { label: "母号/别名", ready: inventoryReady, title: `母号 ${counts.accountCount}，别名 ${counts.aliasCount}${counts.accountCount > 0 && counts.aliasCount < 1 ? "（启动后自动补建）" : ""}` },
     { label: "注册服务", ready: registrationReady },
+    {
+      label: "试用预检",
+      ready: trialRouteCandidateReady,
+      title: normalizedTrialCountry === "US"
+        ? "启动前验证 US 代理或服务器直连出口"
+        : `${normalizedTrialCountry || "所选国家"} 检测使用注册代理池（${proxyCount}）`,
+    },
     { label: "提链", ready: paymentLinkReady },
     {
       label: "自动协议授权",
@@ -864,6 +912,9 @@ export default function MailcomRegistrationPipelineBar({
     queuePaused ? "注册队列已暂停，请先恢复队列" : "",
     counts.accountCount < 1 ? "没有已连接的 mail.com 母号" : "",
     !registrationReady ? "注册服务未连接" : "",
+    !trialRouteCandidateReady
+      ? `${normalizedTrialCountry || "所选国家"} 试用资格检测需要对应国家的注册代理`
+      : "",
     !paymentLinkReady ? "PayPal 提链服务未配置" : "",
     !paymentAgreementRuntimeLoaded ? "正在检查自动协议授权运行配置" : "",
     paymentAgreementRuntime?.error ? `自动协议授权运行配置读取失败：${paymentAgreementRuntime.error}` : "",
@@ -889,7 +940,10 @@ export default function MailcomRegistrationPipelineBar({
     concurrencyError,
     linkAttemptsError,
     proxyInvalid,
-    !String(country || "").trim() ? "请选择提链国家" : "",
+    !String(country || "").trim() ? "请选择账单国家" : "",
+    String(country || "").trim() && !trialPipelineCountries.has(String(country).toUpperCase())
+      ? "Mail.com 流水线仅支持 JP、GB 或 US 试用预检国家"
+      : "",
     dependencyError ? String(dependencyError) : "",
     summary?.ready === false && !recoveryActive ? "mail.com 无限流水线服务尚未就绪" : "",
   ].filter(Boolean);
@@ -925,7 +979,7 @@ export default function MailcomRegistrationPipelineBar({
       if (nextPipeline) setPipeline(nextPipeline);
       else await loadState({ quiet: true });
       pendingStartRequest.current = { key: "", id: "" };
-      toast("mail.com 无限注册、提链与自动协议授权流水线已启动");
+      toast("mail.com 无限注册、试用筛选、提链与自动协议授权流水线已启动");
     } catch (error) {
       const existing = selectPipeline(error?.details);
       if (existing) setPipeline(existing);
@@ -958,7 +1012,7 @@ export default function MailcomRegistrationPipelineBar({
 
   const cancel = async () => {
     if (!pipeline?.id || !pipelineActive || pipeline?.cancellable === false || cancelBusy.current) return;
-    if (!window.confirm("确定停止 mail.com 无限注册、提链与自动协议授权流水线吗？已汇总的结果会保留。")) return;
+    if (!window.confirm("确定停止 mail.com 无限注册、试用筛选、提链与自动协议授权流水线吗？已汇总的结果会保留。")) return;
     cancelBusy.current = true;
     setCancelling(true);
     setActionError("");
@@ -1005,6 +1059,7 @@ export default function MailcomRegistrationPipelineBar({
     const definitions = [
       ["preparation", "母号准备", MailPlus],
       ["registration", "注册", UserCheck],
+      ["trial", "试用检测", Gift],
       ["link", "提链", Link2],
       ["agreement", "协议授权", ShieldCheck],
       ["recycle", "别名轮换", RefreshCw],
@@ -1023,7 +1078,9 @@ export default function MailcomRegistrationPipelineBar({
         running,
         retrying,
         succeeded: number("succeeded"),
+        ineligible: number("ineligible"),
         failed: number("failed"),
+        skipped: number("skipped"),
         uncertain: number("uncertain"),
         preserved: number("preserved"),
         total: number("total"),
@@ -1123,7 +1180,7 @@ export default function MailcomRegistrationPipelineBar({
         <span className="mc-pipeline-icon"><MailPlus size={19} /></span>
         <div>
           <h2>mail.com 无限注册提链与协议授权流水线</h2>
-          <p>汇总全部母号与官方别名；注册 → PayPal 提链 → 自动协议授权，失败自动轮换，结果统一保留</p>
+          <p>协议快速筛试用；无试用直接清理补建，有试用才提链；blocked 暂留，账号页删除后释放别名</p>
         </div>
         <StatusBadge status={badgeStatus}>{badgeLabel}</StatusBadge>
         <div className="mc-pipeline-heading-actions">
@@ -1137,7 +1194,7 @@ export default function MailcomRegistrationPipelineBar({
             disabled={pipelineActive ? !canStop : blockers.length > 0}
             title={pipelineActive ? (canStop ? "停止当前无限流水线" : "流水线正在停止或当前不可取消") : (blockers[0] || "")}
             onClick={pipelineActive ? cancel : start}
-          >{pipelineActive ? (status === "cancel_requested" || status === "stopping" ? "停止中" : "停止") : "启动无限注册、提链并授权"}</Button>
+          >{pipelineActive ? (status === "cancel_requested" || status === "stopping" ? "停止中" : "停止") : "启动无限注册、筛试用、提链并授权"}</Button>
           <Button
             className="mc-pipeline-collapse-toggle"
             size="sm"
@@ -1185,7 +1242,7 @@ export default function MailcomRegistrationPipelineBar({
               ))}
             </select>
           </FormField>
-          <FormField label="提链国家">
+          <FormField label="试用检测 / 账单国家" hint="仅 JP、GB、US；先检测 0 元资格">
             <select value={country} disabled={pipelineActive} onChange={(event) => {
               const value = event.target.value;
               setCountry(value);
@@ -1198,7 +1255,7 @@ export default function MailcomRegistrationPipelineBar({
 
         <div className="mc-pipeline-cycle-toggle is-preserve">
           <ShieldCheck size={14} />
-          <span>协议授权成功账号永久保留；仅失败的官方别名删除并轮换</span>
+          <span>注册成功后并发走 HTTP 协议检测试用；无试用直接清理补建；blocked 暂留供检测，从已注册账号删除后自动释放别名槽</span>
         </div>
 
         <div className="mc-pipeline-readiness" aria-label="mail.com 流水线配置检查">
@@ -1244,8 +1301,8 @@ export default function MailcomRegistrationPipelineBar({
       {pipeline && <div className="mc-pipeline-activity" aria-live="polite">
         <div className="mc-pipeline-activity-heading">
           {pipelineActive ? <LoaderCircle className="spin" size={17} /> : status === "completed" ? <CheckCircle2 size={17} /> : pipelineFailure ? <AlertTriangle size={17} /> : <CircleStop size={17} />}
-          <span><b>{pipelineActive ? "五阶段流水线并行处理中" : stageLabel(pipeline.stage || status)}</b><small>{preparationActive
-            ? `每个母号处理完成后立即进入注册、提链和协议授权；母号已处理 ${preparation.processed} / ${preparation.total}（成功 ${preparation.succeeded}，失败 ${preparation.failed}）。${activityMessage}`
+          <span><b>{pipelineActive ? "六阶段流水线并行处理中" : stageLabel(pipeline.stage || status)}</b><small>{preparationActive
+            ? `每个母号处理完成后进入注册和试用检测；有试用才提链并协议授权。母号已处理 ${preparation.processed} / ${preparation.total}（成功 ${preparation.succeeded}，失败 ${preparation.failed}）。${activityMessage}`
             : activityMessage}</small></span>
           <strong>{pipelineActive
             ? (String(pipeline.domain || "").replace(/^@+/, "").toLowerCase() === "random"
@@ -1253,7 +1310,7 @@ export default function MailcomRegistrationPipelineBar({
               : (pipeline.domain ? `@${String(pipeline.domain).replace(/^@+/, "")}` : "持续运行"))
             : (statusLabels[status] || "已结束")}</strong>
         </div>
-        <div className="mc-pipeline-phases" aria-label="流水线五阶段实时状态">
+        <div className="mc-pipeline-phases" aria-label="流水线六阶段实时状态">
           {phaseCards.map((phase) => {
             const PhaseIcon = phase.icon;
             return <article className={phase.active ? "is-active" : ""} key={phase.key}>
@@ -1262,20 +1319,22 @@ export default function MailcomRegistrationPipelineBar({
               <span><small>进行</small><b>{phase.running}</b></span>
               <span><small>重试</small><b>{phase.retrying}</b></span>
               <footer>
-                <span>成功 <b>{phase.succeeded}</b></span>
-                <span>失败 <b>{phase.failed}</b></span>
+                <span>{phase.key === "trial" ? "有试用" : phase.key === "registration" ? "本轮成功" : "成功"} <b>{phase.succeeded}</b></span>
+                {phase.key === "trial" && <span>无试用 <b>{phase.ineligible}</b></span>}
+                <span>{phase.key === "trial" ? "检测失败" : "失败"} <b>{phase.failed}</b></span>
                 {phase.uncertain > 0 && <span>待确认 <b>{phase.uncertain}</b></span>}
                 {phase.preserved > 0 && <span>已保留 <b>{phase.preserved}</b></span>}
+                {phase.key === "trial" && phase.skipped > 0 && <span>注册未完成/未检测 <b>{phase.skipped}</b></span>}
               </footer>
             </article>;
           })}
         </div>
-        <small className="mc-pipeline-count-note">等待 / 进行 / 重试表示当前地址槽；成功率只统计注册阶段已出结果的尝试，不含仍在处理的地址。注册成功会立即提链，提链成功会立即自动协议授权。</small>
+        <small className="mc-pipeline-count-note">等待 / 进行 / 重试表示当前地址槽；注册完成后使用并发 HTTP 协议检测试用，仅 eligible 才提链；blocked 仅在账号仍位于账号池时暂缓轮换，从已注册账号删除后会自动释放并补建别名；母号地址本身始终保留，单槽失败不会阻断其他母号。</small>
         <div className="mc-pipeline-stats">
           {preparation.total > 0 && <span title={`成功 ${preparation.succeeded}，失败 ${preparation.failed}`}><MailPlus size={13} />母号处理 <b>{preparation.processed} / {preparation.total}</b></span>}
           <span><Activity size={13} />尝试 <b>{attemptCount}</b></span>
-          <span><UserCheck size={13} />注册成功 <b>{registrationSuccessCount}</b></span>
-          <span title="成功 ÷（成功 + 失败）；不含等待、进行和重试"><Activity size={13} />注册成功率 <b>{registrationSuccessRate === null ? "—" : `${registrationSuccessRate}%`}</b></span>
+          <span title="仅统计本流水线本轮实际完成的注册，不包含历史流水线任务"><UserCheck size={13} />本轮注册成功 <b>{registrationSuccessCount}</b></span>
+          <span title="本轮成功 ÷（本轮成功 + 本轮失败）；不含等待、进行和重试"><Activity size={13} />本轮注册成功率 <b>{registrationSuccessRate === null ? "—" : `${registrationSuccessRate}%`}</b></span>
           <button
             type="button"
             className="mc-pipeline-stat-action"
@@ -1287,7 +1346,7 @@ export default function MailcomRegistrationPipelineBar({
           <span><Cable size={13} />协议中 <b>{agreementActiveCount}</b></span>
           <span><ShieldCheck size={13} />协议成功 <b>{agreementSuccessCount}</b></span>
           <span><AlertTriangle size={13} />协议失败 <b>{agreementFailureCount}</b></span>
-          <span title="包含注册、提链和协议阶段保留的历史失败尝试"><AlertTriangle size={13} />累计失败尝试 <b>{failureCount}</b></span>
+          <span title="包含注册、试用检测、提链和协议阶段保留的历史失败尝试"><AlertTriangle size={13} />累计失败尝试 <b>{failureCount}</b></span>
           <span><Trash2 size={13} />已删/轮换 <b>{recycledCount}</b></span>
           <span><AtSign size={13} />已补建 <b>{createdAliasCount}</b></span>
         </div>
@@ -1329,7 +1388,7 @@ export default function MailcomRegistrationPipelineBar({
             {successfulAccounts.items.map((item, index) => {
               const agreement = agreementPresentation(item);
               const agreementStatus = String(item.agreement_status || "").toLowerCase();
-              const sourceLabel = item.slot_kind === "primary" ? "母号地址" : "官方别名";
+              const sourceLabel = successfulAccountSourceLabel(item);
               return <article className={agreement.badge === "failed" ? "is-failed" : ""} key={successfulAccountKey(item, index)}>
                 <header>
                   <span className="mc-successful-account-icon"><UserCheck size={17} /></span>
@@ -1341,7 +1400,7 @@ export default function MailcomRegistrationPipelineBar({
                 </header>
                 <dl>
                   <div><dt>注册账号</dt><dd title={String(item.external_account_id || "")}>{item.external_account_id ? `#${item.external_account_id}` : "未记录"}</dd></div>
-                  <div><dt>提链国家</dt><dd>{item.payment_link_country || "-"}</dd></div>
+                  <div><dt>账单国家</dt><dd>{item.payment_link_country || "-"}</dd></div>
                   <div><dt>协议国家</dt><dd>{agreementStatus === "skipped" ? "历史未授权" : (item.agreement_country || "-")}</dd></div>
                   <div><dt>协议任务</dt><dd title={item.agreement_job_id || ""}>{item.agreement_job_id || "-"}</dd></div>
                   <div><dt>注册完成</dt><dd>{successfulAccountTime(item.registration_finished_at)}</dd></div>

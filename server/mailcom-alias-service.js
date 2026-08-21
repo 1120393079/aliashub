@@ -7,8 +7,8 @@ import {
 } from "./address-generator.js";
 import { audit } from "./db.js";
 
-const MAILCOM_ADDRESS_LIMIT = 10;
-// Mail.com counts the primary address plus 99 created aliases toward its lifetime quota.
+const MAILCOM_PREPARED_ADDRESS_TARGET = 10;
+// Mail.com counts every created official alias, including aliases deleted later.
 const MAILCOM_ALIAS_HISTORY_LIMIT = 99;
 const DEFAULT_VALIDATION_ATTEMPTS = 40;
 const DEFAULT_CONFIRMATION_ATTEMPTS = 10;
@@ -129,18 +129,60 @@ function safeMessage(error, secrets = []) {
   return message.replace(/Bearer\s+[A-Za-z0-9._~+\-/]+=*/gi, "Bearer [REDACTED]").slice(0, 300);
 }
 
+function safeUpstreamFailureValue(value, secrets = []) {
+  if (value === undefined || value === null) return "";
+  return safeMessage({ message: String(value) }, secrets)
+    .replace(/((?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|(?:auth|id|csrf)?[_ -]?token|cookie|password|pass|secret|authorization|session(?:[_ -]?id)?)['"]?\s*[:=]\s*['"]?)(?:Bearer\s+)?[^\s'",;}]+/gi, "$1[REDACTED]")
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,63}\b/gi, "[REDACTED_EMAIL]")
+    .slice(0, 160);
+}
+
+function preserveUpstreamFailure(target, source, secrets = []) {
+  const upstreamStatus = Number(source?.upstream_status);
+  if (Number.isSafeInteger(upstreamStatus) && upstreamStatus >= 100 && upstreamStatus <= 599) {
+    target.upstream_status = upstreamStatus;
+  }
+  for (const field of ["code", "reason", "message"]) {
+    const safe = safeUpstreamFailureValue(source?.[`upstream_${field}`], secrets);
+    if (safe) target[`upstream_${field}`] = safe;
+  }
+  const requestId = String(source?.upstream_request_id || "").trim();
+  if (requestId.length <= 64
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId)) {
+    target.upstream_request_id = requestId;
+  }
+  return target;
+}
+
+function upstreamFailureAuditMetadata(error) {
+  const metadata = {};
+  for (const field of ["status", "code", "reason", "message", "request_id"]) {
+    const value = error?.[`upstream_${field}`];
+    if (value !== undefined && value !== "") metadata[`upstream_${field}`] = value;
+  }
+  return metadata;
+}
+
 function mappedFailure(error, secrets = []) {
+  let mapped;
   if (String(error?.code || "").startsWith("MAILCOM_")) {
-    return failure(safeMessage(error, secrets), Number(error?.status) || 502, error.code);
+    mapped = failure(safeMessage(error, secrets), Number(error?.status) || 502, error.code);
+  } else {
+    const code = String(error?.code || "").toUpperCase();
+    if (["ETIMEDOUT", "ESOCKETTIMEDOUT", "TIMEOUT"].includes(code)) {
+      mapped = failure("连接 Mail.com 超时，请稍后重试", 504, "MAILCOM_ALIAS_TIMEOUT");
+    } else if (["ECONNREFUSED", "ECONNRESET", "EAI_AGAIN", "ENETUNREACH", "ENOTFOUND"].includes(code)) {
+      mapped = failure("Mail.com 暂时无法连接，请稍后重试", 503, "MAILCOM_ALIAS_UNAVAILABLE");
+    } else {
+      mapped = failure(safeMessage(error, secrets), Number(error?.status) || 502, "MAILCOM_ALIAS_AUTOMATION_FAILED");
+    }
   }
-  const code = String(error?.code || "").toUpperCase();
-  if (["ETIMEDOUT", "ESOCKETTIMEDOUT", "TIMEOUT"].includes(code)) {
-    return failure("连接 Mail.com 超时，请稍后重试", 504, "MAILCOM_ALIAS_TIMEOUT");
+  preserveUpstreamFailure(mapped, error, secrets);
+  for (const key of ["stage", "requestId", "attempts"]) {
+    if (error?.[key] !== undefined) mapped[key] = error[key];
   }
-  if (["ECONNREFUSED", "ECONNRESET", "EAI_AGAIN", "ENETUNREACH", "ENOTFOUND"].includes(code)) {
-    return failure("Mail.com 暂时无法连接，请稍后重试", 503, "MAILCOM_ALIAS_UNAVAILABLE");
-  }
-  return failure(safeMessage(error, secrets), Number(error?.status) || 502, "MAILCOM_ALIAS_AUTOMATION_FAILED");
+  if (error?.retryable !== undefined) mapped.retryable = Boolean(error.retryable);
+  return mapped;
 }
 
 function generatedLocalPart(randomBytesFn) {
@@ -276,6 +318,114 @@ export class MailcomAliasAutomationService {
     `).get(normalized));
   }
 
+  hasPlusRegisteredAccount(address) {
+    const normalized = String(address || "").trim().toLowerCase();
+    if (!normalized) return false;
+    // A Plus result can be persisted against the external account id while the
+    // pipeline attempt only carries the mailbox address.  Check both forms so
+    // a stale/restarted pipeline cannot accidentally recycle a Plus mailbox.
+    try {
+      return Boolean(this.db.prepare(`
+        SELECT 1
+        FROM registered_account_status_checks AS checks
+        WHERE (
+          checks.email = ? COLLATE NOCASE
+          OR EXISTS (
+            SELECT 1
+            FROM mailcom_registration_pipeline_attempts AS attempts
+            WHERE attempts.email = ? COLLATE NOCASE
+              AND trim(attempts.external_account_id) <> ''
+              AND attempts.external_account_id = checks.external_account_id
+          )
+        )
+          AND (
+            lower(checks.account_type) = 'plus'
+            OR lower(checks.account_type_raw) LIKE '%plus%'
+            OR lower(checks.subscription_status) IN ('active', 'subscribed')
+          )
+        LIMIT 1
+      `).get(normalized, normalized));
+    } catch (error) {
+      throw failure(
+        "无法确认 Mail.com 邮箱是否对应 Plus 账号，已停止删除",
+        503,
+        "MAILCOM_ALIAS_PROTECTION_CHECK_FAILED",
+        { cause: error },
+      );
+    }
+  }
+
+  hasBlockedRegisteredAccount(address) {
+    const normalized = String(address || "").trim().toLowerCase();
+    if (!normalized) return false;
+    try {
+      return Boolean(this.db.prepare(`
+        SELECT 1
+        FROM mailcom_registration_pipeline_attempts
+        WHERE email = ? COLLATE NOCASE
+          AND outcome = 'link_blocked'
+          AND trim(external_account_id) <> ''
+          AND stage <> 'link_blocked_released'
+        LIMIT 1
+      `).get(normalized));
+    } catch (error) {
+      throw failure(
+        "无法确认 Mail.com 邮箱是否对应 blocked 账号，已停止删除",
+        503,
+        "MAILCOM_ALIAS_PROTECTION_CHECK_FAILED",
+        { cause: error },
+      );
+    }
+  }
+
+  hasLinkedOrUncertainRegisteredAccount(address) {
+    const normalized = String(address || "").trim().toLowerCase();
+    if (!normalized) return false;
+    try {
+      return Boolean(this.db.prepare(`
+        SELECT 1
+        FROM mailcom_registration_pipeline_attempts
+        WHERE email = ? COLLATE NOCASE
+          AND (
+            link_status = 'succeeded'
+            OR agreement_status IN ('succeeded', 'uncertain')
+          )
+        LIMIT 1
+      `).get(normalized));
+    } catch (error) {
+      throw failure(
+        "无法确认 Mail.com 邮箱的提链或协议保护状态，已停止删除",
+        503,
+        "MAILCOM_ALIAS_PROTECTION_CHECK_FAILED",
+        { cause: error },
+      );
+    }
+  }
+
+  assertPipelineAccountNotProtected(address) {
+    if (this.hasPlusRegisteredAccount(address)) {
+      throw failure(
+        "这个 Mail.com 邮箱对应 Plus 账号，禁止自动删除或轮换",
+        409,
+        "MAILCOM_ALIAS_REGISTERED_ACCOUNT_PROTECTED",
+      );
+    }
+    if (this.hasBlockedRegisteredAccount(address)) {
+      throw failure(
+        "这个 Mail.com 邮箱对应 blocked 账号，必须由用户手动删除后才能释放",
+        409,
+        "MAILCOM_ALIAS_REGISTERED_ACCOUNT_PROTECTED",
+      );
+    }
+    if (this.hasLinkedOrUncertainRegisteredAccount(address)) {
+      throw failure(
+        "这个 Mail.com 邮箱已经提链或协议结果尚未确认，禁止自动删除或轮换",
+        409,
+        "MAILCOM_ALIAS_REGISTERED_ACCOUNT_PROTECTED",
+      );
+    }
+  }
+
   assertAgreementNotProtected(address) {
     if (!this.hasSuccessfulAgreement(address)) return;
     throw failure(
@@ -288,6 +438,7 @@ export class MailcomAliasAutomationService {
   async assertStaleAliasesRemovable(stale) {
     if (!stale.length) return;
     stale.forEach((item) => this.assertAgreementNotProtected(item.address));
+    stale.forEach((item) => this.assertPipelineAccountNotProtected(item.address));
     if (stale.some((item) => this.hasActiveRegistration(item))) {
       throw failure(
         "本地 Mail.com 别名与官网不一致，其中有地址正在注册，无法安全同步",
@@ -338,8 +489,9 @@ export class MailcomAliasAutomationService {
     }
   }
 
-  async assertAliasRemovable(item) {
+  assertAliasRemovableImmediately(item) {
     this.assertAgreementNotProtected(item.address);
+    this.assertPipelineAccountNotProtected(item.address);
     if (this.hasActiveRegistration(item)) {
       throw failure(
         "这个 Mail.com 别名正在注册，无法轮换",
@@ -355,6 +507,11 @@ export class MailcomAliasAutomationService {
         "MAILCOM_ALIAS_RECYCLE_PROTECTED",
       );
     }
+    return publishingBefore;
+  }
+
+  async assertAliasRemovable(item) {
+    const publishingBefore = this.assertAliasRemovableImmediately(item);
     if (this.pickup?.registrationProtectionEnabled?.()) {
       const inventory = await this.pickup.listStatuses();
       if (this.pickupPublishingChanged(item.address, publishingBefore)) {
@@ -375,13 +532,7 @@ export class MailcomAliasAutomationService {
         );
       }
     }
-    if (this.hasActiveRegistration(item)) {
-      throw failure(
-        "这个 Mail.com 别名在检查期间开始注册，请稍后重试",
-        409,
-        "MAILCOM_ALIAS_RECYCLE_PROTECTED",
-      );
-    }
+    this.assertAliasRemovableImmediately(item);
   }
 
   assertRemoteAliasRemovable(record) {
@@ -393,6 +544,21 @@ export class MailcomAliasAutomationService {
     );
   }
 
+  assertRemoteCreationSlot(addresses, candidateAddress = "") {
+    const entries = Array.isArray(addresses) ? addresses : collection(addresses);
+    const current = [...new Set(entries
+      .map((entry) => remoteAddressValue(entry, normalizeMailcomLoginEmail))
+      .filter(Boolean))];
+    const candidate = normalizeMailcomLoginEmail(candidateAddress);
+    if (candidate && current.includes(candidate)) return false;
+    if (current.length < MAILCOM_PREPARED_ADDRESS_TARGET) return true;
+    throw failure(
+      `Mail.com 当前已有 ${current.length} 个地址，拒绝创建第 ${current.length + 1} 个地址`,
+      409,
+      "MAILCOM_ALIAS_REPLACEMENT_CAPACITY_FULL",
+    );
+  }
+
   async syncAliases(account, remoteAddresses, purpose = "Mail.com 官网自动创建") {
     const primary = account.email.toLowerCase();
     const aliases = normalizeRemoteMailcomAddresses(remoteAddresses).filter((address) => address !== primary);
@@ -400,7 +566,11 @@ export class MailcomAliasAutomationService {
     const stale = this.localActiveAliases(account.id)
       .filter((item) => !remote.has(String(item.address || "").toLowerCase()));
     await this.assertStaleAliasesRemovable(stale);
-    const items = importMailcomAliases(this.db, account, aliases, { replace: true, purpose });
+    const items = importMailcomAliases(this.db, account, aliases, {
+      replace: true,
+      purpose,
+      trustedRemoteSync: true,
+    });
     if (stale.length) {
       audit(this.db, account.id, "alias", "清理过期 Mail.com 本地别名映射", `官网未包含的 ${stale.length} 个本地映射已停用`, {
         removed: stale.length,
@@ -527,7 +697,7 @@ export class MailcomAliasAutomationService {
 
   resultPayload({ status, existing, created, remote, items, account, domains = [], domain = "" }) {
     const total = remote.length;
-    const remaining = Math.max(0, MAILCOM_ADDRESS_LIMIT - total);
+    const remaining = Math.max(0, MAILCOM_PREPARED_ADDRESS_TARGET - total);
     return {
       status,
       existing,
@@ -545,7 +715,7 @@ export class MailcomAliasAutomationService {
         aliases: Math.max(0, total - 1),
         total,
         remaining,
-        limit: MAILCOM_ADDRESS_LIMIT,
+        target: MAILCOM_PREPARED_ADDRESS_TARGET,
       },
       domains,
       domain,
@@ -555,6 +725,11 @@ export class MailcomAliasAutomationService {
   async autoCreate(accountId, options = {}) {
     const account = this.account(accountId);
     return this.withAccountLock(account, () => this.run(account, { domain: options?.domain }));
+  }
+
+  async createReplacementAlias(accountId, options = {}) {
+    const account = this.account(accountId);
+    return this.withAccountLock(account, () => this.runCreateReplacement(account, options || {}));
   }
 
   async prepareAccount(accountId, options = {}) {
@@ -575,6 +750,11 @@ export class MailcomAliasAutomationService {
   async verifyAuthorization(accountId) {
     const account = this.account(accountId);
     return this.withAccountLock(account, () => this.runAuthorizationVerification(account));
+  }
+
+  async reconcileAccount(accountId, options = {}) {
+    const account = this.account(accountId);
+    return this.withAccountLock(account, () => this.runReconciliation(account, options || {}));
   }
 
   async runAuthorizationVerification(account) {
@@ -628,6 +808,62 @@ export class MailcomAliasAutomationService {
     }
   }
 
+  async runReconciliation(account, { purpose = "Mail.com 官网状态恢复" } = {}) {
+    let session;
+    let credentials;
+    try {
+      if (typeof this.mailcom.credentials !== "function") {
+        throw failure(
+          "这个邮箱还没有配置可用于网页登录的 Mail.com 密码",
+          409,
+          "MAILCOM_CREDENTIAL_REQUIRED",
+        );
+      }
+      credentials = this.mailcom.credentials(account);
+      session = await this.adapter.open({
+        username: credentials.username,
+        password: credentials.password,
+        accountId: account.id,
+      });
+      if (!session || typeof session.listAddresses !== "function") {
+        throw failure("Mail.com 官网状态恢复适配器不可用", 503, "MAILCOM_ALIAS_ADAPTER_UNAVAILABLE");
+      }
+      const addresses = await this.confirmedRemoteAddresses(session, "", account.email);
+      if (!addresses.includes(account.email.toLowerCase())) {
+        throw failure(
+          "Mail.com 网页登录账号与当前母号不一致",
+          409,
+          "MAILCOM_ALIAS_ACCOUNT_MISMATCH",
+        );
+      }
+      const synced = await this.syncAliases(account, addresses, purpose);
+      audit(this.db, account.id, "alias", "恢复同步 Mail.com 官网地址", `官网共有 ${addresses.length} 个地址`, {
+        remote_count: addresses.length,
+      });
+      return {
+        account: publicAccount(this.db, this.account(account.id)),
+        addresses,
+        items: synced.items,
+        remote_count: addresses.length,
+      };
+    } catch (error) {
+      const mapped = mappedFailure(error, [credentials?.password]);
+      mapped.mutation_phase = "reconcile_reading";
+      mapped.remote_mutation_possible = false;
+      throw mapped;
+    } finally {
+      try {
+        await session?.close?.();
+      } catch {
+        // Closing an in-memory browser session must not replace the reconciliation result.
+      }
+      if (credentials) {
+        credentials.password = "";
+        credentials.username = "";
+      }
+    }
+  }
+
   async run(account, { domain = "", requireDomain = false } = {}) {
     let session;
     let credentials;
@@ -636,9 +872,12 @@ export class MailcomAliasAutomationService {
     let initialRemote = new Set();
     let initialRemoteKnown = false;
     let synced = { aliases: [], items: [] };
+    let remoteMutationPossible = false;
+    let remoteStateReconciled = false;
+    let mutationPhase = "before_remote_mutation";
     const randomDomainMode = randomDomainRequested(domain);
     audit(this.db, account.id, "alias", "开始自动创建 Mail.com 官方别名", "将官网地址补足到 10 个", {
-      target_address_count: MAILCOM_ADDRESS_LIMIT,
+      target_address_count: MAILCOM_PREPARED_ADDRESS_TARGET,
     });
     try {
       if (typeof this.mailcom.credentials !== "function") {
@@ -675,12 +914,12 @@ export class MailcomAliasAutomationService {
       const existingCount = synced.aliases.length;
       let remoteDomains = [];
       let domains = [];
-      if (latestRemote.length < MAILCOM_ADDRESS_LIMIT || requireDomain || domain) {
+      if (latestRemote.length < MAILCOM_PREPARED_ADDRESS_TARGET || requireDomain || domain) {
         remoteDomains = this.activeDomains(await session.listDomains());
         domains = this.creationDomains(account, remoteDomains, domain, { required: requireDomain });
       }
-      if (latestRemote.length >= MAILCOM_ADDRESS_LIMIT) {
-        audit(this.db, account.id, "alias", "Mail.com 官方别名已满", `官网已有 ${latestRemote.length} 个地址`, {
+      if (latestRemote.length >= MAILCOM_PREPARED_ADDRESS_TARGET) {
+        audit(this.db, account.id, "alias", "Mail.com 预备地址已达到目标", `官网已有 ${latestRemote.length} 个地址`, {
           remote_count: latestRemote.length,
           created_count: 0,
         });
@@ -697,15 +936,29 @@ export class MailcomAliasAutomationService {
       }
 
       const occupied = new Set(latestRemote);
-      const required = MAILCOM_ADDRESS_LIMIT - latestRemote.length;
+      const required = MAILCOM_PREPARED_ADDRESS_TARGET - latestRemote.length;
 
       for (let index = 0; index < required; index += 1) {
         this.assertAliasCreationAvailable(account.id);
         const candidate = await this.availableCandidate(session, domains, occupied, {
           randomizeDomains: randomDomainMode,
         });
+        latestRemote = await this.confirmedRemoteAddresses(session, "", account.email);
+        synced = await this.syncAliases(account, latestRemote);
+        if (latestRemote.includes(candidate.address)) {
+          occupied.add(candidate.address);
+          if (latestRemote.length >= MAILCOM_PREPARED_ADDRESS_TARGET) break;
+          continue;
+        }
+        if (latestRemote.length >= MAILCOM_PREPARED_ADDRESS_TARGET) break;
+        this.assertRemoteCreationSlot(latestRemote, candidate.address);
+        mutationPhase = "create_submitting";
+        remoteMutationPossible = true;
         await session.createAlias(candidate);
+        mutationPhase = "create_confirming";
         latestRemote = await this.confirmedRemoteAddresses(session, candidate.address, account.email);
+        mutationPhase = "create_confirmed";
+        remoteMutationPossible = false;
         occupied.add(candidate.address);
         created.push(candidate.address);
         synced = await this.syncAliases(account, latestRemote);
@@ -713,7 +966,7 @@ export class MailcomAliasAutomationService {
           created_count: created.length,
           remote_count: latestRemote.length,
         });
-        if (latestRemote.length >= MAILCOM_ADDRESS_LIMIT) break;
+        if (latestRemote.length >= MAILCOM_PREPARED_ADDRESS_TARGET) break;
       }
 
       const finalSync = await this.syncAliases(account, latestRemote);
@@ -737,12 +990,16 @@ export class MailcomAliasAutomationService {
           latestRemote = await this.confirmedRemoteAddresses(session, "", account.email);
           if (latestRemote.includes(account.email.toLowerCase())) {
             synced = await this.syncAliases(account, latestRemote);
+            remoteStateReconciled = true;
           }
         } catch {
           // Each confirmed alias is synchronized above; final reconciliation is best effort.
         }
       }
       const mapped = mappedFailure(error, [credentials?.password]);
+      mapped.mutation_phase = mutationPhase;
+      mapped.remote_mutation_possible = remoteMutationPossible;
+      mapped.remote_state_reconciled = remoteStateReconciled;
       const primary = account.email.toLowerCase();
       const confirmedCreated = [...new Set([
         ...created,
@@ -763,6 +1020,216 @@ export class MailcomAliasAutomationService {
         code: mapped.code,
         created_count: confirmedCreated.length,
         remote_count: latestRemote.length,
+        ...upstreamFailureAuditMetadata(mapped),
+      });
+      throw mapped;
+    } finally {
+      try {
+        await session?.close?.();
+      } catch {
+        // Closing an in-memory browser session must not replace the operation result.
+      }
+      if (credentials) {
+        credentials.password = "";
+        credentials.username = "";
+      }
+    }
+  }
+
+  async runCreateReplacement(account, {
+    replacementAddress,
+    domain,
+    recycleAddress,
+    deletableAddress,
+  } = {}) {
+    let session;
+    let credentials;
+    let candidate = null;
+    let latestRemote = [];
+    let synced = { aliases: [], items: [] };
+    let createdRemotely = false;
+    let remoteMutationPossible = false;
+    let remoteStateReconciled = false;
+    let mutationPhase = "before_remote_mutation";
+    try {
+      const suppliedReplacement = String(replacementAddress || "").trim();
+      if (!suppliedReplacement) {
+        throw failure(
+          "请指定稳定的 Mail.com replacementAddress",
+          400,
+          "MAILCOM_ALIAS_REPLACEMENT_REQUIRED",
+        );
+      }
+      const rawDomain = String(domain || "").trim();
+      if (!rawDomain) {
+        throw failure("请指定 Mail.com 别名域名后缀", 400, "MAILCOM_ALIAS_DOMAIN_REQUIRED");
+      }
+      const normalizedReplacement = normalizeMailcomEmail(suppliedReplacement);
+      const replacementDomain = normalizedReplacement?.split("@")[1] || "";
+      const requestedDomain = normalizeRequestedDomain(rawDomain);
+      const randomDomainMode = randomDomainRequested(rawDomain);
+      if (!normalizedReplacement
+        || (!randomDomainMode && (!requestedDomain || replacementDomain !== requestedDomain))
+        || normalizedReplacement === account.email.toLowerCase()) {
+        throw failure(
+          "稳定替代地址无效、不能是母号，且其域名后缀必须与指定 domain 一致",
+          400,
+          "MAILCOM_ALIAS_REPLACEMENT_INVALID",
+        );
+      }
+      candidate = {
+        localPart: normalizedReplacement.split("@")[0],
+        domain: replacementDomain,
+        address: normalizedReplacement,
+      };
+
+      // A primary address cannot be deleted.  When the mother is already at
+      // Mail.com's ten-address remote limit, the pipeline supplies a known
+      // failed/unprotected official alias to recycle first.  Delegate to the
+      // normal delete-then-create implementation so all remote/default,
+      // inventory, registration, and quota guards remain in one place.
+      const suppliedRecycle = String(recycleAddress || deletableAddress || "").trim();
+      if (suppliedRecycle) {
+        const normalizedRecycle = normalizeMailcomEmail(suppliedRecycle);
+        if (!normalizedRecycle
+          || normalizedRecycle === account.email.toLowerCase()
+          || normalizedRecycle === candidate.address) {
+          throw failure(
+            "要释放的 Mail.com 官方别名无效，不能是母号或新替代地址",
+            400,
+            "MAILCOM_ALIAS_RECYCLE_ADDRESS_INVALID",
+          );
+        }
+        return this.runRecycle(account, {
+          address: normalizedRecycle,
+          domain: rawDomain,
+          replacementAddress: candidate.address,
+          deleteOnlyWhenFull: true,
+        });
+      }
+
+      if (typeof this.mailcom.credentials !== "function") {
+        throw failure(
+          "这个邮箱还没有配置可用于网页登录的 Mail.com 密码",
+          409,
+          "MAILCOM_CREDENTIAL_REQUIRED",
+        );
+      }
+      credentials = this.mailcom.credentials(account);
+      session = await this.adapter.open({
+        username: credentials.username,
+        password: credentials.password,
+        accountId: account.id,
+      });
+      if (!session || typeof session.listAddresses !== "function") {
+        throw failure("Mail.com 替代别名创建适配器不可用", 503, "MAILCOM_ALIAS_ADAPTER_UNAVAILABLE");
+      }
+
+      latestRemote = await this.confirmedRemoteAddresses(session, "", account.email);
+      if (!latestRemote.includes(account.email.toLowerCase())) {
+        throw failure(
+          "Mail.com 网页登录账号与当前母号不一致",
+          409,
+          "MAILCOM_ALIAS_ACCOUNT_MISMATCH",
+        );
+      }
+      synced = await this.syncAliases(account, latestRemote, "Mail.com 官网替代别名创建");
+
+      if (!latestRemote.includes(candidate.address)) {
+        if (latestRemote.length >= MAILCOM_PREPARED_ADDRESS_TARGET) {
+          throw failure(
+            `Mail.com 当前已有 ${latestRemote.length} 个地址，母号保留时没有空位创建替代别名`,
+            409,
+            "MAILCOM_ALIAS_REPLACEMENT_CAPACITY_FULL",
+          );
+        }
+        this.assertAliasCreationAvailable(account.id);
+        if (typeof session.listDomains !== "function"
+          || typeof session.validateAlias !== "function"
+          || typeof session.createAlias !== "function") {
+          throw failure("Mail.com 替代别名创建适配器不可用", 503, "MAILCOM_ALIAS_ADAPTER_UNAVAILABLE");
+        }
+        const remoteDomains = this.activeDomains(await session.listDomains());
+        const domains = this.creationDomains(account, remoteDomains, rawDomain, { required: true });
+        if (!domains.includes(candidate.domain)) {
+          throw failure(
+            "稳定替代地址无效，或其域名后缀与指定 domain 不一致",
+            400,
+            "MAILCOM_ALIAS_REPLACEMENT_INVALID",
+          );
+        }
+        const validation = await session.validateAlias(candidate);
+        if (!validationAvailable(validation)) {
+          throw failure(
+            "指定的稳定替代地址已不可用，请生成新的 replacementAddress 后重试",
+            409,
+            "MAILCOM_ALIAS_REPLACEMENT_UNAVAILABLE",
+          );
+        }
+        // Re-read immediately before mutation.  The initial capacity snapshot
+        // may be stale if another browser changed this mother in the meantime.
+        latestRemote = await this.confirmedRemoteAddresses(session, "", account.email);
+        synced = await this.syncAliases(account, latestRemote, "Mail.com 官网替代别名创建");
+        if (this.assertRemoteCreationSlot(latestRemote, candidate.address)) {
+          mutationPhase = "create_submitting";
+          remoteMutationPossible = true;
+          await session.createAlias(candidate);
+          createdRemotely = true;
+          mutationPhase = "create_confirming";
+          latestRemote = await this.confirmedRemoteAddresses(session, candidate.address, account.email);
+          mutationPhase = "create_confirmed";
+        }
+        synced = await this.syncAliases(account, latestRemote, "Mail.com 官网替代别名创建");
+      }
+
+      const item = synced.items.find(
+        (entry) => String(entry.address || "").toLowerCase() === candidate.address,
+      );
+      audit(
+        this.db,
+        account.id,
+        "alias",
+        createdRemotely ? "创建 Mail.com 官方替代别名" : "确认 Mail.com 官方替代别名",
+        candidate.address,
+        {
+          created_remote: createdRemotely,
+          replacement_address: candidate.address,
+          domain: candidate.domain,
+          remote_count: latestRemote.length,
+        },
+      );
+      return {
+        status: createdRemotely ? "created" : "already_exists",
+        created: candidate.address,
+        item,
+        account: publicAccount(this.db, this.account(account.id)),
+        created_remote: createdRemotely,
+        remote_count: latestRemote.length,
+      };
+    } catch (error) {
+      if (session && typeof session.listAddresses === "function") {
+        try {
+          latestRemote = await this.confirmedRemoteAddresses(session, "", account.email);
+          if (latestRemote.includes(account.email.toLowerCase())) {
+            synced = await this.syncAliases(account, latestRemote, "Mail.com 官网替代别名创建");
+            remoteStateReconciled = true;
+          }
+        } catch {
+          // A retry adopts the same replacementAddress if the remote mutation succeeded.
+        }
+      }
+      const mapped = mappedFailure(error, [credentials?.password]);
+      mapped.mutation_phase = mutationPhase;
+      mapped.remote_mutation_possible = remoteMutationPossible;
+      mapped.remote_state_reconciled = remoteStateReconciled;
+      mapped.created_remotely = createdRemotely;
+      mapped.replacement_address = candidate?.address || "";
+      audit(this.db, account.id, "alias", "创建 Mail.com 官方替代别名失败", mapped.message, {
+        code: mapped.code,
+        created_remote: createdRemotely,
+        replacement_address: candidate?.address || "",
+        remote_count: latestRemote.length,
+        ...upstreamFailureAuditMetadata(mapped),
       });
       throw mapped;
     } finally {
@@ -783,7 +1250,12 @@ export class MailcomAliasAutomationService {
     return this.withAccountLock(account, () => this.runRecycle(account, options || {}));
   }
 
-  async runRecycle(account, { address, domain, replacementAddress } = {}) {
+  async runRecycle(account, {
+    address,
+    domain,
+    replacementAddress,
+    deleteOnlyWhenFull = false,
+  } = {}) {
     const normalizedAddress = normalizeMailcomEmail(address);
     if (!normalizedAddress) {
       throw failure("请指定有效的 Mail.com 官方别名", 400, "MAILCOM_ALIAS_ADDRESS_INVALID");
@@ -804,6 +1276,7 @@ export class MailcomAliasAutomationService {
     let removedRemotely = false;
     let createdRemotely = false;
     let remoteMutationPossible = false;
+    let remoteStateReconciled = false;
     let mutationPhase = "before_remote_mutation";
     let candidate = null;
     const randomDomainMode = randomDomainRequested(domain);
@@ -886,30 +1359,91 @@ export class MailcomAliasAutomationService {
       }
 
       if (!latestRemote.includes(candidate.address)) {
+        // Check the lifetime quota before deleting the old alias. Once the old
+        // address is removed, a quota failure would otherwise leave the slot empty.
         this.assertAliasCreationAvailable(account.id);
+      }
+
+      // Refresh before choosing create-first versus delete-first.  This keeps a
+      // stale initial snapshot from ever producing an eleventh address.
+      snapshot = await this.sessionSnapshot(session, account.email);
+      latestRemote = snapshot.addresses;
+      if (!latestRemote.includes(account.email.toLowerCase())) {
+        throw failure(
+          "Mail.com 网页登录账号与当前母号不一致",
+          409,
+          "MAILCOM_ALIAS_ACCOUNT_MISMATCH",
+        );
+      }
+      synced = await this.syncAliases(account, latestRemote, "Mail.com 官网别名轮换");
+      if (latestRemote.length >= MAILCOM_PREPARED_ADDRESS_TARGET
+        && !latestRemote.includes(normalizedAddress)
+        && !latestRemote.includes(candidate.address)) {
+        throw failure(
+          `Mail.com 当前已有 ${latestRemote.length} 个地址，但待释放别名已不在官网，拒绝创建第 ${latestRemote.length + 1} 个地址`,
+          409,
+          "MAILCOM_ALIAS_REPLACEMENT_CAPACITY_FULL",
+        );
       }
 
       target = this.aliasItem(account.id, normalizedAddress) || target;
       await this.assertAliasRemovable(target);
-      if (latestRemote.includes(normalizedAddress)) {
-        this.assertRemoteAliasRemovable(snapshot.records.get(normalizedAddress));
-        mutationPhase = "delete_submitting";
-        remoteMutationPossible = true;
-        await session.deleteAlias({ address: normalizedAddress });
-        removedRemotely = true;
-        mutationPhase = "delete_confirming";
-        latestRemote = await this.confirmedRemoteRemoval(session, normalizedAddress, account.email);
-        mutationPhase = "delete_confirmed";
+      const createBeforeDelete = !latestRemote.includes(candidate.address)
+        && latestRemote.length < MAILCOM_PREPARED_ADDRESS_TARGET;
+      const deleteTargetPlanned = latestRemote.includes(normalizedAddress)
+        && (!deleteOnlyWhenFull || (
+          !latestRemote.includes(candidate.address)
+          && latestRemote.length >= MAILCOM_PREPARED_ADDRESS_TARGET
+        ));
+
+      if (createBeforeDelete) {
+        snapshot = await this.sessionSnapshot(session, account.email);
+        latestRemote = snapshot.addresses;
+        if (latestRemote.includes(normalizedAddress)) {
+          this.assertRemoteAliasRemovable(snapshot.records.get(normalizedAddress));
+        }
+        if (!latestRemote.includes(candidate.address)
+          && this.assertRemoteCreationSlot(latestRemote, candidate.address)) {
+          mutationPhase = "create_submitting";
+          remoteMutationPossible = true;
+          await session.createAlias(candidate);
+          createdRemotely = true;
+          mutationPhase = "create_confirming";
+          latestRemote = await this.confirmedRemoteAddresses(session, candidate.address, account.email);
+          mutationPhase = "create_confirmed";
+          remoteMutationPossible = false;
+        }
         synced = await this.syncAliases(account, latestRemote, "Mail.com 官网别名轮换");
       }
-      if (!candidate || !latestRemote.includes(candidate.address)) {
-        if (latestRemote.length >= MAILCOM_ADDRESS_LIMIT) {
-          throw failure(
-            "Mail.com 官网地址仍已满；请使用上次持久化的 replacementAddress 重放轮换",
-            409,
-            "MAILCOM_ALIAS_RECYCLE_LIMIT",
-          );
+
+      if (deleteTargetPlanned) {
+        target = this.aliasItem(account.id, normalizedAddress) || target;
+        await this.assertAliasRemovable(target);
+        snapshot = await this.sessionSnapshot(session, account.email);
+        latestRemote = snapshot.addresses;
+        const shouldDeleteTarget = latestRemote.includes(normalizedAddress)
+          && (!deleteOnlyWhenFull || (
+            !latestRemote.includes(candidate.address)
+            && latestRemote.length >= MAILCOM_PREPARED_ADDRESS_TARGET
+          ));
+        if (shouldDeleteTarget) {
+          this.assertAliasRemovableImmediately(target);
+          this.assertRemoteAliasRemovable(snapshot.records.get(normalizedAddress));
+          mutationPhase = "delete_submitting";
+          remoteMutationPossible = true;
+          await session.deleteAlias({ address: normalizedAddress });
+          removedRemotely = true;
+          mutationPhase = "delete_confirming";
+          latestRemote = await this.confirmedRemoteRemoval(session, normalizedAddress, account.email);
+          mutationPhase = "delete_confirmed";
+          remoteMutationPossible = false;
+          synced = await this.syncAliases(account, latestRemote, "Mail.com 官网别名轮换");
         }
+      }
+
+      latestRemote = await this.confirmedRemoteAddresses(session, "", account.email);
+      if (!latestRemote.includes(candidate.address)
+        && this.assertRemoteCreationSlot(latestRemote, candidate.address)) {
         mutationPhase = "create_submitting";
         remoteMutationPossible = true;
         await session.createAlias(candidate);
@@ -917,8 +1451,9 @@ export class MailcomAliasAutomationService {
         mutationPhase = "create_confirming";
         latestRemote = await this.confirmedRemoteAddresses(session, candidate.address, account.email);
         mutationPhase = "create_confirmed";
-        synced = await this.syncAliases(account, latestRemote, "Mail.com 官网别名轮换");
+        remoteMutationPossible = false;
       }
+      synced = await this.syncAliases(account, latestRemote, "Mail.com 官网别名轮换");
       const item = synced.items.find((entry) => String(entry.address || "").toLowerCase() === candidate.address);
       audit(this.db, account.id, "alias", "轮换 Mail.com 官方别名", `${normalizedAddress} -> ${candidate.address}`, {
         removed_remote: removedRemotely,
@@ -941,6 +1476,7 @@ export class MailcomAliasAutomationService {
           latestRemote = await this.confirmedRemoteAddresses(session, "", account.email);
           if (latestRemote.includes(account.email.toLowerCase())) {
             synced = await this.syncAliases(account, latestRemote, "Mail.com 官网别名轮换");
+            remoteStateReconciled = true;
           }
         } catch {
           // The post-delete sync above is authoritative; this is only a final best-effort refresh.
@@ -949,6 +1485,7 @@ export class MailcomAliasAutomationService {
       const mapped = mappedFailure(error, [credentials?.password]);
       mapped.mutation_phase = mutationPhase;
       mapped.remote_mutation_possible = remoteMutationPossible;
+      mapped.remote_state_reconciled = remoteStateReconciled;
       mapped.removed_remotely = removedRemotely;
       mapped.created_remotely = createdRemotely;
       mapped.replacement_address = candidate?.address || "";
@@ -959,6 +1496,7 @@ export class MailcomAliasAutomationService {
         created_remote: createdRemotely,
         replacement_address: candidate?.address || "",
         remote_count: latestRemote.length,
+        ...upstreamFailureAuditMetadata(mapped),
       });
       throw mapped;
     } finally {
@@ -985,5 +1523,5 @@ export class UnavailableMailcomAliasAdapter {
   }
 }
 
-export const mailcomAliasAddressLimit = MAILCOM_ADDRESS_LIMIT;
+export const mailcomAliasPreparedAddressTarget = MAILCOM_PREPARED_ADDRESS_TARGET;
 export const mailcomAliasHistoryLimit = MAILCOM_ALIAS_HISTORY_LIMIT;

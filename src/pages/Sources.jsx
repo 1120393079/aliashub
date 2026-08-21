@@ -32,10 +32,10 @@ function count(value) {
 }
 
 function mailcomUsage(account) {
-  const limit = Math.max(1, count(account?.official_limit) || 10);
+  const target = Math.max(1, count(account?.official_limit) || 10);
   const aliases = count(account?.mailcom_aliases ?? account?.official_aliases);
   const used = Math.max(1, count(account?.official_used) || aliases + 1);
-  return { aliases, used, limit, remaining: Math.max(0, limit - used) };
+  return { aliases, used, target, remainingToTarget: Math.max(0, target - used) };
 }
 
 function neteaseAliasCount(account) {
@@ -86,7 +86,7 @@ function providerSummaryStats(provider, accounts) {
       { label: "母号", value: accounts.length },
       { label: "已连接", value: connected },
       { label: "官方别名", value: usage.reduce((sum, item) => sum + item.aliases, 0) },
-      { label: "剩余名额", value: usage.reduce((sum, item) => sum + item.remaining, 0) },
+      { label: "待补地址", value: usage.reduce((sum, item) => sum + item.remainingToTarget, 0) },
     ];
   }
   if (provider === "icloud") {
@@ -159,7 +159,7 @@ function SourceAccountCard({ account, initialAccountId, operation, onAliasSync, 
   const operationLocked = operationQueued || operationRunning;
   return <article id={`source-account-${account.id}`} className={`source-card source-card-${accountMeta.id}${Number(initialAccountId) === account.id ? " source-card-target" : ""}`}>
     <header><ProviderMark provider={accountMeta.id} size={38} /><div><h2>{account.display_name || account.email.split("@")[0]}</h2><p>{account.email}<span className="provider-name">{accountMeta.name}</span></p></div><StatusBadge status={account.status}>{accountStatus[account.status]}</StatusBadge></header>
-    {isMailcom ? <div className="source-quota"><div><span>母号 / 官方分裂别名</span><b>{usage.used} <small>/ {usage.limit}</small></b></div><div className="quota-track"><i style={{ width: `${Math.min(100, usage.used / usage.limit * 100)}%` }} /></div><small>母号与别名合计最多 10 个地址；不支持 +tag / Plus 分裂</small></div> : isNetease ? <div className="source-provider-capability"><AtSign size={18} /><span><b>{accountMeta.capabilityTitle}</b><small>{accountMeta.capabilityDescription}</small></span></div> : supportsOfficial ? <div className="source-quota"><div><span>官方基础地址</span><b>{account.official_used} <small>/ {account.official_limit}</small></b></div><div className="quota-track"><i style={{ width: `${Math.min(100, account.official_used / account.official_limit * 100)}%` }} /></div><small>剩余 {account.official_remaining} 个记录名额，实际以 Microsoft 官网限制为准</small></div> : <div className="source-provider-capability">{supportsPlus ? <WandSparkles size={18} /> : supportsImported ? <AtSign size={18} /> : <KeyRound size={18} />}<span><b>{accountMeta.capabilityTitle}</b><small>{accountMeta.capabilityDescription}</small></span></div>}
+    {isMailcom ? <div className="source-quota"><div><span>当前地址 / 流水线预备目标</span><b>{usage.used} <small>/ {usage.target}</small></b></div><div className="quota-track"><i style={{ width: `${Math.min(100, usage.used / usage.target * 100)}%` }} /></div><small>10 只是启动流水线时的预备目标，不是官网上限；后续可持续轮换，无历史创建次数限制</small></div> : isNetease ? <div className="source-provider-capability"><AtSign size={18} /><span><b>{accountMeta.capabilityTitle}</b><small>{accountMeta.capabilityDescription}</small></span></div> : supportsOfficial ? <div className="source-quota"><div><span>官方基础地址</span><b>{account.official_used} <small>/ {account.official_limit}</small></b></div><div className="quota-track"><i style={{ width: `${Math.min(100, account.official_used / account.official_limit * 100)}%` }} /></div><small>剩余 {account.official_remaining} 个记录名额，实际以 Microsoft 官网限制为准</small></div> : <div className="source-provider-capability">{supportsPlus ? <WandSparkles size={18} /> : supportsImported ? <AtSign size={18} /> : <KeyRound size={18} />}<span><b>{accountMeta.capabilityTitle}</b><small>{accountMeta.capabilityDescription}</small></span></div>}
     {isMailcom ? <dl className="source-stats"><div><dt>母号</dt><dd>1</dd></div><div><dt>官方分裂别名</dt><dd>{usage.aliases}</dd></div><div><dt>可直接注册</dt><dd>{usage.used} 个地址</dd></div><div><dt>收件扫描</dt><dd>{relativeTime(account.last_inbox_scan_at)}</dd></div></dl> : isNetease ? <dl className="source-stats"><div><dt>母号</dt><dd>1</dd></div><div><dt>替身邮箱</dt><dd>{neteaseAliasCount(account)}</dd></div><div><dt>可直接注册</dt><dd>{neteaseAliasCount(account) + 1} 个地址</dd></div><div><dt>收件扫描</dt><dd>{relativeTime(account.last_inbox_scan_at)}</dd></div></dl> : supportsImported ? <dl className="source-stats"><div><dt>邮箱别名</dt><dd>{account.icloud_mail_aliases || 0}</dd></div><div><dt>隐藏邮箱</dt><dd>{account.icloud_hide_my_emails || 0}</dd></div><div><dt>自定义域名</dt><dd>{account.icloud_custom_domain_emails || 0}</dd></div><div><dt>本地登记</dt><dd>{(account.icloud_mail_aliases || 0) + (account.icloud_hide_my_emails || 0) + (account.icloud_custom_domain_emails || 0)} 个可直接注册</dd></div></dl> : <dl className="source-stats"><div><dt>官方别名</dt><dd>{supportsAliases ? account.official_aliases : "不支持"}</dd></div><div><dt>分裂地址</dt><dd>{supportsPlus ? account.split_count : "不支持"}</dd></div><div><dt>收件扫描</dt><dd>{relativeTime(account.last_inbox_scan_at)}</dd></div><div><dt>{supportsOfficial ? "别名同步" : accountMeta.connectionLabel}</dt><dd>{supportsOfficial ? relativeTime(account.last_synced_at) : account.connection_connected ? "已连接" : "待连接"}</dd></div></dl>}
     {operation && <div className={`source-account-operation is-${operation.status}${operationPartial ? " is-partial" : ""}`} role="status">{operationRunning ? <LoaderCircle className="spin" size={16} /> : operationQueued ? <LoaderCircle size={16} /> : operationComplete ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}<span><b>{operationRunning ? "正在创建官方别名" : operationQueued ? "等待创建官方别名" : operationComplete ? `已新建 ${operation.created || 0} 个别名` : operationPartial ? `部分完成，新建 ${operation.created || 0} 个` : "创建失败"}</b>{operation.error && <small>{operation.error}</small>}</span></div>}
     {account.status === "action_required" && <div className="inline-alert warning"><AlertCircle size={15} /><span>{accountMeta.name} 连接需要更新</span><Button size="sm" onClick={() => onReconnect(account)}>{accountMeta.reconnectLabel}</Button></div>}
@@ -725,7 +725,9 @@ export default function SourcesPage({ refreshKey, onDataChange, onNavigate, addO
   const items = data?.items || [];
   const mailcomDomains = normalizedMailcomDomains(data?.mailcomDomains);
   const mailcomAccounts = items.filter((account) => normalizeProvider(account.provider) === "mailcom");
-  const mailcomEligibleAccounts = mailcomAccounts.filter((account) => account.status === "connected" && mailcomUsage(account).remaining > 0);
+  const mailcomEligibleAccounts = mailcomAccounts.filter((account) => (
+    account.status === "connected" && mailcomUsage(account).remainingToTarget > 0
+  ));
   const toggleProvider = (provider) => setExpandedProviders((current) => {
     const next = new Set(current);
     if (next.has(provider)) next.delete(provider);
@@ -806,7 +808,7 @@ export default function SourcesPage({ refreshKey, onDataChange, onNavigate, addO
   const batchProgress = mailcomBatch.total ? Math.min(100, mailcomBatch.completed / mailcomBatch.total * 100) : 0;
   const mailcomActions = <div className="mailcom-summary-controls">
     <label className="mailcom-summary-domain"><span>别名域名后缀</span><select value={mailcomDomain} disabled={mailcomBatch.running || !mailcomDomains.length} onChange={(event) => setMailcomDomain(event.target.value)}>{mailcomDomains.map((domain) => <option value={domain} key={domain}>@{domain}</option>)}</select></label>
-    <Button variant="primary" icon={WandSparkles} loading={mailcomBatch.running} disabled={!mailcomDomain || !mailcomEligibleAccounts.length} onClick={runMailcomAliasBatch}>{mailcomBatch.running ? `${mailcomBatch.completed} / ${mailcomBatch.total}` : mailcomEligibleAccounts.length ? `一键补满 ${mailcomEligibleAccounts.length} 个母号` : "别名已全部补满"}</Button>
+    <Button variant="primary" icon={WandSparkles} loading={mailcomBatch.running} disabled={!mailcomDomain || !mailcomEligibleAccounts.length} onClick={runMailcomAliasBatch}>{mailcomBatch.running ? `${mailcomBatch.completed} / ${mailcomBatch.total}` : mailcomEligibleAccounts.length ? `补到预备目标 · ${mailcomEligibleAccounts.length} 个母号` : "预备地址已就绪"}</Button>
     {mailcomBatch.total > 0 && <div className={`mailcom-batch-progress${mailcomBatch.failed ? " has-errors" : ""}`} role="status" aria-live="polite"><span><b>{mailcomBatch.running ? `正在处理 ${mailcomBatch.completed + 1} / ${mailcomBatch.total}` : `完成 ${mailcomBatch.completed} / ${mailcomBatch.total}`}</b><small>{mailcomBatch.running ? mailcomBatch.currentEmail : `成功 ${mailcomBatch.succeeded} · 失败 ${mailcomBatch.failed} · 新建 ${mailcomBatch.created}`}</small></span><i><b style={{ width: `${batchProgress}%` }} /></i></div>}
   </div>;
 

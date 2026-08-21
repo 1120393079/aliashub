@@ -116,6 +116,9 @@ default.
 For native Node.js setup and remote-server deployment, see
 [LOCAL-DEPLOY.md](LOCAL-DEPLOY.md).
 
+For production maintenance, database snapshots, and the registration-pipeline
+invariants, see [docs/SAFE-MAINTENANCE.md](docs/SAFE-MAINTENANCE.md).
+
 To overwrite an existing Git-based installation with the latest source while
 preserving local configuration and runtime data:
 
@@ -252,8 +255,8 @@ tree.
 
 Full Compose mode configures the internal service URL and a generated shared
 password automatically. In the AliasHub registration workspace, save separate
-Checkout and Update proxy pools, choose DE/EUR, TR/USD, or GB/GBP, select up to
-50 registered accounts, and run **直接提链**. The standalone workbench and CLI
+Checkout and Update proxy pools, choose DE/EUR, TR/USD, or GB/GBP, select any
+number of registered accounts, and run **直接提链**. The standalone workbench and CLI
 remain available for deployments that need them; see
 [`payment-link-extractor/README.md`](payment-link-extractor/README.md).
 

@@ -140,9 +140,6 @@ function selectedIds(input = {}) {
   if (!ids.length || ids.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
     throw Object.assign(new Error("请选择要提链的注册账号"), { status: 400 });
   }
-  if (ids.length > 50) {
-    throw Object.assign(new Error("单次最多选择 50 个账号提链"), { status: 400 });
-  }
   return ids;
 }
 
@@ -168,13 +165,44 @@ function safeProviderUrl(value) {
   }
 }
 
+function snapshotFailureCategory(snapshot = {}) {
+  const category = String(snapshot.error_category || "").trim().toLowerCase();
+  if (/^[a-z][a-z0-9_]{0,79}$/.test(category)) return category;
+  return snapshot.network_error === true ? "network" : "";
+}
+
+function paymentLinkFailureStage(error, fallback, { serviceRequest = false } = {}) {
+  const category = snapshotFailureCategory(error);
+  if (category) return `error_${category}`;
+  const status = Number(error?.http_status ?? error?.statusCode ?? error?.status ?? 0);
+  const code = String(error?.code || "").trim().toUpperCase();
+  const message = String(error?.message || error || "").trim();
+  if (status === 408 || status === 504 || /(?:TIMEOUT|TIMED_OUT|ABORT)/.test(code)
+    || /(?:timed?\s*out|请求超时|执行超时|排队超时)/i.test(message)) {
+    return "error_timeout";
+  }
+  if (/^(?:ECONN|ENET|EHOST|EAI_|UND_ERR_)/.test(code)
+    || /^(?:fetch failed|network (?:error|request failed)|socket hang up)$/i.test(message)) {
+    return "error_network";
+  }
+  if (status === 429 || status >= 500
+    || (serviceRequest && new Set([401, 403, 404]).has(status))) {
+    return "service_error";
+  }
+  return fallback;
+}
+
 function publicPaymentLink(row) {
   if (!row) return null;
+  const stage = String(row.stage || "");
+  const errorCategory = stage.startsWith("error_") ? stage.slice("error_".length) : "";
   return {
     ...row,
     external_account_id: Number(row.external_account_id) || row.external_account_id,
     progress: Math.max(0, Math.min(100, Number(row.progress) || 0)),
     amount_due: row.amount_due === null || row.amount_due === undefined ? null : Number(row.amount_due),
+    error_category: errorCategory,
+    network_error: errorCategory === "network",
   };
 }
 
@@ -396,6 +424,12 @@ export class PaymentLinkService {
       if (!response.ok) {
         const error = new Error(safeText(data?.error || data || `提链服务返回 HTTP ${response.status}`));
         error.status = response.status === 404 ? 404 : 502;
+        error.http_status = response.status;
+        if (data && typeof data === "object") {
+          error.error_category = snapshotFailureCategory(data);
+          error.network_error = data.network_error === true;
+          error.code = String(data.code || data.detail?.code || "").trim();
+        }
         throw error;
       }
       return data;
@@ -425,9 +459,16 @@ export class PaymentLinkService {
       if (!providerUrl) error = "提链服务已完成，但没有返回有效 PayPal 链接";
     }
     const effectiveStatus = status === "succeeded" && !providerUrl ? "failed" : status;
+    const errorCategory = TERMINAL_STATUSES.has(effectiveStatus) && effectiveStatus !== "succeeded"
+      ? snapshotFailureCategory(snapshot) : "";
+    const nextStage = errorCategory
+      ? `error_${errorCategory}`
+      : effectiveStatus === "failed" && status === "succeeded"
+        ? "invalid_result"
+        : String(snapshot.stage || (TERMINAL_STATUSES.has(effectiveStatus) ? effectiveStatus : status));
     return this.persist(accountId, {
       status: effectiveStatus,
-      stage: effectiveStatus === "failed" && status === "succeeded" ? "invalid_result" : snapshot.stage,
+      stage: nextStage,
       progress: snapshot.progress,
       provider_url: effectiveStatus === "succeeded" ? providerUrl : "",
       session_kind: result.session_kind || snapshot.session_kind,
@@ -577,7 +618,7 @@ export class PaymentLinkService {
           email: existing?.email || "",
           task_id: "",
           status: "failed",
-          stage: "credentials",
+          stage: paymentLinkFailureStage(error, "credentials"),
           progress: 0,
           provider_url: "",
           proxy_label: "",
@@ -646,7 +687,7 @@ export class PaymentLinkService {
           email: credentials.email,
           task_id: "",
           status: "failed",
-          stage: "submit",
+          stage: paymentLinkFailureStage(error, "submit", { serviceRequest: true }),
           progress: 0,
           provider_url: "",
           proxy_label: maskProxy(checkoutProxy),

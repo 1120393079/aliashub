@@ -4328,6 +4328,112 @@ def _wait_for_access_token(page, timeout: int = 60) -> str:
     return ""
 
 
+def _probe_phone_binding_after_oauth(
+    page,
+    oauth_result: dict,
+    phone_callback,
+    *,
+    log,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> dict:
+    """在 OAuth 返回 token 后确认并完成手机号验证（仅绑定流程使用）。"""
+    result = dict(oauth_result or {})
+    if not phone_callback or getattr(phone_callback, "completed", False):
+        return result
+
+    _raise_if_cancelled(cancel_check)
+    try:
+        _goto_with_retry(
+            page,
+            f"{OPENAI_AUTH}/add-phone",
+            wait_until="domcontentloaded",
+            timeout=30_000,
+            log=log,
+            cancel_check=cancel_check,
+        )
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=8_000)
+        except Exception:
+            pass
+        _cancelable_sleep(1.0, cancel_check)
+    except BrowserTaskCancelled:
+        raise
+    except Exception as exc:
+        message = f"访问 OpenAI 手机号页面失败: {exc}"
+        log(f"  {message}")
+        result.update({
+            "phone_challenge_present": None,
+            "phone_verification_failed": True,
+            "error": message,
+        })
+        return result
+
+    status = _phone_page_status(page)
+    state = _derive_oauth_state_from_page(page)
+    has_phone_challenge = bool(
+        status.get("addPhoneReady")
+        or status.get("phoneVerificationReady")
+        or str(state.get("page_type") or "") == "add_phone"
+    )
+    if not has_phone_challenge:
+        current_url = str(status.get("url") or page.url or "")
+        log(
+            "  OAuth 完成后访问 /add-phone 未出现手机号验证表单: "
+            f"page={state.get('page_type') or '-'} url={current_url[:120]}"
+        )
+        result.update({
+            "phone_challenge_present": False,
+            "phone_binding_status": "not_required_or_already_bound",
+        })
+        return result
+
+    try:
+        try:
+            user_agent = str(page.evaluate("() => navigator.userAgent") or "").strip()
+        except Exception:
+            user_agent = ""
+        user_agent = user_agent or _random_chrome_ua()
+        cookies = _get_cookies(page)
+        device_id = str(cookies.get("oai-did") or uuid.uuid4())
+        log("  OAuth 完成后检测到 add_phone，开始手机号验证...")
+        _handle_add_phone_challenge(
+            page,
+            phone_callback,
+            device_id=device_id,
+            user_agent=user_agent,
+            log=log,
+            resume_url="",
+        )
+    except BrowserTaskCancelled:
+        raise
+    except Exception as exc:
+        message = f"OpenAI 手机号验证失败: {exc}"
+        log(f"  {message}")
+        result.update({
+            "phone_challenge_present": True,
+            "phone_verification_failed": True,
+            "error": message,
+        })
+        return result
+
+    if not getattr(phone_callback, "completed", False):
+        message = "OpenAI 手机号验证流程结束但未确认成功"
+        log(f"  {message}")
+        result.update({
+            "phone_challenge_present": True,
+            "phone_verification_failed": True,
+            "error": message,
+        })
+        return result
+
+    log("  OAuth 后手机号验证已完成")
+    result.update({
+        "phone_challenge_present": True,
+        "phone_binding_status": "bound",
+    })
+    return result
+
+
 def _is_registration_complete(state: dict) -> bool:
     page_type = str(state.get("page_type") or "")
     url = str(state.get("current_url") or state.get("continue_url") or "").lower()
@@ -8012,8 +8118,10 @@ class ChatGPTBrowserRegister:
         password_generator: Optional[Callable[[], str]] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
         auto_continue_post_signup: bool = True,
+        phone_binding_mode: bool = False,
     ):
         self.auto_continue_post_signup = bool(auto_continue_post_signup)
+        self.phone_binding_mode = bool(phone_binding_mode)
         self.headless = bool(headless)
         self.proxy = proxy
         self.otp_callback = otp_callback
@@ -8653,6 +8761,20 @@ class ChatGPTBrowserRegister:
                     self.otp_callback, self.phone_callback, self.proxy, self.log,
                     cancel_check=self.cancel_check,
                 )
+                if (
+                    self.phone_binding_mode
+                    and isinstance(result, dict)
+                    and result.get("access_token")
+                    and self.phone_callback
+                    and not getattr(self.phone_callback, "completed", False)
+                ):
+                    result = _probe_phone_binding_after_oauth(
+                        page,
+                        result,
+                        self.phone_callback,
+                        log=self.log,
+                        cancel_check=self.cancel_check,
+                    )
                 if not self.backend_config.is_bitbrowser:
                     exit_ip = _verify_browser_exit_for_flow(
                         page,

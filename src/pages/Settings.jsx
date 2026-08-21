@@ -4,22 +4,38 @@ import { api, appUrl } from "../api.js";
 import { Button, FormField, LoadingBlock, StatusBadge, useToast } from "../components.jsx";
 import { copyText } from "../utils.js";
 
+const EMPTY_INVENTORY_CONFIG = {
+  cards_url: "https://nvtokens.com/api/inventory/cards/import",
+  mailboxes_url: "https://nvtokens.com/api/inventory/mailboxes/import",
+  pool_url: "https://nvtokens.com/api/inventory/cards/pool",
+  api_key_configured: false,
+  encryption_ready: false,
+  connected: false,
+  endpoints_locked: true,
+  custom_endpoints_enabled: false,
+  api_key: "",
+};
+
 export default function SettingsPage({ initialSection = "" }) {
   const [form, setForm] = useState(null);
   const [health, setHealth] = useState(null);
   const [nfapi, setNfapi] = useState(null);
   const [heroSms, setHeroSms] = useState(null);
+  const [inventory, setInventory] = useState(null);
   const [saving, setSaving] = useState(false);
   const [savingNfapi, setSavingNfapi] = useState(false);
   const [testingNfapi, setTestingNfapi] = useState(false);
   const [savingHeroSms, setSavingHeroSms] = useState(false);
   const [testingHeroSms, setTestingHeroSms] = useState(false);
+  const [savingInventory, setSavingInventory] = useState(false);
+  const [testingInventory, setTestingInventory] = useState(false);
+  const [clearingInventory, setClearingInventory] = useState(false);
   const [activeSection, setActiveSection] = useState(initialSection || "general");
   const toast = useToast();
 
   const load = async () => {
     try {
-      const [settings, status, nfapiConfig, heroSmsConfig] = await Promise.all([
+      const [settings, status, nfapiConfig, heroSmsConfig, inventoryConfig] = await Promise.all([
         api("/api/settings"),
         api("/api/health"),
         api("/api/nfapi/config"),
@@ -29,11 +45,16 @@ export default function SettingsPage({ initialSection = "" }) {
           encryption_ready: false,
           load_error: error.message || "HeroSMS 配置读取失败",
         })),
+        api("/api/inventory/config").catch((error) => ({
+          ...EMPTY_INVENTORY_CONFIG,
+          load_error: error.message || "nvtokens 配置读取失败",
+        })),
       ]);
       setForm(settings);
       setHealth(status);
       setNfapi({ ...nfapiConfig, admin_api_key: "" });
       setHeroSms({ ...heroSmsConfig, api_key: "" });
+      setInventory({ ...EMPTY_INVENTORY_CONFIG, ...inventoryConfig, api_key: "" });
     } catch (error) {
       toast(error.message, "error");
     }
@@ -107,12 +128,57 @@ export default function SettingsPage({ initialSection = "" }) {
     }
   };
 
+  const saveInventory = async () => {
+    setSavingInventory(true);
+    try {
+      const apiKey = inventory.api_key.trim();
+      const result = await api("/api/inventory/config", {
+        method: "PATCH",
+        body: apiKey ? { api_key: apiKey } : {},
+      });
+      setInventory({ ...EMPTY_INVENTORY_CONFIG, ...result, api_key: "" });
+      toast("nvtokens 配置已保存");
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      setSavingInventory(false);
+    }
+  };
+
+  const testInventory = async () => {
+    setTestingInventory(true);
+    try {
+      const result = await api("/api/inventory/test", { method: "POST" });
+      setInventory((current) => ({ ...current, connected: result.connected !== false, last_connected_at: result.last_connected_at }));
+      toast(result.message || "nvtokens 连接正常");
+    } catch (error) {
+      setInventory((current) => ({ ...current, connected: false }));
+      toast(error.message, "error");
+    } finally {
+      setTestingInventory(false);
+    }
+  };
+
+  const clearInventory = async () => {
+    if (!window.confirm("清除当前 nvtokens API Key？清除后库存 API 不会再发起请求。")) return;
+    setClearingInventory(true);
+    try {
+      const result = await api("/api/inventory/config", { method: "PATCH", body: { clear_api_key: true } });
+      setInventory({ ...EMPTY_INVENTORY_CONFIG, ...result, api_key: "" });
+      toast("nvtokens API Key 已清除");
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      setClearingInventory(false);
+    }
+  };
+
   useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
-    if (!initialSection || !form || !heroSms) return;
+    if (!initialSection || !form || !heroSms || !inventory) return;
     setActiveSection(initialSection);
     window.requestAnimationFrame(() => document.getElementById(initialSection)?.scrollIntoView({ block: "start" }));
-  }, [initialSection, form, heroSms]);
+  }, [initialSection, form, heroSms, inventory]);
 
   const scrollSection = (section) => {
     setActiveSection(section);
@@ -139,7 +205,7 @@ export default function SettingsPage({ initialSection = "" }) {
     }
   };
 
-  if (!form || !nfapi || !heroSms) return <div className="page-stack"><LoadingBlock rows={7} /></div>;
+  if (!form || !nfapi || !heroSms || !inventory) return <div className="page-stack"><LoadingBlock rows={8} /></div>;
 
   const heroMaxPrice = Number(heroSms.max_price);
   const heroRetries = Number(heroSms.change_retries);
@@ -155,6 +221,7 @@ export default function SettingsPage({ initialSection = "" }) {
       <aside className="settings-index">
         <button type="button" className={activeSection === "general" ? "active" : ""} onClick={() => scrollSection("general")}><Mail size={16} />基本设置</button>
         <button type="button" className={activeSection === "nfapi" ? "active" : ""} onClick={() => scrollSection("nfapi")}><Cable size={16} />NFapi 连接</button>
+        <button type="button" className={activeSection === "inventory" ? "active" : ""} onClick={() => scrollSection("inventory")}><Database size={16} />nvtokens 库存</button>
         <button type="button" className={activeSection === "herosms" ? "active" : ""} onClick={() => scrollSection("herosms")}><Smartphone size={16} />HeroSMS 接码</button>
         <button type="button" className={activeSection === "security" ? "active" : ""} onClick={() => scrollSection("security")}><ShieldCheck size={16} />邮箱连接安全</button>
         <button type="button" className={activeSection === "connector" ? "active" : ""} onClick={() => scrollSection("connector")}><Puzzle size={16} />官网扩展</button>
@@ -173,6 +240,22 @@ export default function SettingsPage({ initialSection = "" }) {
             <FormField label="NFapi 地址" hint="填写 NFapi 管理 API 的基础地址，例如 https://nfapi.example.com"><input type="url" value={nfapi.base_url || ""} onChange={(event) => setNfapi({ ...nfapi, base_url: event.target.value, connected: false })} placeholder="https://nfapi.example.com" /></FormField>
             <FormField label="管理员 API Key" hint={nfapi.api_key_configured ? "已配置；留空保存会保留原 Key，输入新值才会替换。" : "只发送到本站后端加密保存，页面不会回显。"}><input type="password" autoComplete="new-password" value={nfapi.admin_api_key} onChange={(event) => setNfapi({ ...nfapi, admin_api_key: event.target.value, connected: false })} placeholder={nfapi.api_key_configured ? "留空保留现有 Key" : "输入管理员 API Key"} /></FormField>
             <div className="nfapi-connection-actions"><Button icon={Cable} loading={testingNfapi} disabled={savingNfapi || !nfapi.base_url || !nfapi.api_key_configured} onClick={testNfapi}>测试已保存连接</Button><Button variant="primary" icon={Save} loading={savingNfapi} disabled={testingNfapi || !nfapi.base_url || (!nfapi.api_key_configured && !nfapi.admin_api_key.trim())} onClick={saveNfapi}>保存连接</Button></div>
+          </div>
+        </section>
+
+        <section id="inventory" className="settings-section">
+          <header><span><Database size={19} /></span><div><h2>nvtokens 库存</h2><p>统一配置库存 API；账号入库、邮箱凭证匹配和直接入池从业务页面发起</p></div><StatusBadge status={inventory.connected ? "active" : inventory.api_key_configured ? "warning" : "inactive"}>{inventory.connected ? "已连接" : inventory.api_key_configured ? "待测试" : "未配置"}</StatusBadge></header>
+          <div className="settings-form">
+            <div className="nfapi-connection-state"><Database size={17} /><span><b>{inventory.connected ? "nvtokens API 鉴权正常" : inventory.api_key_configured ? "API Key 已保存，等待连接测试" : "尚未配置 nvtokens API Key"}</b><small>{inventory.encryption_ready === false ? "服务器未配置 DATA_ENCRYPTION_KEY，暂不能保存 Key" : inventory.api_key_configured ? "Key 使用 AES-256-GCM 加密保存，页面不会回显" : "Key 只发送到本站后端并加密保存"}</small></span><StatusBadge status={inventory.api_key_configured ? "active" : "inactive"}>{inventory.api_key_configured ? "Key 已配置" : "缺少 Key"}</StatusBadge></div>
+            {inventory.load_error && <div className="inline-alert error"><span>{inventory.load_error}</span></div>}
+            <div className="inventory-settings-note"><Database size={15} /><span>服务端固定代理 nvtokens 的三个 HTTPS 接口；地址不可在浏览器修改。保存后可在「注册账号」或「验证码中心」打开库存 API 执行批量操作。</span></div>
+            <div className="form-grid two">
+              <FormField label="账号入库地址"><input type="url" value={inventory.cards_url || ""} readOnly /></FormField>
+              <FormField label="邮箱凭证地址"><input type="url" value={inventory.mailboxes_url || ""} readOnly /></FormField>
+              <FormField label="直接入池地址"><input type="url" value={inventory.pool_url || ""} readOnly /></FormField>
+              <FormField label="nvtokens API Key" hint={inventory.api_key_configured ? "已配置；留空保存会保留原 Key，输入新值才会替换。" : "只发送到本站后端加密保存，页面不会回显。"}><input type="password" autoComplete="new-password" value={inventory.api_key} disabled={inventory.encryption_ready === false || savingInventory || clearingInventory} onChange={(event) => setInventory({ ...inventory, api_key: event.target.value, connected: false })} placeholder={inventory.encryption_ready === false ? "先配置 DATA_ENCRYPTION_KEY" : inventory.api_key_configured ? "留空保留现有 Key" : "粘贴 x-api-key"} /></FormField>
+            </div>
+            <div className="nfapi-connection-actions"><Button icon={Cable} loading={testingInventory} disabled={savingInventory || clearingInventory || !inventory.api_key_configured} onClick={testInventory}>测试连接</Button>{inventory.api_key_configured && <Button disabled={savingInventory || testingInventory || clearingInventory} onClick={clearInventory}>清除 Key</Button>}<Button variant="primary" icon={Save} loading={savingInventory} disabled={testingInventory || clearingInventory || inventory.encryption_ready === false} onClick={saveInventory}>保存 nvtokens 配置</Button></div>
           </div>
         </section>
 

@@ -73,7 +73,7 @@ export default function PaymentAgreementModal({
 
         <div className="payment-agreement-warning">
           <AlertTriangle size={16} />
-          <span>任务会自动使用已保存的 {country} 协议配置；HeroSMS 购买同国家号码并自动接收验证码，提链国家和账单国家均不参与。</span>
+          <span>任务会自动使用已保存的 {country} 协议配置；HeroSMS 购买同国家号码并自动接收验证码，账单国家不参与协议流程。</span>
         </div>
 
         {loadingSettings ? (

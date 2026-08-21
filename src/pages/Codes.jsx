@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { ArchiveRestore, Check, Copy, KeyRound, LoaderCircle, Mail, RefreshCw, Search, Trash2 } from "lucide-react";
+import { ArchiveRestore, Check, Copy, Database, KeyRound, LoaderCircle, Mail, RefreshCw, Search, Trash2 } from "lucide-react";
 import { api, queryString } from "../api.js";
 import { Button, ConfirmDialog, EmptyState, LoadingBlock, ProviderMark, Segmented, StatusBadge, useToast } from "../components.jsx";
+import InventoryApiModal from "../components/InventoryApiModal.jsx";
 import { accountOptionLabel, providerMeta } from "../providers.js";
 import { copyText, relativeTime } from "../utils.js";
 
@@ -17,6 +18,7 @@ export default function CodesPage({ refreshKey, onDataChange, initialAccountId }
   const [markingAll, setMarkingAll] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState(null);
   const [deleting, setDeleting] = useState(false);
+  const [inventoryApiOpen, setInventoryApiOpen] = useState(false);
   const toast = useToast();
   const load = async () => {
     try {
@@ -113,6 +115,7 @@ export default function CodesPage({ refreshKey, onDataChange, initialAccountId }
         <div className="toolbar-actions codes-toolbar-actions">
           <label className="search-box"><Search size={16} /><input maxLength={200} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索验证码、发件人或地址" /></label>
           <select className="compact-select" value={accountId} onChange={(event) => setAccountId(event.target.value)}><option value="all">全部源头邮箱</option>{accounts.map((account) => <option key={account.id} value={account.id}>{accountOptionLabel(account)}</option>)}</select>
+          <Button icon={Database} onClick={() => setInventoryApiOpen(true)} disabled={deleting || markingAll} title="打开 nvtokens 库存 API，一键提交账号或邮箱凭证">库存 API</Button>
           {filter === "unused" && <Button icon={Check} className="codes-mark-used-button" disabled={!data?.unused || updatingId !== null || markingAll || deleting} onClick={() => setMarkAllOpen(true)}>全部标记已用</Button>}
           {filter === "hidden"
             && <Button variant="danger-ghost" icon={Trash2} loading={deleting && deleteConfirm?.all} disabled={!data?.hidden || updatingId !== null || deleting} onClick={() => setDeleteConfirm({ all: true })}>{search.trim() ? "删除搜索结果" : "清空回收站"}</Button>}
@@ -132,6 +135,7 @@ export default function CodesPage({ refreshKey, onDataChange, initialAccountId }
       })}</section> : <section className="table-panel"><EmptyState icon={filter === "hidden" ? ArchiveRestore : KeyRound} title={emptyContent.title} description={emptyContent.description} action={filter === "unused" ? <Button variant="primary" icon={RefreshCw} onClick={scanSelected}>扫描收件箱</Button> : null} /></section>}
       <ConfirmDialog open={markAllOpen} onClose={() => setMarkAllOpen(false)} onConfirm={markAllUsed} loading={markingAll} title="全部标记为已用？" description={`${accountId === "all" ? "所有源头邮箱" : selectedAccount?.email || "当前源头邮箱"}${search.trim() ? "的当前搜索结果" : "中"}共有 ${data?.unused || 0} 条未使用验证码。标记后会立即移到回收站，需要时可恢复为未使用。`} confirmText="标记已用并移入回收站" />
       <ConfirmDialog open={Boolean(deleteConfirm)} onClose={() => { if (!deleting) setDeleteConfirm(null); }} onConfirm={permanentlyDelete} loading={deleting} danger title={deleteConfirm?.item ? "彻底删除这条验证码？" : search.trim() ? "彻底删除搜索结果？" : "清空回收站？"} description={deleteConfirm?.item ? `验证码 ${deleteConfirm.item.code} 将从本系统彻底删除且无法恢复。邮箱服务商中的原邮件不会被删除。` : `将彻底删除当前筛选范围内的 ${data?.hidden || 0} 条验证码，删除后无法恢复。邮箱服务商中的原邮件不会被删除。`} confirmText={deleteConfirm?.item ? "彻底删除" : "永久删除全部"} />
+      <InventoryApiModal open={inventoryApiOpen} onClose={() => setInventoryApiOpen(false)} selectedIds={[]} selectedEmails={selectedAccount?.email ? [selectedAccount.email] : []} allLinked={accountId === "all"} onDone={onDataChange} />
     </div>
   );
 }
