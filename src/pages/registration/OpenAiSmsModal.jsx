@@ -75,6 +75,12 @@ function firstDefined(...values) {
   return values.find((value) => value !== undefined && value !== null && value !== "");
 }
 
+function displayText(value) {
+  if (value === undefined || value === null) return "";
+  const text = String(value).trim();
+  return text === "undefined" || text === "null" ? "" : text;
+}
+
 function objectValue(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
@@ -142,7 +148,7 @@ function normalizeAccountItem(item, index) {
     maskedPhone: maskPhone(firstDefined(source.phone_mask, source.masked_phone, source.phone_masked, source.phone, "")),
     price: firstDefined(source.price, source.activation_price, source.cost, null),
     attempts: Number(firstDefined(source.claim_attempts, source.attempts, source.attempt, source.try_count, 0)) || 0,
-    error: String(firstDefined(source.error, source.cleanup_error, source.failure_reason, source.last_error, "")),
+    error: displayText(firstDefined(source.error, source.cleanup_error, source.failure_reason, source.last_error, "")),
   };
 }
 
@@ -180,7 +186,7 @@ function normalizeTask(value, previous = null) {
     displayStatus,
     terminal: Boolean(firstDefined(task.terminal, value?.terminal, false)) || TERMINAL_STATUSES.has(status),
     items,
-    error: String(firstDefined(task.error, resultData.error, value?.error, previous?.error, "")),
+    error: displayText(firstDefined(task.error, resultData.error, value?.error, previous?.error, "")),
     progressCurrent: Number(firstDefined(
       task.progress_current,
       task.progress?.current,
@@ -217,7 +223,7 @@ function normalizeEvents(value) {
       key: String(firstDefined(event.id, event.event_id, `${event.created_at || event.timestamp || "event"}-${index}`)),
       createdAt: String(firstDefined(event.created_at, event.timestamp, event.time, "")),
       level: String(firstDefined(event.level, event.severity, event.type, "info")).toLowerCase(),
-      message: String(firstDefined(
+      message: displayText(firstDefined(
         event.message,
         event.text,
         event.detail?.message,
@@ -734,6 +740,10 @@ export default function OpenAiSmsModal({
               <span><Smartphone size={18} /></span>
               <div><b>HeroSMS 自动抢号并接收 OpenAI 短信</b><small>价格超过上限不会购买；每个账号均显示独立执行结果。</small></div>
               <StatusBadge status="active">Key 已配置</StatusBadge>
+            </div>
+            <div className="inline-alert">
+              <KeyRound size={15} />
+              <span>账号没有密码时，会先从原注册邮箱读取登录 OTP；进入 OpenAI 手机号验证页后，才使用 HeroSMS 号码并读取短信 OTP。两类验证码相互独立。</span>
             </div>
             {!serviceReady && <div className="inline-alert error"><AlertTriangle size={15} /><span>{settings?.recovery_error || "OpenAI 自动接码服务尚未就绪"}</span></div>}
             <section className="openai-sms-country-picker" aria-busy={loadingCountries}>
