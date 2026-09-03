@@ -38,7 +38,7 @@
   "dependencies": {
     "better-sqlite3": "^11.8.1",
     "dotenv": "^16.4.7",
-    "express": "^4.21.2",
+    "express": "^5.2.1",
     "imapflow": "1.4.8",
     "lucide-react": "^0.468.0",
     "pg": "^8.22.0",
